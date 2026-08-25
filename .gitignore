@@ -1,0 +1,9 @@
+data/*
+!data/.gitkeep
+run-logs/
+.env
+*.exe
+*.exe~
+*.log
+*.pid
+*.key
