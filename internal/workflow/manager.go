@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,6 +41,7 @@ type StartInput struct {
 	AdminToken        string
 	UserTokens        []string
 	TeamOverride      string
+	SeatType          string
 	Settings          model.Settings
 	RefreshAdminToken func(context.Context) (string, error)
 }
@@ -49,6 +51,14 @@ func NewManager(history HistoryStore) *Manager {
 }
 
 func (m *Manager) Start(input StartInput) (model.Job, error) {
+	return m.StartOperation(input, "full")
+}
+
+func (m *Manager) StartOperation(input StartInput, operation string) (model.Job, error) {
+	stepKeys, ok := operationSteps(operation)
+	if !ok {
+		return model.Job{}, errors.New("不支持的任务类型")
+	}
 	admin, err := DecodeUserInfo(input.AdminToken)
 	if err != nil {
 		return model.Job{}, fmt.Errorf("母号 AT 无效: %w", err)
@@ -60,6 +70,11 @@ func (m *Manager) Start(input StartInput) (model.Job, error) {
 	if teamID == "" {
 		return model.Job{}, errors.New("无法从母号 AT 读取团队 ID，请手动填写")
 	}
+	seatType := strings.TrimSpace(input.SeatType)
+	if (operation == "full" || operation == "enter") && seatType != "default" && seatType != "prolite" {
+		return model.Job{}, errors.New("邀请席位类型只能选择 default（Standard）或 prolite（Premium/5x）")
+	}
+	input.SeatType = seatType
 	client, err := NewClient(input.Settings)
 	if err != nil {
 		return model.Job{}, err
@@ -81,7 +96,7 @@ func (m *Manager) Start(input StartInput) (model.Job, error) {
 			}
 		}
 		users = append(users, tokenUser{token: token, info: info, err: parseErr})
-		result := model.AccountResult{Index: index + 1, User: info, Status: "queued", Steps: newSteps()}
+		result := model.AccountResult{Index: index + 1, User: info, Status: "queued", Steps: newSteps(stepKeys)}
 		if parseErr != nil {
 			result.Status, result.Error = "failed", parseErr.Error()
 			result.User.Email = fmt.Sprintf("第 %d 行", index+1)
@@ -90,7 +105,7 @@ func (m *Manager) Start(input StartInput) (model.Job, error) {
 	}
 	id := strconv.FormatInt(time.Now().UnixMilli(), 36) + "-" + strconv.FormatUint(m.counter.Add(1), 36)
 	ctx, cancel := context.WithCancel(context.Background())
-	job := model.Job{ID: id, Status: "queued", TeamAccountID: teamID, Admin: admin, Total: len(users), Results: results, CreatedAt: time.Now()}
+	job := model.Job{ID: id, Operation: operation, Status: "queued", TeamAccountID: teamID, Admin: admin, Total: len(users), Results: results, CreatedAt: time.Now()}
 	record := &jobRecord{job: job, cancel: cancel}
 	m.mu.Lock()
 	m.jobs[id] = record
@@ -100,13 +115,28 @@ func (m *Manager) Start(input StartInput) (model.Job, error) {
 	return cloneJob(job), nil
 }
 
-func newSteps() []model.Step {
-	return []model.Step{
-		{Key: "invite", Name: "邀请加入团队", Status: "pending"},
-		{Key: "accept", Name: "接受邀请", Status: "pending"},
-		{Key: "transfer", Name: "合并个人空间", Status: "pending"},
-		{Key: "kick", Name: "移出团队", Status: "pending"},
+func operationSteps(operation string) ([]string, bool) {
+	switch operation {
+	case "full":
+		return []string{"invite", "accept", "transfer", "kick"}, true
+	case "enter":
+		return []string{"invite", "accept"}, true
+	case "transfer":
+		return []string{"transfer"}, true
+	case "kick":
+		return []string{"kick"}, true
+	default:
+		return nil, false
 	}
+}
+
+func newSteps(keys []string) []model.Step {
+	names := map[string]string{"invite": "邀请加入团队", "accept": "接受邀请", "transfer": "合并个人空间", "kick": "移出团队"}
+	steps := make([]model.Step, 0, len(keys))
+	for _, key := range keys {
+		steps = append(steps, model.Step{Key: key, Name: names[key], Status: "pending"})
+	}
+	return steps
 }
 
 func (m *Manager) run(ctx context.Context, record *jobRecord, client *Client, input StartInput, users []tokenUser) {
@@ -148,9 +178,15 @@ func (m *Manager) run(ctx context.Context, record *jobRecord, client *Client, in
 		}
 	})
 	job := m.snapshot(record)
-	entry := model.HistoryEntry{ID: job.ID, Status: job.Status, TeamAccountID: job.TeamAccountID, AdminEmail: job.Admin.Email, Total: job.Total, Succeeded: job.Succeeded, Failed: job.Failed, CreatedAt: job.CreatedAt, CompletedAt: completed}
+	entry := model.HistoryEntry{ID: job.ID, Operation: job.Operation, Status: job.Status, TeamAccountID: job.TeamAccountID, AdminEmail: job.Admin.Email, Total: job.Total, Succeeded: job.Succeeded, Failed: job.Failed, CreatedAt: job.CreatedAt, CompletedAt: completed}
 	for _, result := range job.Results {
-		entry.Results = append(entry.Results, model.HistoryResult{Email: result.User.Email, Status: result.Status, Error: result.Error})
+		historyResult := model.HistoryResult{UserID: result.User.UserID, Email: result.User.Email, Status: result.Status, Error: result.Error}
+		for _, step := range result.Steps {
+			if step.Status == "completed" {
+				historyResult.CompletedSteps = append(historyResult.CompletedSteps, step.Key)
+			}
+		}
+		entry.Results = append(entry.Results, historyResult)
 	}
 	_ = m.history.AddHistory(entry)
 }
@@ -168,42 +204,23 @@ func (m *Manager) runUser(ctx context.Context, record *jobRecord, client *Client
 	started := time.Now()
 	m.update(record, func(job *model.Job) { job.Results[index].Status, job.Results[index].StartedAt = "running", &started })
 	invited := false
-	steps := []struct {
-		key   string
-		delay int
-		call  func(context.Context) (Response, error)
-	}{
-		{"invite", input.Settings.InviteDelaySeconds, func(c context.Context) (Response, error) {
-			return m.callAdmin(c, input, adminToken, func(token string) (Response, error) {
-				return client.Invite(c, token, record.job.TeamAccountID, user.info.Email)
-			})
-		}},
-		{"accept", input.Settings.AcceptDelaySeconds, func(c context.Context) (Response, error) {
-			return client.Accept(c, user.token, record.job.TeamAccountID, user.info.UserID)
-		}},
-		{"transfer", input.Settings.TransferDelaySeconds, func(c context.Context) (Response, error) {
-			return client.Transfer(c, user.token, record.job.TeamAccountID)
-		}},
-		{"kick", 0, func(c context.Context) (Response, error) {
-			return m.callAdmin(c, input, adminToken, func(token string) (Response, error) {
-				return client.Kick(c, token, record.job.TeamAccountID, user.info.UserID)
-			})
-		}},
-	}
-	for stepIndex, item := range steps {
+	for stepIndex, step := range record.job.Results[index].Steps {
+		item := m.stepCall(step.Key, record, client, input, user, adminToken)
 		if ctx.Err() != nil {
 			m.markCancelled(record, index)
 			return true
 		}
 		m.startStep(record, index, stepIndex)
-		response, err := item.call(ctx)
+		response, err := m.callStepWithRetry(ctx, input.Settings, item.call, func(retry, total, interval int) {
+			m.markStepRetry(record, index, stepIndex, retry, total, interval)
+		})
 		if err != nil {
 			if ctx.Err() != nil {
 				m.markCancelled(record, index)
 				return true
 			}
 			m.failStep(record, index, stepIndex, response.StatusCode, err.Error())
-			if invited && input.Settings.AutoCleanup && item.key != "kick" && ctx.Err() == nil {
+			if record.job.Operation == "full" && invited && input.Settings.AutoCleanup && item.key != "kick" && ctx.Err() == nil {
 				m.cleanupAfterFailure(ctx, record, client, input, adminToken, index, user.info.UserID)
 			}
 			m.finishUser(record, index, false, err.Error())
@@ -222,6 +239,37 @@ func (m *Manager) runUser(ctx context.Context, record *jobRecord, client *Client
 	return false
 }
 
+type workflowStepCall struct {
+	key   string
+	delay int
+	call  func(context.Context) (Response, error)
+}
+
+func (m *Manager) stepCall(key string, record *jobRecord, client *Client, input StartInput, user tokenUser, adminToken *string) workflowStepCall {
+	switch key {
+	case "invite":
+		return workflowStepCall{key: key, delay: input.Settings.InviteDelaySeconds, call: func(c context.Context) (Response, error) {
+			return m.callAdmin(c, input, adminToken, func(token string) (Response, error) {
+				return client.Invite(c, token, record.job.TeamAccountID, user.info.Email, input.SeatType)
+			})
+		}}
+	case "accept":
+		return workflowStepCall{key: key, delay: input.Settings.AcceptDelaySeconds, call: func(c context.Context) (Response, error) {
+			return client.Accept(c, user.token, record.job.TeamAccountID, user.info.UserID)
+		}}
+	case "transfer":
+		return workflowStepCall{key: key, delay: input.Settings.TransferDelaySeconds, call: func(c context.Context) (Response, error) {
+			return client.Transfer(c, user.token, record.job.TeamAccountID)
+		}}
+	default:
+		return workflowStepCall{key: "kick", call: func(c context.Context) (Response, error) {
+			return m.callAdmin(c, input, adminToken, func(token string) (Response, error) {
+				return client.Kick(c, token, record.job.TeamAccountID, user.info.UserID)
+			})
+		}}
+	}
+}
+
 func (m *Manager) callAdmin(ctx context.Context, input StartInput, adminToken *string, call func(string) (Response, error)) (Response, error) {
 	response, err := call(*adminToken)
 	if err == nil || response.StatusCode != http.StatusUnauthorized || input.RefreshAdminToken == nil {
@@ -235,11 +283,36 @@ func (m *Manager) callAdmin(ctx context.Context, input StartInput, adminToken *s
 	return call(*adminToken)
 }
 
+func (m *Manager) callStepWithRetry(ctx context.Context, settings model.Settings, call func(context.Context) (Response, error), onRetry func(retry, total, interval int)) (Response, error) {
+	var response Response
+	var err error
+	for attempt := 0; ; attempt++ {
+		response, err = call(ctx)
+		if err == nil || !isRetryableConnectionError(err) || attempt >= settings.NetworkRetryCount {
+			if err != nil && isRetryableConnectionError(err) && attempt > 0 {
+				err = fmt.Errorf("连接中断，自动重试 %d 次后仍失败: %w", attempt, err)
+			}
+			return response, err
+		}
+		retry := attempt + 1
+		if onRetry != nil {
+			onRetry(retry, settings.NetworkRetryCount, settings.NetworkRetryInterval)
+		}
+		if settings.NetworkRetryInterval > 0 && !sleepContext(ctx, time.Duration(settings.NetworkRetryInterval)*time.Second) {
+			return Response{}, ctx.Err()
+		}
+	}
+}
+
 func (m *Manager) cleanupAfterFailure(ctx context.Context, record *jobRecord, client *Client, input StartInput, adminToken *string, index int, userID string) {
 	stepIndex := 3
 	m.startStep(record, index, stepIndex)
-	response, err := m.callAdmin(ctx, input, adminToken, func(token string) (Response, error) {
-		return client.Kick(ctx, token, record.job.TeamAccountID, userID)
+	response, err := m.callStepWithRetry(ctx, input.Settings, func(callCtx context.Context) (Response, error) {
+		return m.callAdmin(callCtx, input, adminToken, func(token string) (Response, error) {
+			return client.Kick(callCtx, token, record.job.TeamAccountID, userID)
+		})
+	}, func(retry, total, interval int) {
+		m.markStepRetry(record, index, stepIndex, retry, total, interval)
 	})
 	if err != nil {
 		m.failStep(record, index, stepIndex, response.StatusCode, "自动清理失败: "+err.Error())
@@ -266,6 +339,13 @@ func (m *Manager) startStep(record *jobRecord, resultIndex, stepIndex int) {
 		result := &job.Results[resultIndex]
 		result.CurrentStep = result.Steps[stepIndex].Key
 		result.Steps[stepIndex].Status, result.Steps[stepIndex].StartedAt = "running", &now
+	})
+}
+
+func (m *Manager) markStepRetry(record *jobRecord, resultIndex, stepIndex, retry, total, interval int) {
+	m.update(record, func(job *model.Job) {
+		step := &job.Results[resultIndex].Steps[stepIndex]
+		step.Message = fmt.Sprintf("网络连接中断，%d 秒后进行第 %d/%d 次重试", interval, retry, total)
 	})
 }
 

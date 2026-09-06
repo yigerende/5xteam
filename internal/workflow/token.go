@@ -11,6 +11,83 @@ import (
 	"chatgpt-space-merge/internal/model"
 )
 
+// ExtractAccessToken accepts either a raw JWT or a Session JSON object (the
+// format exported by chatgpt.com/sub2api). It deliberately only returns the
+// accessToken/access_token field and never persists or logs the surrounding
+// session payload.
+func ExtractAccessToken(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.Count(value, ".") == 2 && !strings.HasPrefix(value, "{") && !strings.HasPrefix(value, "[") {
+		return value
+	}
+	var parsed any
+	if json.Unmarshal([]byte(value), &parsed) != nil {
+		return value
+	}
+	if token := findAccessToken(parsed); token != "" {
+		return token
+	}
+	return value
+}
+
+func ExtractRefreshToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || (!strings.HasPrefix(value, "{") && !strings.HasPrefix(value, "[")) {
+		return value
+	}
+	var parsed any
+	if json.Unmarshal([]byte(value), &parsed) != nil {
+		return value
+	}
+	return findCredentialToken(parsed, []string{"refreshToken", "refresh_token"})
+}
+
+func findCredentialToken(value any, keys []string) string {
+	switch item := value.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if token, ok := item[key].(string); ok && strings.TrimSpace(token) != "" {
+				return strings.TrimSpace(token)
+			}
+		}
+		for _, child := range item {
+			if token := findCredentialToken(child, keys); token != "" {
+				return token
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if token := findCredentialToken(child, keys); token != "" {
+				return token
+			}
+		}
+	}
+	return ""
+}
+
+func findAccessToken(value any) string {
+	switch item := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"accessToken", "access_token"} {
+			if token, ok := item[key].(string); ok && strings.TrimSpace(token) != "" {
+				return strings.TrimSpace(token)
+			}
+		}
+		for _, child := range item {
+			if token := findAccessToken(child); token != "" {
+				return token
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if token := findAccessToken(child); token != "" {
+				return token
+			}
+		}
+	}
+	return ""
+}
+
 func DecodeUserInfo(token string) (model.UserInfo, error) {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 3 {

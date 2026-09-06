@@ -1,5 +1,10 @@
 data/*
 !data/.gitkeep
+data-qa-mail/
+accounts-response.json
+__pycache__/
+internal/__pycache__/
+frontend/node_modules/
 run-logs/
 .env
 *.exe

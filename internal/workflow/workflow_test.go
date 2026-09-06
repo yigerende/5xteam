@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,6 +38,17 @@ func TestDecodeUserInfo(t *testing.T) {
 	}
 }
 
+func TestExtractAccessTokenFromSessionJSON(t *testing.T) {
+	token := makeToken("user-1", "account-1", "one@example.com")
+	input := `{"user":{"email":"one@example.com"},"credentials":{"accessToken":"` + token + `"}}`
+	if got := ExtractAccessToken(input); got != token {
+		t.Fatalf("extracted token mismatch: %q", got)
+	}
+	if got := ExtractAccessToken(token); got != token {
+		t.Fatalf("raw token changed: %q", got)
+	}
+}
+
 func TestClientRequestShape(t *testing.T) {
 	var mu sync.Mutex
 	var calls []string
@@ -44,6 +56,21 @@ func TestClientRequestShape(t *testing.T) {
 		accountID := r.Header.Get("chatgpt-account-id")
 		if r.Header.Get("Authorization") == "" || accountID != "team-1" {
 			t.Errorf("missing auth headers")
+		}
+		if r.URL.Path == "/accounts/team-1/invites" {
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode invite body: %v", err)
+			}
+			if body["seat_type"] != "prolite" || body["role"] != "standard-user" || body["resend_emails"] != true {
+				t.Errorf("unexpected invite body: %#v", body)
+			}
+			if _, ok := body["flow_id"].(string); !ok {
+				t.Errorf("missing flow_id: %#v", body)
+			}
+			if _, ok := body["submission_id"].(string); !ok {
+				t.Errorf("missing submission_id: %#v", body)
+			}
 		}
 		mu.Lock()
 		calls = append(calls, r.Method+" "+r.URL.Path)
@@ -60,7 +87,7 @@ func TestClientRequestShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, err = client.Invite(ctx, "admin", "team-1", "one@example.com"); err != nil {
+	if _, err = client.Invite(ctx, "admin", "team-1", "one@example.com", "prolite"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = client.Accept(ctx, "user", "team-1", "user-1"); err != nil {
@@ -108,6 +135,70 @@ func TestTransferUsesWorkspaceAccountContext(t *testing.T) {
 	}
 }
 
+func TestQueryOpenAIResetCreditsUsesCodexHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer access-token" || r.Header.Get("chatgpt-account-id") != "acct-1" {
+			t.Fatalf("missing quota auth headers: auth=%q account=%q", r.Header.Get("Authorization"), r.Header.Get("chatgpt-account-id"))
+		}
+		if r.Header.Get("openai-beta") != "codex-1" || r.Header.Get("originator") != "Codex Desktop" {
+			t.Fatalf("missing Codex headers: beta=%q originator=%q", r.Header.Get("openai-beta"), r.Header.Get("originator"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/wham/usage" {
+			_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":7}}`))
+			return
+		}
+		if r.URL.Path == "/wham/rate-limit-reset-credits" {
+			_, _ = w.Write([]byte(`{"availableCount":2,"credits":[{"status":"available"},{"status":"redeemed"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = server.URL
+	client, err := NewClient(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quota, err := client.QueryOpenAIResetCredits(context.Background(), "access-token", "acct-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quota.AvailableCount != 2 || quota.FetchedAt.IsZero() {
+		t.Fatalf("unexpected quota: %+v", quota)
+	}
+}
+
+func TestQueryOpenAIResetCreditsHonorsAuthoritativeZeroDetail(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/wham/usage" {
+			_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":5}}`))
+			return
+		}
+		if r.URL.Path == "/wham/rate-limit-reset-credits" {
+			_, _ = w.Write([]byte(`[{"reset_type":"codex_rate_limits","status":"redeemed"}]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = server.URL
+	client, err := NewClient(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quota, err := client.QueryOpenAIResetCredits(context.Background(), "access-token", "acct-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quota.AvailableCount != 0 {
+		t.Fatalf("detail endpoint should override usage fallback with zero, got %d", quota.AvailableCount)
+	}
+}
+
 func TestProxyConnectivity(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Host != "target.invalid" {
@@ -119,6 +210,54 @@ func TestProxyConnectivity(t *testing.T) {
 	result := TestProxy(context.Background(), proxy.URL, "http://target.invalid/backend-api", 2*time.Second)
 	if !result.Reachable || result.HTTPStatus != http.StatusNoContent {
 		t.Fatalf("unexpected proxy result: %+v", result)
+	}
+}
+
+func TestGlobalProxyIsUsedForChatGPTRequests(t *testing.T) {
+	var calls atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Host != "127.0.0.1:65534" || r.URL.Path != "/backend-api/accounts/team-1/invites" {
+			t.Errorf("unexpected proxied target: %s", r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"ok"}`))
+	}))
+	defer proxy.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = "http://127.0.0.1:65534/backend-api"
+	settings.ProxyURL = proxy.URL
+	client, err := NewClient(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Invite(context.Background(), "admin", "team-1", "one@example.com", "default"); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("proxy calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestGlobalProxyIsUsedForOpenAIOAuthRefresh(t *testing.T) {
+	var calls atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Host != "127.0.0.1:65533" || r.URL.Path != "/oauth/token" {
+			t.Errorf("unexpected proxied OAuth target: %s", r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"new-at","refresh_token":"new-rt","expires_in":3600}`))
+	}))
+	defer proxy.Close()
+	settings := model.DefaultSettings()
+	settings.ProxyURL = proxy.URL
+	tokens, err := refreshOAuthTokensAt(context.Background(), "http://127.0.0.1:65533/oauth/token", "old-rt", settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 || tokens.AccessToken != "new-at" || tokens.RefreshToken != "new-rt" {
+		t.Fatalf("unexpected OAuth result: calls=%d tokens=%+v", calls.Load(), tokens)
 	}
 }
 
@@ -146,6 +285,61 @@ func TestNormalizeProxyAddress(t *testing.T) {
 	}
 	if _, err := NormalizeProxyAddress("host:bad:user:pass"); err == nil {
 		t.Fatal("expected invalid port error")
+	}
+}
+
+func TestConnectionClosedRetriesCurrentStep(t *testing.T) {
+	settings := model.DefaultSettings()
+	settings.NetworkRetryCount = 2
+	settings.NetworkRetryInterval = 0
+	calls := 0
+	retries := 0
+	manager := &Manager{}
+	response, err := manager.callStepWithRetry(context.Background(), settings, func(context.Context) (Response, error) {
+		calls++
+		if calls < 3 {
+			return Response{}, errors.New("网络请求失败: curl: (56) Connection closed abruptly")
+		}
+		return Response{StatusCode: http.StatusOK}, nil
+	}, func(retry, total, interval int) {
+		retries++
+		if retry != retries || total != 2 || interval != 0 {
+			t.Fatalf("unexpected retry callback: retry=%d total=%d interval=%d", retry, total, interval)
+		}
+	})
+	if err != nil || response.StatusCode != http.StatusOK || calls != 3 || retries != 2 {
+		t.Fatalf("response=%+v err=%v calls=%d retries=%d", response, err, calls, retries)
+	}
+}
+
+func TestBusinessErrorDoesNotRetry(t *testing.T) {
+	settings := model.DefaultSettings()
+	settings.NetworkRetryCount = 5
+	settings.NetworkRetryInterval = 0
+	calls := 0
+	manager := &Manager{}
+	_, err := manager.callStepWithRetry(context.Background(), settings, func(context.Context) (Response, error) {
+		calls++
+		return Response{StatusCode: http.StatusUnprocessableEntity}, errors.New("HTTP 422: invalid request")
+	}, nil)
+	if err == nil || calls != 1 {
+		t.Fatalf("err=%v calls=%d, want one call", err, calls)
+	}
+}
+
+func TestCancellingStopsRetryWait(t *testing.T) {
+	settings := model.DefaultSettings()
+	settings.NetworkRetryCount = 2
+	settings.NetworkRetryInterval = 30
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	manager := &Manager{}
+	_, err := manager.callStepWithRetry(ctx, settings, func(context.Context) (Response, error) {
+		calls++
+		return Response{}, errors.New("curl: (56) Connection closed abruptly")
+	}, func(_, _, _ int) { cancel() })
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
 	}
 }
 
@@ -225,7 +419,7 @@ func TestManagerRunsCompleteWorkflow(t *testing.T) {
 	settings.InviteDelaySeconds, settings.AcceptDelaySeconds, settings.TransferDelaySeconds = 0, 0, 0
 	history := &memoryHistory{}
 	manager := NewManager(history)
-	job, err := manager.Start(StartInput{AdminToken: makeToken("admin-user", "team-1", "admin@example.com"), UserTokens: []string{makeToken("child-1", "personal-1", "child@example.com")}, Settings: settings})
+	job, err := manager.Start(StartInput{AdminToken: makeToken("admin-user", "team-1", "admin@example.com"), UserTokens: []string{makeToken("child-1", "personal-1", "child@example.com")}, SeatType: "default", Settings: settings})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +449,69 @@ func TestManagerRunsCompleteWorkflow(t *testing.T) {
 	}
 }
 
+func TestManagerRunsSplitOperations(t *testing.T) {
+	tests := []struct {
+		operation string
+		seatType  string
+		wantCalls []string
+	}{
+		{operation: "enter", seatType: "default", wantCalls: []string{"POST /accounts/team-1/invites", "POST /accounts/team-1/invites/accept"}},
+		{operation: "transfer", wantCalls: []string{"POST /accounts/transfer"}},
+		{operation: "kick", wantCalls: []string{"DELETE /accounts/team-1/users/child"}},
+	}
+	for _, test := range tests {
+		t.Run(test.operation, func(t *testing.T) {
+			var calls []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls = append(calls, r.Method+" "+r.URL.Path)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			settings := model.DefaultSettings()
+			settings.BaseURL = server.URL
+			settings.InviteDelaySeconds, settings.AcceptDelaySeconds, settings.TransferDelaySeconds = 0, 0, 0
+			manager := NewManager(&memoryHistory{})
+			job, err := manager.StartOperation(StartInput{
+				AdminToken: makeToken("admin", "team-1", "admin@example.com"),
+				UserTokens: []string{makeToken("child", "personal", "child@example.com")},
+				SeatType:   test.seatType,
+				Settings:   settings,
+			}, test.operation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			completed := waitForJob(t, manager, job.ID)
+			if completed.Status != "completed" || completed.Operation != test.operation {
+				t.Fatalf("unexpected job: %+v", completed)
+			}
+			if got, want := strings.Join(calls, "|"), strings.Join(test.wantCalls, "|"); got != want {
+				t.Fatalf("calls = %q, want %q", got, want)
+			}
+			if len(completed.Results[0].Steps) != len(test.wantCalls) {
+				t.Fatalf("steps = %+v", completed.Results[0].Steps)
+			}
+		})
+	}
+}
+
+func TestManagerRequiresSeatTypeForInvitationTask(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = server.URL
+	manager := NewManager(&memoryHistory{})
+	_, err := manager.Start(StartInput{
+		AdminToken: makeToken("admin", "team-1", "admin@example.com"),
+		UserTokens: []string{makeToken("child", "personal", "child@example.com")},
+		Settings:   settings,
+	})
+	if err == nil || !strings.Contains(err.Error(), "邀请席位类型") {
+		t.Fatalf("expected task-level seat type validation, got %v", err)
+	}
+}
+
 func TestManagerRunsUsersSerially(t *testing.T) {
 	var active atomic.Int32
 	var maxActive atomic.Int32
@@ -278,6 +535,7 @@ func TestManagerRunsUsersSerially(t *testing.T) {
 	job, err := manager.Start(StartInput{
 		AdminToken: makeToken("admin-user", "team-1", "admin@example.com"),
 		UserTokens: []string{makeToken("child-1", "personal-1", "one@example.com"), makeToken("child-2", "personal-2", "two@example.com")},
+		SeatType:   "default",
 		Settings:   settings,
 	})
 	if err != nil {
@@ -310,7 +568,7 @@ func TestManagerCleansUpAfterTransferFailure(t *testing.T) {
 	settings.BaseURL = server.URL
 	settings.InviteDelaySeconds, settings.AcceptDelaySeconds, settings.TransferDelaySeconds = 0, 0, 0
 	manager := NewManager(&memoryHistory{})
-	job, err := manager.Start(StartInput{AdminToken: makeToken("admin", "team-1", "admin@example.com"), UserTokens: []string{makeToken("child", "personal", "child@example.com")}, Settings: settings})
+	job, err := manager.Start(StartInput{AdminToken: makeToken("admin", "team-1", "admin@example.com"), UserTokens: []string{makeToken("child", "personal", "child@example.com")}, SeatType: "default", Settings: settings})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +590,7 @@ func TestManagerRejectsDuplicateUser(t *testing.T) {
 	history := &memoryHistory{}
 	manager := NewManager(history)
 	token := makeToken("child", "personal", "child@example.com")
-	job, err := manager.Start(StartInput{AdminToken: makeToken("admin", "team-1", "admin@example.com"), UserTokens: []string{token, token}, Settings: settings})
+	job, err := manager.Start(StartInput{AdminToken: makeToken("admin", "team-1", "admin@example.com"), UserTokens: []string{token, token}, SeatType: "default", Settings: settings})
 	if err != nil {
 		t.Fatal(err)
 	}

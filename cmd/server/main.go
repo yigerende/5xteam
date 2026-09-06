@@ -27,6 +27,7 @@ func main() {
 	if err != nil {
 		fatal("打开数据存储失败", err)
 	}
+	defer dataStore.Close()
 	manager := workflow.NewManager(dataStore)
 	api, err := httpapi.New(dataStore, manager)
 	if err != nil {
@@ -35,6 +36,7 @@ func main() {
 	server := &http.Server{Addr: addr, Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	api.StartBackground(ctx)
 	go func() {
 		<-ctx.Done()
 		shutdown, done := context.WithTimeout(context.Background(), 10*time.Second)

@@ -35,19 +35,10 @@ func refreshOAuthTokensAt(ctx context.Context, endpoint, refreshToken string, se
 	if refreshToken == "" {
 		return OAuthTokenSet{}, errors.New("母号未保存 Refresh Token")
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if strings.TrimSpace(settings.ProxyURL) != "" {
-		proxy, err := ValidateProxyURL(settings.ProxyURL)
-		if err != nil {
-			return OAuthTokenSet{}, err
-		}
-		transport.Proxy = http.ProxyURL(proxy)
+	client, err := newOpenAIHTTPClient(settings)
+	if err != nil {
+		return OAuthTokenSet{}, err
 	}
-	timeout := time.Duration(settings.RequestTimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = 45 * time.Second
-	}
-	client := &http.Client{Transport: transport, Timeout: timeout}
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"client_id":     {openAIClientID},

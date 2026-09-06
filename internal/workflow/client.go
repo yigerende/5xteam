@@ -23,11 +23,12 @@ import (
 const maxResponseBytes = 64 << 10
 
 type Client struct {
-	baseURL  string
-	settings model.Settings
-	http     *http.Client
-	deviceID string
-	python   string
+	baseURL   string
+	settings  model.Settings
+	http      *http.Client
+	deviceID  string
+	sessionID string
+	python    string
 }
 
 type Response struct {
@@ -40,6 +41,24 @@ func NewClient(settings model.Settings) (*Client, error) {
 	if err != nil || base.Host == "" || (base.Scheme != "https" && !(base.Scheme == "http" && isLoopbackHost(base.Hostname()))) {
 		return nil, errors.New("API 基址必须使用 HTTPS；仅本机测试地址允许 HTTP")
 	}
+	httpClient, err := newOpenAIHTTPClient(settings)
+	if err != nil {
+		return nil, err
+	}
+	pythonPath, _ := exec.LookPath("python")
+	return &Client{
+		baseURL: strings.TrimRight(settings.BaseURL, "/"), settings: settings,
+		http:      httpClient,
+		deviceID:  newDeviceID(),
+		sessionID: newDeviceID(),
+		python:    pythonPath,
+	}, nil
+}
+
+// newOpenAIHTTPClient is the single transport constructor for OpenAI and
+// ChatGPT requests. A configured global proxy is therefore never optional at
+// individual call sites.
+func newOpenAIHTTPClient(settings model.Settings) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if strings.TrimSpace(settings.ProxyURL) != "" {
 		proxy, err := ValidateProxyURL(settings.ProxyURL)
@@ -48,13 +67,11 @@ func NewClient(settings model.Settings) (*Client, error) {
 		}
 		transport.Proxy = http.ProxyURL(proxy)
 	}
-	pythonPath, _ := exec.LookPath("python")
-	return &Client{
-		baseURL: strings.TrimRight(settings.BaseURL, "/"), settings: settings,
-		http:     &http.Client{Transport: transport, Timeout: time.Duration(settings.RequestTimeoutSeconds) * time.Second},
-		deviceID: newDeviceID(),
-		python:   pythonPath,
-	}, nil
+	timeout := time.Duration(settings.RequestTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 45 * time.Second
+	}
+	return &http.Client{Transport: transport, Timeout: timeout}, nil
 }
 
 func newDeviceID() string {
@@ -160,8 +177,17 @@ func isLoopbackHost(host string) bool {
 	return host == "127.0.0.1" || host == "localhost" || host == "::1"
 }
 
-func (c *Client) Invite(ctx context.Context, adminToken, teamID, email string) (Response, error) {
-	body := map[string]any{"email_addresses": []string{email}, "role": c.settings.Role, "seat_type": c.settings.SeatType, "resend_emails": true}
+func (c *Client) Invite(ctx context.Context, adminToken, teamID, email, seatType string) (Response, error) {
+	flowID := newDeviceID()
+	submissionID := newDeviceID()
+	body := map[string]any{
+		"email_addresses": []string{email},
+		"flow_id":         flowID,
+		"resend_emails":   true,
+		"role":            c.settings.Role,
+		"seat_type":       seatType,
+		"submission_id":   submissionID,
+	}
 	return c.do(ctx, http.MethodPost, "/accounts/"+url.PathEscape(teamID)+"/invites", adminToken, teamID, body)
 }
 
@@ -187,6 +213,293 @@ func (c *Client) Kick(ctx context.Context, adminToken, teamID, userID string) (R
 
 func (c *Client) CheckAccount(ctx context.Context, token, accountID string) (Response, error) {
 	return c.do(ctx, http.MethodGet, "/me", token, accountID, nil)
+}
+
+// TeamSeatCapacity reads the Team member and invitation endpoints and
+// normalizes the seat_type values used by ChatGPT (default/standard and
+// prolite/premium). The endpoint response has varied between deployments, so
+// totals/remaining are accepted from several common field names; when only
+// records are returned, used is counted from those records.
+func (c *Client) TeamSeatCapacity(ctx context.Context, token, teamID string) (model.AdminSeatCapacity, error) {
+	var out model.AdminSeatCapacity
+	var lastErr error
+	// The Admin > Members page uses the subscription endpoint as the source of
+	// truth for purchased and available seats. Its seat_capacity entries contain
+	// the exact split between default (Standard) and prolite (Premium/5x).
+	if subscription, err := c.getJSON(ctx, "/subscriptions?account_id="+url.QueryEscape(teamID), token, teamID); err == nil {
+		parseSubscriptionCapacity(&out, subscription)
+		if out.Standard.Total > 0 || out.Premium.Total > 0 || out.Standard.Remaining > 0 || out.Premium.Remaining > 0 {
+			out.FetchedAt = time.Now()
+			return out, nil
+		}
+	} else {
+		lastErr = err
+	}
+	// Fallback for older workspaces/API responses that do not expose
+	// subscriptions: derive used counts from members and pending invites.
+	users, err := c.getJSON(ctx, "/accounts/"+url.PathEscape(teamID)+"/users", token, teamID)
+	if err != nil {
+		lastErr = err
+		// The members list can be blocked independently of the seat summary
+		// endpoint. Try the dedicated seat-type count endpoint before failing.
+		if counts, countsErr := c.getJSON(ctx, "/accounts/"+url.PathEscape(teamID)+"/users/seat_type_counts", token, teamID); countsErr == nil {
+			parseSeatTypeCounts(&out, counts)
+			for _, b := range []*model.AdminSeatBucket{&out.Standard, &out.Premium} {
+				if b.Total == 0 {
+					b.Total = b.Used
+				}
+				if b.Remaining == 0 && b.Total > b.Used {
+					b.Remaining = b.Total - b.Used
+				}
+			}
+			out.FetchedAt = time.Now()
+			return out, nil
+		} else {
+			lastErr = countsErr
+		}
+		return out, lastErr
+	}
+	invites, err := c.getJSON(ctx, "/accounts/"+url.PathEscape(teamID)+"/invites", token, teamID)
+	if err != nil {
+		lastErr = err
+		// We can still return subscription-derived capacity when invitations
+		// are unavailable; only the used count from pending invites is missing.
+		if out.Standard.Total > 0 || out.Premium.Total > 0 {
+			for _, b := range []*model.AdminSeatBucket{&out.Standard, &out.Premium} {
+				if b.Remaining == 0 && b.Total > b.Used {
+					b.Remaining = b.Total - b.Used
+				}
+			}
+			out.FetchedAt = time.Now()
+			return out, nil
+		}
+		return out, lastErr
+	}
+	userItems := jsonItems(users)
+	missingRole := 0
+	for _, item := range userItems {
+		role := strings.ToLower(strings.TrimSpace(fmt.Sprint(item["role"])))
+		if role == "account-owner" || role == "account-admin" || role == "admin" || role == "owner" {
+			continue
+		}
+		if role == "" {
+			missingRole++
+		}
+		bucket := seatBucket(item)
+		bucket.Used = 1
+		setSeatBucket(&out, bucket.Type, bucket)
+	}
+	// The current users endpoint omits role and includes the workspace owner
+	// in items. Preserve the established behavior of excluding that one admin.
+	if missingRole > 0 && out.Standard.Used > 0 {
+		out.Standard.Used--
+	}
+	for _, item := range jsonItems(invites) {
+		bucket := seatBucket(item)
+		bucket.Used = 1
+		setSeatBucket(&out, bucket.Type, bucket)
+	}
+	applySeatTotals(&out, users)
+	applySeatTotals(&out, invites)
+	// The members page exposes assigned seat types through this official
+	// endpoint. Use it only when the users/invites payload did not identify
+	// seat types, avoiding double-counting normal responses.
+	if out.Standard.Used == 0 && out.Premium.Used == 0 {
+		if counts, countsErr := c.getJSON(ctx, "/accounts/"+url.PathEscape(teamID)+"/users/seat_type_counts", token, teamID); countsErr == nil {
+			parseSeatTypeCounts(&out, counts)
+		}
+	}
+	for _, b := range []*model.AdminSeatBucket{&out.Standard, &out.Premium} {
+		if b.Remaining < 0 {
+			b.Remaining = 0
+		}
+		if b.Total == 0 && b.Used > 0 {
+			b.Total = b.Used
+		}
+		if b.Remaining == 0 && b.Total > b.Used {
+			b.Remaining = b.Total - b.Used
+		}
+	}
+	out.FetchedAt = time.Now()
+	return out, nil
+}
+
+func parseSeatTypeCounts(out *model.AdminSeatCapacity, value map[string]any) {
+	counts, _ := value["seat_type_counts"].(map[string]any)
+	if counts == nil {
+		return
+	}
+	out.Standard.Used = number(counts, "default")
+	out.Premium.Used = number(counts, "prolite")
+}
+
+func parseSubscriptionCapacity(out *model.AdminSeatCapacity, value map[string]any) {
+	entries, ok := value["seat_capacity"].([]any)
+	if !ok {
+		return
+	}
+	for _, raw := range entries {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ := strings.ToLower(strings.TrimSpace(fmt.Sprint(entry["type"])))
+		if typ == "prolite" || typ == "premium" || typ == "5x" {
+			typ = "premium"
+		} else if typ == "default" || typ == "standard" {
+			typ = "standard"
+		} else {
+			continue
+		}
+		bucket := &out.Standard
+		if typ == "premium" {
+			bucket = &out.Premium
+		}
+		bucket.Total = number(entry, "paid") + number(entry, "held")
+		bucket.Remaining = number(entry, "available")
+	}
+	if assigned, ok := value["assigned"].(map[string]any); ok {
+		out.Standard.Used = number(assigned, "default")
+		out.Premium.Used = number(assigned, "prolite")
+	}
+}
+
+func (c *Client) getJSON(ctx context.Context, path, token, accountID string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/admin/members?tab=members")
+	req.Header.Set("oai-client-build-number", "10352280")
+	req.Header.Set("oai-client-version", "prod-b3b60750c6e8740ba45b7a02b1a450a27240d14f")
+	req.Header.Set("oai-language", "en-US")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	req.Header.Set("Priority", "u=1, i")
+	req.Header.Set("Sec-CH-UA", `"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	req.Header.Set("Sec-CH-UA-Platform", `"Windows"`)
+	if c.sessionID != "" {
+		req.Header.Set("oai-session-id", c.sessionID)
+	}
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("chatgpt-account-id", accountID)
+	// ChatGPT's Team admin endpoints reject the abbreviated `Mozilla/5.0`
+	// user agent with an HTML 403 page.  Use the same complete browser UA as
+	// the protocol client (and as the Chrome-imprinted curl_cffi transport).
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
+	setOpenAITargetHeaders(req, path)
+	if c.deviceID != "" {
+		req.Header.Set("oai-device-id", c.deviceID)
+	}
+	var status int
+	var data []byte
+	if c.python != "" && strings.HasPrefix(c.baseURL, "https://") && strings.TrimSpace(c.settings.ProxyURL) != "" {
+		status, data, err = c.browserDo(ctx, req, nil)
+	} else {
+		var resp *http.Response
+		resp, err = c.http.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			status = resp.StatusCode
+			data, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+		}
+	}
+	if err != nil {
+		return nil, friendlyNetworkError(err)
+	}
+	if len(data) > maxResponseBytes {
+		data = data[:maxResponseBytes]
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, limitText(strings.TrimSpace(string(data)), 300))
+	}
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+type seatItem struct {
+	Type                   string
+	Used, Total, Remaining int
+}
+
+func jsonItems(value map[string]any) []map[string]any {
+	for _, key := range []string{"items", "users", "members", "invites", "account_invites"} {
+		if list, ok := value[key].([]any); ok {
+			out := make([]map[string]any, 0, len(list))
+			for _, raw := range list {
+				if item, ok := raw.(map[string]any); ok {
+					out = append(out, item)
+				}
+			}
+			return out
+		}
+	}
+	return nil
+}
+
+func seatBucket(item map[string]any) seatItem {
+	t := strings.ToLower(strings.TrimSpace(fmt.Sprint(item["seat_type"])))
+	if t == "" {
+		t = strings.ToLower(strings.TrimSpace(fmt.Sprint(item["seatType"])))
+	}
+	if t == "prolite" || t == "premium" || t == "5x" {
+		t = "premium"
+	} else {
+		t = "standard"
+	}
+	return seatItem{Type: t, Total: number(item, "total", "total_seats", "max_seats", "seat_count"), Remaining: number(item, "remaining", "remaining_seats", "available_seats")}
+}
+
+func setSeatBucket(out *model.AdminSeatCapacity, typ string, item seatItem) {
+	b := &out.Standard
+	if typ == "premium" {
+		b = &out.Premium
+	}
+	b.Used += item.Used
+	if item.Total > b.Total {
+		b.Total = item.Total
+	}
+	if item.Remaining > b.Remaining {
+		b.Remaining = item.Remaining
+	}
+}
+func applySeatTotals(out *model.AdminSeatCapacity, value map[string]any) {
+	for _, key := range []string{"standard", "default", "premium", "prolite", "standard_seats", "default_seats", "premium_seats", "prolite_seats", "seat_limits", "seat_capacity", "capacity", "seats"} {
+		if nested, ok := value[key].(map[string]any); ok {
+			if key == "seat_limits" || key == "seat_capacity" || key == "capacity" || key == "seats" {
+				applySeatTotals(out, nested)
+				continue
+			}
+			typ := key
+			if typ == "default" || typ == "standard_seats" || typ == "default_seats" {
+				typ = "standard"
+			}
+			if typ == "prolite" || typ == "premium_seats" || typ == "prolite_seats" {
+				typ = "premium"
+			}
+			setSeatBucket(out, typ, seatItem{Type: typ, Total: number(nested, "total", "total_seats", "max_seats", "seat_count"), Remaining: number(nested, "remaining", "remaining_seats", "available_seats")})
+		}
+	}
+}
+func number(m map[string]any, keys ...string) int {
+	for _, k := range keys {
+		switch v := m[k].(type) {
+		case float64:
+			return int(v)
+		case int:
+			return v
+		}
+	}
+	return 0
 }
 
 func TestAdminAccount(ctx context.Context, token, teamAccountID string, settings model.Settings) model.AdminAccountTestResult {
@@ -258,6 +571,7 @@ func (c *Client) do(ctx context.Context, method, path, token, accountID string, 
 		req.Header.Set("x-openai-target-path", "/backend-api/me")
 		req.Header.Set("x-openai-target-route", "/backend-api/me")
 	}
+	setOpenAITargetHeaders(req, path)
 	var statusCode int
 	var data []byte
 	var requestErr error
@@ -293,6 +607,29 @@ func (c *Client) do(ctx context.Context, method, path, token, accountID string, 
 		result.Message = "请求成功"
 	}
 	return result, nil
+}
+
+// ChatGPT's browser client marks backend-api calls with the target route. In
+// particular, the Team admin endpoints (subscriptions, users and invites)
+// return a generic 403 page when these headers are omitted, even with a valid
+// bearer token and the correct proxy出口.
+func setOpenAITargetHeaders(req *http.Request, path string) {
+	route := path
+	if index := strings.IndexByte(route, '?'); index >= 0 {
+		route = route[:index]
+	}
+	if route == "" || route == "/me" {
+		return
+	}
+	target := route
+	if !strings.HasPrefix(target, "/backend-api/") {
+		target = "/backend-api" + target
+	}
+	req.Header.Set("x-openai-target-path", target)
+	req.Header.Set("x-openai-target-route", target)
+	if strings.HasPrefix(route, "/accounts/") && strings.HasSuffix(route, "/invites") {
+		req.Header.Set("Referer", "https://chatgpt.com/admin")
+	}
 }
 
 // browserDo uses curl_cffi when a real HTTPS proxy is configured. ChatGPT's
@@ -391,4 +728,12 @@ func friendlyNetworkError(err error) error {
 		return errors.New("请求超时")
 	}
 	return fmt.Errorf("网络请求失败: %w", err)
+}
+
+func isRetryableConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "curl: (56)") || strings.Contains(message, "connection closed abruptly")
 }
