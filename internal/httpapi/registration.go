@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/workflow"
 )
 
 func randomRegistrationID() string {
@@ -117,7 +118,7 @@ func newRegistrationHTTP(settings model.Settings) (*registrationHTTP, error) {
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
-	python, _ := exec.LookPath("python")
+	python := workflow.FindPython()
 	return &registrationHTTP{client: &http.Client{Transport: tr, Timeout: timeout, Jar: jar}, jar: jar, proxy: settings.ProxyURL, python: python}, nil
 }
 func (h *registrationHTTP) do(ctx context.Context, method, endpoint string, form url.Values, body any) (int, string, map[string]any, error) {
@@ -420,8 +421,8 @@ func runTurbStyleProtocolLogin(ctx context.Context, email, pickupURL, proxy stri
 }
 
 func runTurbStyleProtocolLoginWithProgress(ctx context.Context, email, pickupURL, proxy string, progress func(string)) (map[string]any, error) {
-	python, err := exec.LookPath("python")
-	if err != nil {
+	python := workflow.FindPython()
+	if python == "" {
 		return nil, errors.New("未找到 Python，无法运行 curl_cffi 纯协议会话")
 	}
 	scriptPath := filepath.Join("internal", "protocol_login.py")

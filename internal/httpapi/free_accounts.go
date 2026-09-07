@@ -621,8 +621,8 @@ func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
 		}
 	}
 	payload, _ := json.Marshal(map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword, "proxy": settings.ProxyURL, "sms_provider": provider, "sms_config": smsCfg})
-	python, err := exec.LookPath("python")
-	if err != nil {
+	python := workflow.FindPython()
+	if python == "" {
 		s.finishOAuthJob(jobID, accountID, nil, errors.New("未找到 Python 运行环境"))
 		return
 	}

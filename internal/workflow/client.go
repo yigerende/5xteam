@@ -45,7 +45,7 @@ func NewClient(settings model.Settings) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	pythonPath := findPython()
+	pythonPath := FindPython()
 	return &Client{
 		baseURL: strings.TrimRight(settings.BaseURL, "/"), settings: settings,
 		http:      httpClient,
@@ -58,7 +58,7 @@ func NewClient(settings model.Settings) (*Client, error) {
 // findPython accepts the command names used by Windows, Linux distributions
 // and minimal production images. The browser transport is needed for strict
 // ChatGPT Team endpoints when an HTTPS/SOCKS proxy is configured.
-func findPython() string {
+func FindPython() string {
 	for _, name := range []string{"python", "python3", "py"} {
 		if path, err := exec.LookPath(name); err == nil {
 			return path
