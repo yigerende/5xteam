@@ -68,6 +68,14 @@ docker compose up -d --build
 docker compose logs -f --tail=100
 ```
 
+镜像会自动安装 `python3`、`py3-pip`、`libstdc++` 和 `curl_cffi`，并复制纯协议登录/OAuth 脚本；正式环境不需要在宿主机单独安装 Python。依赖或 Dockerfile 变化后请重新构建镜像，不要只重启旧容器：
+
+```bash
+docker compose build --no-cache
+docker compose up -d
+docker compose exec chatgpt-space-merge python3 -c "import curl_cffi; print('curl_cffi ok')"
+```
+
 Compose 仍只将端口发布到宿主机回环地址。
 
 ## 配置
