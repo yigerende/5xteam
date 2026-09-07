@@ -112,6 +112,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/admin-accounts/{id}", s.updateAdminAccount)
 	mux.HandleFunc("DELETE /api/admin-accounts/{id}", s.deleteAdminAccount)
 	mux.HandleFunc("POST /api/admin-accounts/{id}/refresh", s.refreshAdminAccount)
+	mux.HandleFunc("GET /api/admin-accounts/{id}/credentials", s.adminAccountCredentials)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/capacity", s.adminAccountCapacity)
 	mux.HandleFunc("POST /api/admin-accounts/test", s.testAdminAccount)
 	mux.HandleFunc("POST /api/tokens/inspect", s.inspectTokens)
@@ -752,6 +753,28 @@ func (s *Server) refreshAdminAccount(w http.ResponseWriter, r *http.Request) {
 		message = "刚刚已经刷新过，冷却期内未重复调用"
 	}
 	writeAPI(w, 200, map[string]any{"profile": profile, "refreshed": refreshed, "message": message}, "")
+}
+
+// adminAccountCredentials returns the decrypted AT/RT for the explicit
+// credential viewer in the mother-account list. The list endpoint continues
+// to expose presence flags only; this route is called only after an operator
+// clicks the per-account view action.
+func (s *Server) adminAccountCredentials(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	profile, credentials, err := s.store.AdminAccountCredential(id)
+	if err != nil {
+		writeAPI(w, http.StatusNotFound, nil, err.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{
+		"label":                profile.Label,
+		"email":                profile.Email,
+		"account_id":           profile.AccountID,
+		"team_account_id":      profile.TeamAccountID,
+		"access_token":         credentials.AccessToken,
+		"refresh_token":        credentials.RefreshToken,
+		"access_token_expires": profile.AccessTokenExpiresAt,
+	}, "")
 }
 
 func (s *Server) refreshStoredAdmin(ctx context.Context, id string, force bool) (model.AdminAccountProfile, store.AdminAccountCredentials, bool, error) {
