@@ -146,6 +146,28 @@ func (s *Store) initSchema() error {
 			encrypted_source_token TEXT NOT NULL, encrypted_oauth_access_token TEXT NOT NULL DEFAULT '',
 			encrypted_oauth_refresh_token TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS auto_rotation_settings (
+			id INTEGER PRIMARY KEY CHECK (id=1), payload TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS auto_rotation_runs (
+			id TEXT PRIMARY KEY, payload TEXT NOT NULL, started_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS auto_rotation_tasks (
+			id TEXT PRIMARY KEY, run_id TEXT NOT NULL, account_id TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS auto_rotation_seat_reservations (
+			id TEXT PRIMARY KEY, admin_account_id TEXT NOT NULL, account_id TEXT NOT NULL UNIQUE, seat_type TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS auto_rotation_claims (
+			account_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, created_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS auto_rotation_events (
+			id TEXT PRIMARY KEY, run_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', payload TEXT NOT NULL, created_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS auto_rotation_events_created_at_idx ON auto_rotation_events(created_at DESC);
+		CREATE TABLE IF NOT EXISTS admin_capacity_snapshots (
+			admin_account_id TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS app_users (
 			username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, updated_at TEXT NOT NULL
 		);
@@ -310,6 +332,10 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 			var old model.MailAccountProfile
 			_ = json.Unmarshal([]byte(oldProfile), &old)
 			profile.CreatedAt = old.CreatedAt
+			profile.ChatGPTStatus, profile.ChatGPTStatusMessage, profile.ChatGPTStatusAt = old.ChatGPTStatus, old.ChatGPTStatusMessage, old.ChatGPTStatusAt
+			if profile.RegistrationStatus == "" {
+				profile.RegistrationStatus, profile.RegistrationLastError = old.RegistrationStatus, old.RegistrationLastError
+			}
 			if profile.CreatedAt.IsZero() {
 				profile.CreatedAt = now
 			}
@@ -325,6 +351,10 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 		var old model.MailAccountProfile
 		_ = json.Unmarshal([]byte(oldProfile), &old)
 		profile.CreatedAt = old.CreatedAt
+		profile.ChatGPTStatus, profile.ChatGPTStatusMessage, profile.ChatGPTStatusAt = old.ChatGPTStatus, old.ChatGPTStatusMessage, old.ChatGPTStatusAt
+		if profile.RegistrationStatus == "" {
+			profile.RegistrationStatus, profile.RegistrationLastError = old.RegistrationStatus, old.RegistrationLastError
+		}
 		if profile.CreatedAt.IsZero() {
 			profile.CreatedAt = now
 		}
@@ -461,6 +491,32 @@ func (s *Store) UpdateMailAccountStatus(email, status, message string) error {
 	p.RegistrationStatus, p.RegistrationLastError, p.UpdatedAt = status, message, time.Now()
 	encoded, _ := json.Marshal(p)
 	_, err := s.db.Exec("UPDATE mail_accounts SET profile=?, updated_at=? WHERE email=?", string(encoded), formatTime(p.UpdatedAt), p.Email)
+	return err
+}
+
+// MarkMailAccountDead records a confirmed OpenAI account deactivation on the
+// mail-management projection.  Keep both the dedicated ChatGPT status and the
+// legacy registration status in sync so all existing views show the same state.
+func (s *Store) MarkMailAccountDead(email, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	email = strings.ToLower(strings.TrimSpace(email))
+	var raw string
+	if err := s.db.QueryRow("SELECT profile FROM mail_accounts WHERE email=?", email).Scan(&raw); err != nil {
+		return err
+	}
+	var p model.MailAccountProfile
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return err
+	}
+	now := time.Now()
+	p.ChatGPTStatus, p.ChatGPTStatusMessage, p.ChatGPTStatusAt = "dead", strings.TrimSpace(message), &now
+	p.RegistrationStatus, p.RegistrationLastError, p.UpdatedAt = "dead", strings.TrimSpace(message), now
+	encoded, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("UPDATE mail_accounts SET profile=?, updated_at=? WHERE email=?", string(encoded), formatTime(now), email)
 	return err
 }
 

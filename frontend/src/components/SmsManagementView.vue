@@ -114,6 +114,20 @@ function activationTimestamp(item) {
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? parsed : 0;
 }
+function formatActivationTime(item) {
+  const timestamp = activationTimestamp(item);
+  if (!timestamp) return "-";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp));
+}
 async function load() {
   loading.value = true;
   try {
@@ -624,15 +638,7 @@ onMounted(load);
               v-for="(item, index) in activationHistory"
               :key="item.id || item.activation_id || index"
             >
-              <td>
-                {{
-                  item.created_at ||
-                  item.createdAt ||
-                  item.time ||
-                  item.date ||
-                  "-"
-                }}
-              </td>
+              <td>{{ formatActivationTime(item) }}</td>
               <td class="mono">
                 {{ item.phone_number || item.phone || item.number || "-" }}
               </td>

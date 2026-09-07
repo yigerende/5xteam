@@ -55,6 +55,9 @@ type FreeAccountProfile struct {
 	PushStatus               string           `json:"push_status"`
 	QuotaStatus              string           `json:"quota_status"`
 	RemoveStatus             string           `json:"remove_status"`
+	Dead                     bool             `json:"dead,omitempty"`
+	DeadReason               string           `json:"dead_reason,omitempty"`
+	DeadDetectedAt           *time.Time       `json:"dead_detected_at,omitempty"`
 	LastError                string           `json:"last_error,omitempty"`
 	SourceTokenPresent       bool             `json:"source_token_present"`
 	OAuthAccessTokenPresent  bool             `json:"oauth_access_token_present"`

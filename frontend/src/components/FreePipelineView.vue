@@ -11,6 +11,7 @@ import IconButton from './IconButton.vue'
 import MessageBar from './MessageBar.vue'
 import StatusPill from './StatusPill.vue'
 import Pagination from './Pagination.vue'
+import AutoRotationView from './AutoRotationView.vue'
 
 const props = defineProps({
   accounts: { type: Array, default: () => [] },
@@ -18,7 +19,7 @@ const props = defineProps({
   entryEmail: { type: String, default: '' },
   active: { type: Boolean, default: false },
 })
-const emit = defineEmits(['reload'])
+const emit = defineEmits(['reload', 'auto-rotation'])
 
 const importForm = reactive({ tokens: '' })
 const sub2Form = reactive({ url: '', email: '', password: '', groupIDs: [], groupNames: [], models: '', accountConcurrency: 10, priority: 1, enable401Check: true, statusCheckIntervalSeconds: 120, quotaCheckIntervalSeconds: 120, passwordPresent: false })
@@ -63,6 +64,9 @@ function teamSpaceStatus(account) {
   if (account?.accept_status === 'completed') return 'inside'
   return 'outside'
 }
+function isPremiumSeatType(seatType) {
+  return ['prolite', 'premium', '5x'].includes(String(seatType || '').trim().toLowerCase())
+}
 const allDisplayedAccounts = computed(() => {
   const statusOrder = { inside: 0, outside: 1, removed: 2 }
   const filtered = teamSpaceFilter.value
@@ -95,11 +99,15 @@ const removedCount = computed(() => displayedAccounts.value.filter((item) => ite
 const quota7DWindows = computed(() => liveAccounts.value.filter((item) => teamSpaceStatus(item) === 'inside').map((item) => item.quota_7d).filter(Boolean))
 const premiumSeatSummary = computed(() => {
   let total = 0
-  let remaining = 0
   for (const value of adminCapacities.value.values()) {
     total += Number(value?.premium?.total || 0)
-    remaining += Number(value?.premium?.remaining || 0)
   }
+  // The total comes from the cached Team capacity snapshot, while the
+  // remaining count must follow the current pipeline state immediately.
+  const insidePremium = liveAccounts.value.filter((account) => (
+    teamSpaceStatus(account) === 'inside' && isPremiumSeatType(account.seat_type)
+  )).length
+  const remaining = Math.max(0, total - insidePremium)
   return { total, remaining }
 })
 const average7DRemaining = computed(() => {
@@ -632,6 +640,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
       <button type="button" :class="{ active: teamMenu === 'accounts' }" @click="teamMenu = 'accounts'"><Waypoints :size="14" />账号管理</button>
       <button type="button" :class="{ active: teamMenu === 'import' }" @click="teamMenu = 'import'"><Upload :size="14" />导入 Free 账号</button>
       <button type="button" :class="{ active: teamMenu === 'sub2' }" @click="teamMenu = 'sub2'"><Send :size="14" />Sub2 推送配置</button>
+      <button type="button" :class="{ active: teamMenu === 'auto' }" @click="teamMenu = 'auto'"><RefreshCw :size="14" />全自动轮转</button>
     </nav>
 
     <div v-if="teamMenu === 'accounts'" class="metric-grid team-metrics">
@@ -670,6 +679,8 @@ onBeforeUnmount(stopCapacityRefreshTimer)
       <div class="split-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="connectSub2"><Cable :size="15" />连接并读取分组</button><button class="btn primary" type="submit" :disabled="!!busy || !sub2Form.groupIDs.length"><Save :size="15" />保存配置</button></div>
     </form>
 
+    <AutoRotationView v-if="teamMenu === 'auto'" :admin-accounts="adminAccounts" />
+
     <MessageBar :message="message" />
 
     <section v-if="teamMenu === 'accounts'" class="panel list-panel free-list">
@@ -690,14 +701,14 @@ onBeforeUnmount(stopCapacityRefreshTimer)
       <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>5小时</th><th>7天</th><th>移出策略</th><th>重登次数</th><th class="actions-column">操作</th></tr></thead><tbody>
         <tr v-if="!displayedAccounts.length"><td colspan="9" class="empty-cell">暂无 Free 账号</td></tr>
         <tr v-for="account in displayedAccounts" :key="account.id" :class="{ 'row-running': activityFor(account), 'row-highlighted': entryEmail && account.email === entryEmail }">
-          <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>
+          <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="account.dead" class="danger-text" :title="account.dead_reason">死号{{ account.remove_status === 'completed' ? ' · 已自动移出空间' : ' · 自动移出失败' }}</small><small v-else-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>
           <td><small class="table-note">{{ account.imported_at ? formatTime(account.imported_at) : '未知' }}</small></td>
-          <td><div class="stage-strip"><label v-for="key in ['invite','accept','oauth','push','quota','remove']" :key="key" :class="['stage-select', `tone-${stageTone(visibleStageStatus(account, key))}`]" :title="`${stageLabels[key]}：${stateLabels[visibleStageStatus(account, key)] || '未开始'}`"><LoaderCircle v-if="visibleStageStatus(account, key) === 'running'" class="spin" :size="10" /><span v-else>{{ stageLabels[key] }}</span><select :value="visibleStageStatus(account, key)" :aria-label="`${stageLabels[key]}阶段状态`" :disabled="isAccountBusy(account) || visibleStageStatus(account, key) === 'running'" @change="saveStageValue(account, key, $event.target.value)"><option value="not_started">未开始</option><option value="pending">待处理</option><option value="completed">成功</option><option value="failed">失败</option></select></label></div></td>
+          <td><div class="stage-strip"><label v-for="key in ['invite','accept','oauth','push','quota','remove']" :key="key" :class="['stage-select', `tone-${stageTone(visibleStageStatus(account, key))}`]" :title="`${stageLabels[key]}：${stateLabels[visibleStageStatus(account, key)] || '未开始'}${visibleStageStatus(account, key) === 'running' ? '（可手动修正）' : ''}`"><LoaderCircle v-if="visibleStageStatus(account, key) === 'running'" class="spin" :size="10" /><span v-else>{{ stageLabels[key] }}</span><select :value="visibleStageStatus(account, key)" :aria-label="`${stageLabels[key]}阶段状态`" :disabled="isAccountBusy(account)" @change="saveStageValue(account, key, $event.target.value)"><option value="not_started">未开始</option><option value="pending">待处理</option><option value="completed">成功</option><option value="failed">失败</option></select></label></div></td>
           <td><strong>{{ quotaText(account.quota_5h) }}</strong><small v-if="account.quota_5h" class="table-note">剩余</small></td>
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
           <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
           <td><strong>{{ account.relogin_count || 0 }}</strong><small class="table-note">次</small></td>
-          <td><div class="row-actions"><IconButton :label="joinActionLabel(account)" :disabled="isAccountBusy(account) || joinCapacityRefreshing || !adminAccounts.length || account.remove_status === 'completed'" @click="openJoin(account)"><LoaderCircle v-if="activityFor(account)?.action === 'join' || joinCapacityRefreshing" class="spin" :size="15" /><DoorOpen v-else :size="15" /></IconButton><IconButton label="获取 Codex AT / RT" :disabled="isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="acquireOAuth(account)"><LoaderCircle v-if="activityFor(account)?.action === 'oauth'" class="spin" :size="15" /><KeyRound v-else :size="15" /></IconButton><IconButton label="推送到 Sub2" :disabled="isAccountBusy(account) || account.oauth_status !== 'completed' || !!account.sub2_account_id" @click="runAction(account, 'push')"><LoaderCircle v-if="activityFor(account)?.action === 'push'" class="spin" :size="15" /><Send v-else :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="isAccountBusy(account) || !account.sub2_account_id" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="立即移出空间" danger :disabled="isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="runAction(account, 'remove')"><LoaderCircle v-if="activityFor(account)?.action === 'remove'" class="spin" :size="15" /><Unplug v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
+          <td><div class="row-actions"><IconButton :label="joinActionLabel(account)" :disabled="account.dead || isAccountBusy(account) || joinCapacityRefreshing || !adminAccounts.length || account.remove_status === 'completed'" @click="openJoin(account)"><LoaderCircle v-if="activityFor(account)?.action === 'join' || joinCapacityRefreshing" class="spin" :size="15" /><DoorOpen v-else :size="15" /></IconButton><IconButton label="获取 Codex AT / RT" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="acquireOAuth(account)"><LoaderCircle v-if="activityFor(account)?.action === 'oauth'" class="spin" :size="15" /><KeyRound v-else :size="15" /></IconButton><IconButton label="推送到 Sub2" :disabled="account.dead || isAccountBusy(account) || account.oauth_status !== 'completed' || !!account.sub2_account_id" @click="runAction(account, 'push')"><LoaderCircle v-if="activityFor(account)?.action === 'push'" class="spin" :size="15" /><Send v-else :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !account.sub2_account_id" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="立即移出空间" danger :disabled="isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="runAction(account, 'remove')"><LoaderCircle v-if="activityFor(account)?.action === 'remove'" class="spin" :size="15" /><Unplug v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
         </tr>
       </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="allDisplayedAccounts.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
     </section>

@@ -8,6 +8,29 @@ CTX = re.compile(r"(?i)(?:code|验证码|認証コード|verification code)\D{0,
 def log(msg): print("[protocol] "+str(msg), file=sys.stderr, flush=True)
 def clean(v):
     s = html.unescape(str(v or "")); s = re.sub(r"(?is)<[^>]+>", " ", s); return re.sub(r"\s+", " ", s)
+
+DEAD_CODES = {"account_deactivated", "account_deleted", "account_banned", "account_disabled", "account_suspended"}
+DEAD_MARKERS = (
+    "deleted or deactivated", "account has been deleted", "account has been deactivated",
+    "account was deleted", "account was deactivated", "account deactivated",
+    "account deleted", "account banned", "account disabled", "account suspended",
+    "access deactivated", "账号已删除", "账号已停用", "账号已禁用", "账号被封",
+    "账户已删除", "账户已停用", "账户已禁用", "账户被封",
+)
+
+def dead_code(text):
+    low = clean(text).lower()
+    for code in DEAD_CODES:
+        if code in low:
+            return code
+    for marker in DEAD_MARKERS:
+        if marker in low:
+            if "delete" in low or "删除" in low:
+                return "account_deleted"
+            if "ban" in low or "封" in low:
+                return "account_banned"
+            return "account_deactivated"
+    return ""
 def code_from(v):
     if isinstance(v, dict):
         for k in ("code","otp","verification_code","verificationCode","email_code","emailCode"):
@@ -49,6 +72,13 @@ def main():
     log("初始化 gpt-manager 风格 Codex OAuth 协议")
     result = manager_style_oauth(email, proxy, otp_provider, cfg, codex_oauth, str(p.get("gpt_password") or ""))
     if not isinstance(result,dict) or not result.get('success'):
+        if isinstance(result, dict) and result.get("status") == "deactivated":
+            print(json.dumps({"success": False, "status": "deactivated", "dead": True,
+                              "error_code": result.get("error_code") or "account_deactivated",
+                              "stage": result.get("stage") or "oauth",
+                              "http_status": result.get("http_status") or 0,
+                              "error": result.get("error") or "账号已删除或停用"}, ensure_ascii=False))
+            return
         raise RuntimeError(str(result.get('error') if isinstance(result,dict) else result))
     out={'success':True,'access_token':result.get('access_token',''),'refresh_token':result.get('refresh_token',''),'account_id':result.get('account_id',''),'result':result}
     print(json.dumps(out,ensure_ascii=False))
@@ -98,6 +128,11 @@ def manager_style_oauth(email, proxy, otp_provider, cfg, co, password=""):
                         log(f"{url.rsplit('/', 1)[-1]} 成功")
                         send_ok = True
                         break
+                    code_dead = dead_code(send.text)
+                    if code_dead:
+                        return {"success": False, "status": "deactivated", "dead": True,
+                                "error_code": code_dead, "stage": "email_otp_send",
+                                "http_status": send.status_code, "error": (send.text or "")[:500]}
                     log(f"{url.rsplit('/', 1)[-1]} HTTP {send.status_code}，尝试下一个发码端点")
                 except Exception as exc:
                     log(f"{url.rsplit('/', 1)[-1]} 请求异常：{str(exc)[:160]}")
@@ -110,7 +145,13 @@ def manager_style_oauth(email, proxy, otp_provider, cfg, co, password=""):
             log("passwordless 不可用，按 gpt-manager 回退 password/verify")
             ph=session.get_auth_headers(referer="https://auth.openai.com/log-in/password")
             pr=session.post("https://auth.openai.com/api/accounts/password/verify", headers=ph, data=json.dumps({"password":password}), allow_redirects=False)
-            if pr.status_code != 200: raise RuntimeError(f"password/verify HTTP {pr.status_code}: {(pr.text or '')[:180]}")
+            if pr.status_code != 200:
+                code_dead = dead_code(pr.text)
+                if code_dead:
+                    return {"success": False, "status": "deactivated", "dead": True,
+                            "error_code": code_dead, "stage": "password_verify",
+                            "http_status": pr.status_code, "error": (pr.text or "")[:500]}
+                raise RuntimeError(f"password/verify HTTP {pr.status_code}: {(pr.text or '')[:180]}")
             pstep=co._resp_json(pr); ptype=((pstep.get("page") or {}).get("type") if isinstance(pstep,dict) else "") or ""
             if "email" not in ptype and "verification" not in str(pstep.get("continue_url", "")) and "consent" not in ptype:
                 raise RuntimeError("password/verify 未返回邮箱验证或 consent 页面")
@@ -128,6 +169,11 @@ def manager_style_oauth(email, proxy, otp_provider, cfg, co, password=""):
             val=session.post("https://auth.openai.com/api/accounts/email-otp/validate", headers=h, data=json.dumps({"code":code}), allow_redirects=False)
             if val.status_code == 200: break
             body=(val.text or "").lower()
+            code_dead = dead_code(body)
+            if code_dead:
+                return {"success": False, "status": "deactivated", "dead": True,
+                        "error_code": code_dead, "stage": "email_otp_validate",
+                        "http_status": val.status_code, "error": (val.text or "")[:500]}
             if "wrong_email_otp_code" not in body and "wrong code" not in body and "expired" not in body:
                 raise RuntimeError(f"email-otp/validate HTTP {val.status_code}: {(val.text or '')[:180]}")
             if attempt < 3:
@@ -144,7 +190,13 @@ def manager_style_oauth(email, proxy, otp_provider, cfg, co, password=""):
         # gpt-manager consent path：workspace/select 后处理 organization/select。
         wid=co._get_workspace_id(session)
         ws=co._post_json(session,"https://auth.openai.com/api/accounts/workspace/select",{"workspace_id":wid},referer="https://auth.openai.com/sign-in-with-chatgpt/codex/consent")
-        if ws.status_code not in (200,201,204,301,302,303,307,308): raise RuntimeError(f"workspace/select HTTP {ws.status_code}: {(ws.text or '')[:180]}")
+        if ws.status_code not in (200,201,204,301,302,303,307,308):
+            code_dead = dead_code(ws.text)
+            if code_dead:
+                return {"success": False, "status": "deactivated", "dead": True,
+                        "error_code": code_dead, "stage": "workspace_select",
+                        "http_status": ws.status_code, "error": (ws.text or "")[:500]}
+            raise RuntimeError(f"workspace/select HTTP {ws.status_code}: {(ws.text or '')[:180]}")
         loc=ws.headers.get("location") or ws.headers.get("Location"); data=co._resp_json(ws)
         nxt=loc or co._extract_continue_url_from_step(data)
         if isinstance(data,dict) and ("organization" in str(data).lower() or "organization" in nxt.lower()):
@@ -152,6 +204,13 @@ def manager_style_oauth(email, proxy, otp_provider, cfg, co, password=""):
             if orgs:
                 org=orgs[0]; oid=org.get("id")
                 org_resp=co._post_json(session,"https://auth.openai.com/api/accounts/organization/select",{"org_id":oid},referer=nxt or "https://auth.openai.com/sign-in-with-chatgpt/codex/consent")
+                if org_resp.status_code not in (200,201,204,301,302,303,307,308):
+                    code_dead = dead_code(org_resp.text)
+                    if code_dead:
+                        return {"success": False, "status": "deactivated", "dead": True,
+                                "error_code": code_dead, "stage": "organization_select",
+                                "http_status": org_resp.status_code, "error": (org_resp.text or "")[:500]}
+                    raise RuntimeError(f"organization/select HTTP {org_resp.status_code}: {(org_resp.text or '')[:180]}")
                 nxt=org_resp.headers.get("location") or co._extract_continue_url_from_step(co._resp_json(org_resp))
         if not nxt: raise RuntimeError("workspace/organization 选择后没有 callback URL")
         callback=co._follow_until_callback(session,nxt,state); code=co._extract_code(callback,state)
@@ -166,6 +225,12 @@ def manager_style_oauth(email, proxy, otp_provider, cfg, co, password=""):
                 if trr.status_code == 200:
                     tr=trr.json()
                     if tr.get("access_token"): token=tr; tx.close(); break
+                code_dead = dead_code(trr.text)
+                if code_dead:
+                    tx.close()
+                    return {"success": False, "status": "deactivated", "dead": True,
+                            "error_code": code_dead, "stage": "oauth_token",
+                            "http_status": trr.status_code, "error": (trr.text or "")[:500]}
                 log(f"oauth/token HTTP {trr.status_code}")
                 tx.close()
             except Exception as exc:
@@ -179,4 +244,11 @@ def manager_style_oauth(email, proxy, otp_provider, cfg, co, password=""):
 if __name__=='__main__':
     try: main()
     except Exception as e:
-        print(json.dumps({'success':False,'error':f'{type(e).__name__}: {e}'},ensure_ascii=False))
+        message=f'{type(e).__name__}: {e}'
+        code=dead_code(message)
+        if code:
+            print(json.dumps({'success':False,'status':'deactivated','dead':True,
+                              'error_code':code,'stage':'oauth','http_status':0,
+                              'error':message},ensure_ascii=False))
+        else:
+            print(json.dumps({'success':False,'error':message},ensure_ascii=False))

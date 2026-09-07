@@ -132,6 +132,7 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		profile.ID = existing.ID
 		profile.Status, profile.InviteStatus, profile.AcceptStatus = existing.Status, existing.InviteStatus, existing.AcceptStatus
 		profile.OAuthStatus, profile.PushStatus, profile.QuotaStatus, profile.RemoveStatus = existing.OAuthStatus, existing.PushStatus, existing.QuotaStatus, existing.RemoveStatus
+		profile.Dead, profile.DeadReason, profile.DeadDetectedAt = existing.Dead, existing.DeadReason, existing.DeadDetectedAt
 		profile.LastError = existing.LastError
 		profile.OAuthAccessTokenPresent, profile.OAuthRefreshTokenPresent = existing.OAuthAccessTokenPresent, existing.OAuthRefreshTokenPresent
 		profile.AdminAccountID, profile.AdminEmail, profile.TeamAccountID, profile.SeatType = existing.AdminAccountID, existing.AdminEmail, existing.TeamAccountID, existing.SeatType

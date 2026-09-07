@@ -98,6 +98,31 @@ func TestMailAccountsKeepEntryTimeAndSortNewestFirst(t *testing.T) {
 	}
 }
 
+func TestMailAccountDeadStatusPersistsAcrossReimport(t *testing.T) {
+	dataStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	email := "dead@example.com"
+	if _, err := dataStore.SaveMailAccount(model.MailAccountProfile{Email: email, Label: email}, model.MailAccountCredentials{Email: email, PickupURL: "https://mail.example/messages/one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dataStore.MarkMailAccountDead(email, "account_deactivated"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataStore.SaveMailAccount(model.MailAccountProfile{Email: email, Label: "reimported"}, model.MailAccountCredentials{Email: email, PickupURL: "https://mail.example/messages/two"}); err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := dataStore.MailAccountCredential(email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ChatGPTStatus != "dead" || profile.RegistrationStatus != "dead" || profile.ChatGPTStatusAt == nil || profile.ChatGPTStatusMessage != "account_deactivated" {
+		t.Fatalf("dead status was reset by reimport: %+v", profile)
+	}
+}
+
 func TestLegacySettingsReceiveNetworkRetryDefaults(t *testing.T) {
 	directory := t.TempDir()
 	legacy := `{"settings":{"base_url":"https://chatgpt.com/backend-api","accepted_tos_version":"2024-12-17","role":"standard-user","seat_type":"default","request_timeout_seconds":45,"concurrency":1}}`

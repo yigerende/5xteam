@@ -247,8 +247,25 @@ function hasRegistered(account) {
   );
 }
 function registrationState(account) {
+  if (account.chatgpt_status === "dead" || account.registration_status === "dead") return "死号";
   if (account.registration_status === "failed") return "失败";
   return hasRegistered(account) ? "已完成" : "未执行";
+}
+function isDeadAccount(account) {
+  return account?.chatgpt_status === "dead" || account?.registration_status === "dead" || pipelineFor(account)?.dead;
+}
+function chatGPTStatusTone(account) {
+  if (isDeadAccount(account)) return "danger";
+  if (account.at_checked_at) return account.at_valid ? "success" : "danger";
+  if (hasAT(account)) return "success";
+  if (loginJobFor(account)) return "running";
+  return "pending";
+}
+function chatGPTStatusLabel(account) {
+  if (isDeadAccount(account)) return "死号";
+  if (loginJobFor(account)) return "登录中";
+  if (account.at_checked_at) return account.at_valid ? "AT 有效" : "AT 无效";
+  return hasAT(account) ? "凭证已保存" : "未登录";
 }
 function pipelineFor(account) {
   return pipelineByEmail.value.get(String(account.email || "").toLowerCase());
@@ -310,6 +327,7 @@ function pipelineStageStatus(account, stage) {
 function pipelineStatusLabel(account) {
   const pipeline = pipelineFor(account);
   if (!pipeline) return "未进入 Team";
+  if (pipeline.dead) return pipeline.remove_status === "completed" ? "死号 · 已移出" : "死号";
   if (pipeline.remove_status === "completed") return "已移出空间";
   if (pipeline.push_status === "completed") return "Sub2 运行中";
   if (pipeline.oauth_status === "completed") return "OAuth 已就绪";
@@ -320,6 +338,7 @@ function pipelineStatusLabel(account) {
 function pipelineStatusTone(account) {
   const pipeline = pipelineFor(account);
   if (!pipeline) return "pending";
+  if (pipeline.dead) return "danger";
   if (Object.values(pipeline).includes("failed")) return "danger";
   if (Object.values(pipeline).includes("running")) return "running";
   return ["oauth_ready", "monitoring", "removed"].includes(pipeline.status)
@@ -1181,34 +1200,14 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                 </td>
                 <td>
                   <StatusPill
-                      :tone="
-                      account.at_checked_at
-                        ? account.at_valid
-                          ? 'success'
-                          : 'danger'
-                        : hasAT(account)
-                        ? 'success'
-                        : loginJobFor(account)
-                          ? 'running'
-                          : 'pending'
-                    "
+                    :tone="chatGPTStatusTone(account)"
                     ><LoaderCircle
-                      v-if="loginJobFor(account)"
+                      v-if="loginJobFor(account) && !isDeadAccount(account)"
                       class="spin"
                       :size="11"
-                    />{{
-                      loginJobFor(account)
-                        ? "登录中"
-                        : account.at_checked_at
-                          ? account.at_valid
-                            ? "AT 有效"
-                            : "AT 无效"
-                        : hasAT(account)
-                          ? "凭证已保存"
-                          : "未登录"
-                    }}</StatusPill
+                    />{{ chatGPTStatusLabel(account) }}</StatusPill
                   ><span
-                    v-if="!loginJobFor(account)"
+                    v-if="!loginJobFor(account) && !isDeadAccount(account)"
                     class="credential-grid token-state"
                     ><small :class="{ ready: account.access_token_present }"
                       >AT
@@ -1222,10 +1221,15 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                       }}</small
                     ></span
                   ><small
-                    v-if="loginJobFor(account)"
+                    v-if="loginJobFor(account) && !isDeadAccount(account)"
                     class="table-note login-progress"
                     :title="loginProgress(account)"
                     >{{ loginProgress(account) }}</small
+                  ><small
+                    v-else-if="isDeadAccount(account)"
+                    class="table-note danger-text"
+                    :title="account.chatgpt_status_message || pipelineFor(account)?.dead_reason"
+                    >{{ account.chatgpt_status_message || pipelineFor(account)?.dead_reason || "OpenAI 账号已停用" }}</small
                   ><small
                     v-else-if="account.refresh_last_error"
                     class="table-note danger-text"

@@ -27,6 +27,7 @@ type Server struct {
 	static           fs.FS
 	refreshMu        sync.Mutex
 	freeLocks        sync.Map
+	freeRemoveLocks  sync.Map
 	sub2             *sub2.Client
 	registrationMu   sync.RWMutex
 	registrationJobs map[string]map[string]any
@@ -37,6 +38,9 @@ type Server struct {
 	mail             *mailbridge.Client // retained for API compatibility; local mail flows never call it
 	authMu           sync.Mutex
 	sessions         map[string]time.Time
+	autoMu           sync.Mutex
+	autoAdminLocks   sync.Map
+	autoRunning      bool
 }
 
 const (
@@ -55,6 +59,7 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	_ = dataStore.RecoverAutoRotationClaims()
 	return &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any)}, nil
 }
 
@@ -102,6 +107,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/history", s.clearHistory)
 	mux.HandleFunc("GET /api/account-progress", s.accountProgress)
 	mux.HandleFunc("GET /api/free-accounts", s.listFreeAccounts)
+	mux.HandleFunc("GET /api/auto-rotation/settings", s.getAutoRotationSettings)
+	mux.HandleFunc("PUT /api/auto-rotation/settings", s.saveAutoRotationSettings)
+	mux.HandleFunc("POST /api/auto-rotation/run", s.triggerAutoRotation)
+	mux.HandleFunc("GET /api/auto-rotation/runs", s.listAutoRotationRuns)
+	mux.HandleFunc("GET /api/auto-rotation/runs/{id}/tasks", s.listAutoRotationTasks)
+	mux.HandleFunc("GET /api/auto-rotation/events", s.listAutoRotationEvents)
 	mux.HandleFunc("POST /api/free-accounts/import", s.importFreeAccounts)
 	mux.HandleFunc("DELETE /api/free-accounts/{id}", s.deleteFreeAccount)
 	mux.HandleFunc("POST /api/free-accounts/{id}/join", s.joinFreeAccount)
@@ -156,6 +167,7 @@ func (s *Server) Handler() http.Handler {
 // StartBackground runs periodic Free account quota checks until ctx is done.
 func (s *Server) StartBackground(ctx context.Context) {
 	go s.monitorFreeAccounts(ctx)
+	go s.autoRotationLoop(ctx)
 }
 
 func mustSub(root fs.FS, dir string) fs.FS {
@@ -312,6 +324,11 @@ func (s *Server) adminAccountCapacity(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadGateway, nil, err.Error())
 		return
 	}
+	// Keep the latest successful Team capacity request available to the
+	// automatic rotation scheduler. The scheduler intentionally uses this
+	// locally refreshed snapshot and does not poll the upstream endpoint on
+	// every trigger.
+	_ = s.store.SaveAdminCapacitySnapshot(profile.ID, capacity)
 	writeAPI(w, http.StatusOK, capacity, "")
 }
 

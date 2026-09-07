@@ -24,27 +24,30 @@ type Settings struct {
 // MailAccountProfile is the local mailbox projection used by registration.
 // Secrets are encrypted in Store and never returned by list APIs.
 type MailAccountProfile struct {
-	ID                    string    `json:"id"`
-	Email                 string    `json:"email"`
-	Label                 string    `json:"label"`
-	Group                 string    `json:"group"`
-	MailPasswordPresent   bool      `json:"mail_password_present"`
-	ClientIDPresent       bool      `json:"client_id_present"`
-	MailRefreshPresent    bool      `json:"mail_refresh_token_present"`
-	PickupURLPresent      bool      `json:"pickup_url_present"`
-	GptPasswordPresent    bool      `json:"gpt_password_present"`
-	TotpSecretPresent     bool      `json:"totp_secret_present"`
-	AccessTokenPresent    bool      `json:"access_token_present"`
-	RefreshTokenPresent   bool      `json:"refresh_token_present"`
+	ID                    string     `json:"id"`
+	Email                 string     `json:"email"`
+	Label                 string     `json:"label"`
+	Group                 string     `json:"group"`
+	MailPasswordPresent   bool       `json:"mail_password_present"`
+	ClientIDPresent       bool       `json:"client_id_present"`
+	MailRefreshPresent    bool       `json:"mail_refresh_token_present"`
+	PickupURLPresent      bool       `json:"pickup_url_present"`
+	GptPasswordPresent    bool       `json:"gpt_password_present"`
+	TotpSecretPresent     bool       `json:"totp_secret_present"`
+	AccessTokenPresent    bool       `json:"access_token_present"`
+	RefreshTokenPresent   bool       `json:"refresh_token_present"`
 	ATCheckedAt           *time.Time `json:"at_checked_at,omitempty"`
-	ATValid               bool      `json:"at_valid"`
-	ATCheckHTTPStatus     int       `json:"at_check_http_status,omitempty"`
-	ATCheckMessage        string    `json:"at_check_message,omitempty"`
-	LoginMethod           string    `json:"login_method,omitempty"`
-	RegistrationStatus    string    `json:"registration_status"`
-	RegistrationLastError string    `json:"registration_last_error,omitempty"`
-	CreatedAt             time.Time `json:"created_at"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	ATValid               bool       `json:"at_valid"`
+	ATCheckHTTPStatus     int        `json:"at_check_http_status,omitempty"`
+	ATCheckMessage        string     `json:"at_check_message,omitempty"`
+	ChatGPTStatus         string     `json:"chatgpt_status,omitempty"`
+	ChatGPTStatusMessage  string     `json:"chatgpt_status_message,omitempty"`
+	ChatGPTStatusAt       *time.Time `json:"chatgpt_status_at,omitempty"`
+	LoginMethod           string     `json:"login_method,omitempty"`
+	RegistrationStatus    string     `json:"registration_status"`
+	RegistrationLastError string     `json:"registration_last_error,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type MailAccountCredentials struct {
@@ -249,4 +252,86 @@ type AccountProgress struct {
 	LastStatus    string     `json:"last_status"`
 	LastError     string     `json:"last_error,omitempty"`
 	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type AutoRotationSettings struct {
+	Enabled          bool    `json:"enabled"`
+	ThresholdPercent float64 `json:"threshold_percent"`
+	IntervalSeconds  int     `json:"interval_seconds"`
+	Concurrency      int     `json:"concurrency"`
+	MaxPerRun        int     `json:"max_per_run"`
+	RetryCount       int     `json:"retry_count"`
+}
+
+func DefaultAutoRotationSettings() AutoRotationSettings {
+	return AutoRotationSettings{ThresholdPercent: 50, IntervalSeconds: 300, Concurrency: 2, MaxPerRun: 0, RetryCount: 1}
+}
+
+type AutoRotationRun struct {
+	ID                     string     `json:"id"`
+	Trigger                string     `json:"trigger"`
+	Reason                 string     `json:"reason"`
+	AveragePercent         float64    `json:"average_percent"`
+	SeatTotal              int        `json:"seat_total"`
+	SeatRemaining          int        `json:"seat_remaining"`
+	ReservedSeats          int        `json:"reserved_seats"`
+	Planned                int        `json:"planned"`
+	Succeeded              int        `json:"succeeded"`
+	Failed                 int        `json:"failed"`
+	Status                 string     `json:"status"`
+	StartedAt              time.Time  `json:"started_at"`
+	CompletedAt            *time.Time `json:"completed_at,omitempty"`
+	SpaceAccountCount      int        `json:"space_account_count"`
+	QuotaAccountCount      int        `json:"quota_account_count"`
+	CandidateRotationCount int        `json:"candidate_rotation_count"`
+	CandidateMailCount     int        `json:"candidate_mail_count"`
+	DecisionAvailableSeats int        `json:"decision_available_seats"`
+	DecisionMaxPerRun      int        `json:"decision_max_per_run"`
+}
+
+type AutoRotationTask struct {
+	ID              string             `json:"id"`
+	RunID           string             `json:"run_id"`
+	AccountID       string             `json:"account_id"`
+	Email           string             `json:"email"`
+	Source          string             `json:"source"`
+	AdminAccountID  string             `json:"admin_account_id"`
+	SeatType        string             `json:"seat_type"`
+	CurrentStep     string             `json:"current_step"`
+	Status          string             `json:"status"`
+	InviteTriggered bool               `json:"invite_triggered"`
+	SeatReserved    bool               `json:"seat_reserved"`
+	ReservationID   string             `json:"reservation_id,omitempty"`
+	RetryCount      int                `json:"retry_count"`
+	Error           string             `json:"error,omitempty"`
+	StartedAt       time.Time          `json:"started_at"`
+	CompletedAt     *time.Time         `json:"completed_at,omitempty"`
+	Steps           []AutoRotationStep `json:"steps,omitempty"`
+}
+
+type AutoRotationStep struct {
+	Key         string     `json:"key"`
+	Name        string     `json:"name"`
+	Status      string     `json:"status"`
+	Message     string     `json:"message,omitempty"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
+type AutoRotationEvent struct {
+	ID             string         `json:"id"`
+	RunID          string         `json:"run_id,omitempty"`
+	TaskID         string         `json:"task_id,omitempty"`
+	AccountID      string         `json:"account_id,omitempty"`
+	AdminAccountID string         `json:"admin_account_id,omitempty"`
+	Type           string         `json:"type"`
+	Stage          string         `json:"stage,omitempty"`
+	FromStatus     string         `json:"from_status,omitempty"`
+	ToStatus       string         `json:"to_status,omitempty"`
+	HTTPStatus     int            `json:"http_status,omitempty"`
+	Attempt        int            `json:"attempt,omitempty"`
+	DurationMS     int64          `json:"duration_ms,omitempty"`
+	Message        string         `json:"message,omitempty"`
+	Details        map[string]any `json:"details,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
 }

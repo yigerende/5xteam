@@ -23,6 +23,8 @@ import (
 	"chatgpt-space-merge/internal/workflow"
 )
 
+var errDeadAccountHandled = errors.New("dead account detected and removal handled")
+
 func (s *Server) listFreeAccounts(w http.ResponseWriter, _ *http.Request) {
 	writeAPI(w, http.StatusOK, s.store.FreeAccounts(), "")
 }
@@ -122,6 +124,14 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
+	if profile.Dead {
+		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不能再次进入空间")
+		return
+	}
+	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, input.AdminAccountID, "loaded", map[string]any{
+		"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus,
+		"remove_status": profile.RemoveStatus,
+	})
 	admin, adminCredentials, err := s.currentAdminCredential(r.Context(), input.AdminAccountID)
 	if err != nil {
 		s.failFreeAccount(profile.ID, "invite", err)
@@ -161,20 +171,32 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if runInvite {
-		if _, err = client.Invite(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, profile.Email, input.SeatType); err != nil {
+		inviteStarted := time.Now()
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_start", map[string]any{"seat_type": input.SeatType})
+		var inviteResponse workflow.Response
+		inviteResponse, err = client.Invite(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, profile.Email, input.SeatType)
+		if err != nil {
+			s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_error", map[string]any{"duration_ms": time.Since(inviteStarted).Milliseconds(), "http_status": inviteResponse.StatusCode, "error": err.Error()})
 			s.failFreeAccount(profile.ID, "invite", err)
 			writeAPI(w, http.StatusBadRequest, nil, err.Error())
 			return
 		}
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_success", map[string]any{"duration_ms": time.Since(inviteStarted).Milliseconds(), "http_status": inviteResponse.StatusCode})
 		_, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 			item.InviteStatus, item.AcceptStatus = "completed", "running"
 		})
 	}
-	if _, err = client.Accept(r.Context(), sourceCredentials.SourceAccessToken, admin.TeamAccountID, profile.UserID); err != nil {
+	acceptStarted := time.Now()
+	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_start", map[string]any{"user_id": profile.UserID, "team_account_id": admin.TeamAccountID})
+	var acceptResponse workflow.Response
+	acceptResponse, err = client.Accept(r.Context(), sourceCredentials.SourceAccessToken, admin.TeamAccountID, profile.UserID)
+	if err != nil {
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_error", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "error": err.Error()})
 		s.failFreeAccount(profile.ID, "accept", err)
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
+	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_success", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode})
 	now := time.Now()
 	profile, err = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.InviteStatus, item.AcceptStatus = "joined", "completed", "completed"
@@ -184,7 +206,19 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
+	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "joined", map[string]any{"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus})
 	writeAPI(w, http.StatusOK, profile, "")
+}
+
+// recordJoinTrace adds diagnostic-only events around the combined invite and
+// accept handler. It deliberately does not alter control flow or statuses;
+// its purpose is to show exactly which upstream request is slow or stuck.
+func (s *Server) recordJoinTrace(ctx context.Context, accountID, email, adminID, stage string, details map[string]any) {
+	trace, _ := ctx.Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
+	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+		RunID: trace.RunID, TaskID: trace.TaskID, AccountID: accountID, AdminAccountID: adminID, Type: "join_trace", Stage: stage,
+		Message: "Team 邀请/确认诊断", Details: details,
+	})
 }
 
 func freeAccountJoinSteps(profile model.FreeAccountProfile) (runInvite, runAccept bool) {
@@ -230,6 +264,10 @@ func (s *Server) attachFreeAccountOAuth(w http.ResponseWriter, r *http.Request) 
 	}
 	if profile.AcceptStatus != "completed" {
 		writeAPI(w, http.StatusConflict, nil, "请先完成邀请并进入空间")
+		return
+	}
+	if profile.Dead {
+		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不再执行 OAuth")
 		return
 	}
 	if input.AccessToken == "" && credentials.OAuthAccessToken == "" {
@@ -282,6 +320,10 @@ func (s *Server) startFreeAccountOAuth(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusConflict, nil, "请先完成邀请并进入空间")
 		return
 	}
+	if profile.Dead {
+		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不再执行 OAuth")
+		return
+	}
 	// Prevent duplicate clicks/retries for one account from launching two
 	// OAuth processes. Other account IDs remain fully concurrent.
 	s.oauthMu.RLock()
@@ -298,7 +340,7 @@ func (s *Server) startFreeAccountOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := randomRegistrationID()
-	job := map[string]any{"job_id": jobID, "account_id": id, "email": profile.Email, "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
+	job := map[string]any{"job_id": jobID, "account_id": id, "email": profile.Email, "trigger": "oauth", "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
 	s.oauthMu.Lock()
 	s.oauthJobs[jobID] = job
 	s.oauthMu.Unlock()
@@ -362,14 +404,103 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 			}
 		}
 	}
+	trigger := "oauth"
 	s.oauthMu.Lock()
 	if j := s.oauthJobs[jobID]; j != nil {
+		if value := strings.TrimSpace(fmt.Sprint(j["trigger"])); value != "" && value != "<nil>" {
+			trigger = value
+		}
 		j["status"], j["state"], j["error"], j["result"] = status, status, message, result
 	}
 	s.oauthMu.Unlock()
 	if status != "success" {
 		s.failFreeAccount(accountID, "oauth", errors.New(message))
+		if isDeadOAuthResult(result, message) {
+			s.handleDeadFreeAccount(accountID, result, message, trigger)
+		}
 	}
+}
+
+func isDeadOAuthResult(result map[string]any, message string) bool {
+	if result != nil {
+		if dead, ok := result["dead"].(bool); ok && dead {
+			return true
+		}
+		if strings.EqualFold(fmt.Sprint(result["status"]), "deactivated") {
+			return true
+		}
+	}
+	text := strings.ToLower(message)
+	for _, marker := range []string{
+		"account_deactivated", "account_deleted", "account_banned", "account_disabled", "account_suspended",
+		"deleted or deactivated", "account has been deleted", "account has been deactivated",
+		"account was deleted", "account was deactivated", "account deactivated",
+		"account deleted", "account banned", "account disabled", "account suspended",
+		"access deactivated", "账号已删除", "账号已停用", "账号已禁用", "账号被封",
+		"账户已删除", "账户已停用", "账户已禁用", "账户被封",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleDeadFreeAccount is called only after OAuth has produced an explicit
+// OpenAI deactivation signal. The account is already in the Team space at this
+// point, so remove it immediately and synchronize the mailbox projection.
+func (s *Server) handleDeadFreeAccount(accountID string, result map[string]any, message, trigger string) {
+	profile, _, err := s.store.FreeAccountCredential(accountID)
+	if err != nil {
+		return
+	}
+	code := "account_deactivated"
+	stage := "oauth"
+	httpStatus := 0
+	if result != nil {
+		if value := strings.TrimSpace(fmt.Sprint(result["error_code"])); value != "" && value != "<nil>" {
+			code = value
+		}
+		if value := strings.TrimSpace(fmt.Sprint(result["stage"])); value != "" && value != "<nil>" {
+			stage = value
+		}
+		if value, ok := result["http_status"].(float64); ok {
+			httpStatus = int(value)
+		}
+	}
+	reason := strings.TrimSpace(message)
+	if reason == "" {
+		reason = "OpenAI 返回账号已删除或停用"
+	}
+	now := time.Now()
+	_, _ = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
+		item.Dead, item.DeadReason, item.DeadDetectedAt = true, reason, &now
+		item.Status, item.OAuthStatus, item.LastError = "dead", "failed", "账号已判定为死号: "+reason
+	})
+	_ = s.store.MarkMailAccountDead(profile.Email, reason)
+	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+		AccountID: accountID, AdminAccountID: profile.AdminAccountID, Type: "dead_detected", Stage: stage,
+		Message: "OpenAI 账号判定为死号", HTTPStatus: httpStatus,
+		Details: map[string]any{"error_code": code, "reason": reason, "source": trigger},
+	})
+	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+		AccountID: accountID, AdminAccountID: profile.AdminAccountID, Type: "dead_remove_start", Stage: "remove",
+		Message: "死号开始自动移出空间", Details: map[string]any{"dead_reason": reason},
+	})
+	removeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	removed, removeErr := s.performFreeAccountRemove(removeCtx, accountID)
+	if removeErr != nil {
+		_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+			AccountID: accountID, AdminAccountID: profile.AdminAccountID, Type: "dead_remove_failed", Stage: "remove",
+			Message: "死号自动移出空间失败", Details: map[string]any{"error": removeErr.Error()},
+		})
+		return
+	}
+	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+		AccountID: accountID, AdminAccountID: removed.AdminAccountID, Type: "dead_remove_success", Stage: "remove",
+		Message: "死号已自动移出空间", Details: map[string]any{"dead_reason": reason},
+	})
 }
 
 func (s *Server) runFreeAccountOAuth(jobID, accountID, email string) {
@@ -487,6 +618,10 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
+	if profile.Dead {
+		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不再推送到 Sub2")
+		return
+	}
 	if profile.Sub2AccountID > 0 {
 		writeAPI(w, http.StatusOK, profile, "")
 		return
@@ -583,6 +718,9 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	if err != nil {
 		return profile, false, err
 	}
+	if profile.Dead {
+		return profile, profile.RemoveStatus == "completed", errors.New("该账号已判定为死号")
+	}
 	if profile.Sub2AccountID < 1 {
 		return profile, false, errors.New("账号尚未推送到 Sub2")
 	}
@@ -606,6 +744,9 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 		if allowRelogin && isSub2Unauthorized(err) && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
 			if reloginErr := s.reloginAndRepush(ctx, profile.ID); reloginErr == nil {
 				return s.performFreeAccountQuotaInternal(ctx, id, allowAutoRemove, false)
+			} else if errors.Is(reloginErr, errDeadAccountHandled) {
+				updated, _, readErr := s.store.FreeAccountCredential(profile.ID)
+				return updated, updated.RemoveStatus == "completed", readErr
 			} else {
 				err = fmt.Errorf("Sub2 返回 401，重登并重新推送失败: %w", reloginErr)
 			}
@@ -669,6 +810,9 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 	if err != nil {
 		if isSub2Unauthorized(err) && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
 			if reloginErr := s.reloginAndRepush(ctx, id); reloginErr != nil {
+				if errors.Is(reloginErr, errDeadAccountHandled) {
+					return true, nil
+				}
 				return false, fmt.Errorf("Sub2 返回 401，重登并重新推送失败: %w", reloginErr)
 			}
 			return true, nil
@@ -677,6 +821,9 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 	}
 	if status == http.StatusUnauthorized && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
 		if reloginErr := s.reloginAndRepush(ctx, id); reloginErr != nil {
+			if errors.Is(reloginErr, errDeadAccountHandled) {
+				return true, nil
+			}
 			return false, fmt.Errorf("Sub2 返回 401，重登并重新推送失败: %w", reloginErr)
 		}
 		return true, nil
@@ -689,8 +836,11 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	if err != nil {
 		return err
 	}
+	if profile.Dead {
+		return errDeadAccountHandled
+	}
 	jobID := randomRegistrationID()
-	job := map[string]any{"job_id": jobID, "account_id": accountID, "email": profile.Email, "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
+	job := map[string]any{"job_id": jobID, "account_id": accountID, "email": profile.Email, "trigger": "relogin", "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
 	s.oauthMu.Lock()
 	s.oauthJobs[jobID] = job
 	s.oauthMu.Unlock()
@@ -702,6 +852,9 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	completed := cloneRegistrationJob(s.oauthJobs[jobID])
 	s.oauthMu.RUnlock()
 	if fmt.Sprint(completed["status"]) != "success" {
+		if latest, _, readErr := s.store.FreeAccountCredential(accountID); readErr == nil && latest.Dead {
+			return errDeadAccountHandled
+		}
 		return errors.New(fmt.Sprint(completed["error"]))
 	}
 	profile, credentials, err := s.store.FreeAccountCredential(accountID)
@@ -750,8 +903,10 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 
 func (s *Server) removeFreeAccount(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
-	unlock := s.lockFreeAccount(id)
-	defer unlock()
+	// Removal must remain available when an earlier invite/accept request is
+	// stuck in its network call. The manual stage editor can mark that account
+	// as entered, after which this operation is allowed to clean up the remote
+	// Team membership without waiting on the stale workflow mutex.
 	profile, err := s.performFreeAccountRemove(r.Context(), id)
 	if err != nil {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
@@ -761,6 +916,8 @@ func (s *Server) removeFreeAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model.FreeAccountProfile, error) {
+	unlock := s.lockFreeAccountRemove(id)
+	defer unlock()
 	profile, _, err := s.store.FreeAccountCredential(id)
 	if err != nil {
 		return profile, err
@@ -788,10 +945,13 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 		return profile, err
 	}
 	now := time.Now()
-	return s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
+	updated, updateErr := s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.RemoveStatus, item.LastError = "removed", "completed", ""
 		item.AutoRemove, item.RemovedAt = false, &now
 	})
+	_ = s.store.ReleaseSeatReservationByAccount(id)
+	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{AccountID: id, Type: "seat_released", Stage: "remove", Message: "账号移出空间，释放席位预占"})
+	return updated, updateErr
 }
 
 type freeAccountStageInput struct {
@@ -821,9 +981,12 @@ func (s *Server) updateFreeAccountStage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("id"))
-	unlock := s.lockFreeAccount(id)
-	defer unlock()
+	// This endpoint is intentionally usable while an automatic request is
+	// stuck. It is the recovery path for manually confirming an invite or
+	// marking a stage failed; holding the per-account workflow mutex here would
+	// make that recovery impossible.
 	now := time.Now()
+	before, _, beforeErr := s.store.FreeAccountCredential(id)
 	profile, err := s.store.UpdateFreeAccount(id, func(item *model.FreeAccountProfile) {
 		applyManualFreeAccountStage(item, input.Stage, input.Status, input.Message, now)
 		if input.Stage == "push" && input.Status == "completed" {
@@ -844,7 +1007,29 @@ func (s *Server) updateFreeAccountStage(w http.ResponseWriter, r *http.Request) 
 		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
+	if beforeErr == nil {
+		_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{AccountID: id, AdminAccountID: profile.AdminAccountID, Type: "manual_stage", Stage: input.Stage, FromStatus: stageStatus(before, input.Stage), ToStatus: input.Status, Message: "手动修正流程状态", Details: map[string]any{"message": input.Message}})
+	}
 	writeAPI(w, http.StatusOK, profile, "")
+}
+
+func stageStatus(profile model.FreeAccountProfile, stage string) string {
+	switch stage {
+	case "invite":
+		return profile.InviteStatus
+	case "accept":
+		return profile.AcceptStatus
+	case "oauth":
+		return profile.OAuthStatus
+	case "push":
+		return profile.PushStatus
+	case "quota":
+		return profile.QuotaStatus
+	case "remove":
+		return profile.RemoveStatus
+	default:
+		return ""
+	}
 }
 
 func validFreeAccountStage(stage string) bool {
@@ -1195,7 +1380,7 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 			}
 			now := time.Now()
 			for _, account := range s.store.FreeAccounts() {
-				if account.Sub2AccountID < 1 || account.RemoveStatus == "completed" {
+				if account.Dead || account.Sub2AccountID < 1 || account.RemoveStatus == "completed" {
 					continue
 				}
 				statusDue := settings.Enable401Check && (account.StatusCheckedAt == nil || now.Sub(*account.StatusCheckedAt) >= statusInterval)
@@ -1224,6 +1409,13 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 
 func (s *Server) lockFreeAccount(id string) func() {
 	value, _ := s.freeLocks.LoadOrStore(id, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+func (s *Server) lockFreeAccountRemove(id string) func() {
+	value, _ := s.freeRemoveLocks.LoadOrStore(id, &sync.Mutex{})
 	mutex := value.(*sync.Mutex)
 	mutex.Lock()
 	return mutex.Unlock
