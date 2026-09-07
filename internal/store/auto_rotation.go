@@ -100,6 +100,30 @@ func (s *Store) AutoRotationRuns() []model.AutoRotationRun {
 	}
 	return result
 }
+
+// PurgeAutoRotationHistory removes diagnostic and batch records older than
+// the supplied retention window. Auto-rotation history is intentionally
+// bounded so the SQLite file and the history endpoint remain fast over time.
+func (s *Store) PurgeAutoRotationHistory(olderThan time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := formatTime(olderThan)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		"DELETE FROM auto_rotation_events WHERE created_at < ?",
+		"DELETE FROM auto_rotation_tasks WHERE updated_at < ?",
+		"DELETE FROM auto_rotation_runs WHERE started_at < ?",
+	} {
+		if _, err := tx.Exec(statement, cutoff); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
 func (s *Store) SaveAutoRotationTask(task model.AutoRotationTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -161,6 +185,106 @@ func (s *Store) AddAutoRotationEvent(event model.AutoRotationEvent) error {
 	return err
 }
 
+// AddAutoRotationEvents persists a group of audit events in one transaction.
+// The HTTP layer uses this from its asynchronous audit writer so diagnostic
+// logging never waits on a database commit in the business goroutine.
+func (s *Store) AddAutoRotationEvents(events []model.AutoRotationEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare("INSERT INTO auto_rotation_events(id,run_id,task_id,account_id,payload,created_at) VALUES(?,?,?,?,?,?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, event := range events {
+		if event.ID == "" {
+			event.ID = strconv.FormatInt(time.Now().UnixNano(), 36)
+		}
+		if event.CreatedAt.IsZero() {
+			event.CreatedAt = time.Now()
+		}
+		b, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			continue
+		}
+		if _, err := stmt.Exec(event.ID, event.RunID, event.TaskID, event.AccountID, string(b), formatTime(event.CreatedAt)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) EnsureFreeAccountLifecycleTask(account model.FreeAccountProfile) (model.AutoRotationTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query("SELECT payload FROM auto_rotation_tasks WHERE account_id=?", account.ID)
+	if err != nil {
+		return model.AutoRotationTask{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		var task model.AutoRotationTask
+		if rows.Scan(&raw) == nil && json.Unmarshal([]byte(raw), &task) == nil && task.Lifecycle {
+			return task, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return model.AutoRotationTask{}, err
+	}
+	started := account.ImportedAt
+	if started.IsZero() {
+		started = account.CreatedAt
+	}
+	if started.IsZero() {
+		started = time.Now()
+	}
+	task := model.AutoRotationTask{
+		ID: "lifecycle-" + account.ID, AccountID: account.ID, Email: account.Email,
+		Source: "lifecycle", Status: "lifecycle", Lifecycle: true, StartedAt: started,
+		Steps: []model.AutoRotationStep{
+			{Key: "invite", Name: "邀请并进入空间", Status: account.InviteStatus},
+			{Key: "oauth", Name: "获取 Codex OAuth", Status: account.OAuthStatus},
+			{Key: "push", Name: "推送当前下游", Status: account.PushStatus},
+			{Key: "quota", Name: "查询额度", Status: account.QuotaStatus},
+			{Key: "remove", Name: "移出空间", Status: account.RemoveStatus},
+		},
+	}
+	b, err := json.Marshal(task)
+	if err != nil {
+		return model.AutoRotationTask{}, err
+	}
+	_, err = s.db.Exec("INSERT INTO auto_rotation_tasks(id,run_id,account_id,payload,updated_at) VALUES(?,?,?,?,?)", task.ID, "", account.ID, string(b), formatTime(time.Now()))
+	return task, err
+}
+
+func (s *Store) AutoRotationEventsByAccount(accountID string) []model.AutoRotationEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query("SELECT payload FROM auto_rotation_events WHERE account_id=? ORDER BY created_at DESC LIMIT 10000", accountID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	result := make([]model.AutoRotationEvent, 0)
+	for rows.Next() {
+		var raw string
+		var event model.AutoRotationEvent
+		if rows.Scan(&raw) == nil && json.Unmarshal([]byte(raw), &event) == nil {
+			result = append(result, event)
+		}
+	}
+	return result
+}
+
 func (s *Store) AutoRotationEvents(runID, taskID string) []model.AutoRotationEvent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,7 +302,7 @@ func (s *Store) AutoRotationEvents(runID, taskID string) []model.AutoRotationEve
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
-	query += " ORDER BY created_at ASC LIMIT 5000"
+	query += " ORDER BY created_at DESC LIMIT 5000"
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil

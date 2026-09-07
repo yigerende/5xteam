@@ -118,7 +118,8 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 	if snapshotCount == 0 {
 		run.Reason = "没有可用的席位统计快照，请先在 Team 账号管理页面刷新 5x 席位"
 		_ = s.store.SaveAutoRotationRun(run)
-		_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Message: run.Reason, Details: map[string]any{"seat_total": seatTotal, "seat_remaining": seatRemaining, "inside_premium": insidePremium, "reserved": reserved, "snapshot_count": snapshotCount}})
+		s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "decision", Stage: "seat_snapshot", Message: run.Reason, Details: map[string]any{"seat_total": seatTotal, "seat_remaining": seatRemaining, "inside_premium": insidePremium, "reserved": reserved, "snapshot_count": snapshotCount}})
+		s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "final", Source: "auto_rotation", Operation: "run", Stage: "decision", Message: "自动轮转未执行", Details: map[string]any{"status": run.Status, "reason": run.Reason}})
 		return run, true, nil
 	}
 	availableSeats := availablePremiumFromSnapshot(seatTotal, insidePremium, reserved)
@@ -126,12 +127,13 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 	if !shouldRun {
 		run.Reason = decisionReason
 		_ = s.store.SaveAutoRotationRun(run)
-		_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Message: run.Reason, Details: map[string]any{"average_percent": avg, "threshold_percent": settings.ThresholdPercent, "seat_total": seatTotal, "seat_remaining": seatRemaining, "inside_premium": insidePremium, "reserved": reserved, "available": availableSeats}})
+		s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "decision", Stage: "seat_snapshot", Message: run.Reason, Details: map[string]any{"average_percent": avg, "threshold_percent": settings.ThresholdPercent, "seat_total": seatTotal, "seat_remaining": seatRemaining, "inside_premium": insidePremium, "reserved": reserved, "available": availableSeats}})
+		s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "final", Source: "auto_rotation", Operation: "run", Stage: "decision", Message: "自动轮转未执行", Details: map[string]any{"status": run.Status, "reason": run.Reason}})
 		return run, true, nil
 	}
 	run.Status, run.Reason = "running", fmt.Sprintf("7天平均剩余额度 %.1f%% ≤ 阈值 %.1f%%", avg, settings.ThresholdPercent)
 	_ = s.store.SaveAutoRotationRun(run)
-	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Message: run.Reason, Details: map[string]any{"average_percent": avg, "threshold_percent": settings.ThresholdPercent, "seat_total": seatTotal, "seat_remaining": seatRemaining, "inside_premium": insidePremium, "reserved": reserved, "available": availableSeats}})
+	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "decision", Stage: "seat_snapshot", Message: run.Reason, Details: map[string]any{"average_percent": avg, "threshold_percent": settings.ThresholdPercent, "seat_total": seatTotal, "seat_remaining": seatRemaining, "inside_premium": insidePremium, "reserved": reserved, "available": availableSeats}})
 	s.autoRunning = true
 	runCtx := ctx
 	// A HTTP request context is cancelled as soon as the manual trigger
@@ -231,7 +233,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 	run.CandidateRotationCount = len(selected)
 	need := s.availablePremiumSlots(ctx, admins, run.ID)
 	run.DecisionAvailableSeats = need
-	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Message: "自动补充前实时席位快照", Details: map[string]any{"available_after_reservation": need, "max_per_run": settings.MaxPerRun}})
+	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "plan", Stage: "seat_snapshot", Message: "自动补充前实时席位快照", Details: map[string]any{"available_after_reservation": need, "max_per_run": settings.MaxPerRun}})
 	need = autoRotationPlan(settings.MaxPerRun, need, 0, len(candidates))
 	for len(selected) < need {
 		for _, mail := range s.store.MailAccounts() {
@@ -276,6 +278,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 		now := time.Now()
 		run.CompletedAt = &now
 		_ = s.store.UpdateAutoRotationRun(run)
+		s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "final", Source: "auto_rotation", Operation: "run", Stage: "complete", Message: run.Reason, Details: map[string]any{"status": run.Status, "planned": run.Planned, "succeeded": run.Succeeded, "failed": run.Failed}})
 		return
 	}
 	run.Planned = len(selected)
@@ -335,6 +338,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 		run.Status = "completed"
 	}
 	_ = s.store.UpdateAutoRotationRun(run)
+	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "final", Source: "auto_rotation", Operation: "run", Stage: "complete", Message: "自动轮转批次完成", Details: map[string]any{"status": run.Status, "planned": run.Planned, "succeeded": run.Succeeded, "failed": run.Failed, "candidate_rotation": run.CandidateRotationCount, "candidate_mail": run.CandidateMailCount}})
 }
 
 func eligibleAutoRotationAccount(account model.FreeAccountProfile) bool {
@@ -386,7 +390,7 @@ func (s *Server) availablePremiumSlots(ctx context.Context, admins []model.Admin
 			if len(runID) > 0 {
 				event.RunID = runID[0]
 			}
-			_ = s.store.AddAutoRotationEvent(event)
+			s.enqueueAuditEvent(event)
 		}
 	}
 	return total
@@ -405,7 +409,7 @@ func (s *Server) selectPremiumAdmin(ctx context.Context, admins []model.AdminAcc
 				available := cap.Premium.Total - inside - inFlight
 				if available > 0 {
 					lock.Unlock()
-					_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: runID, AccountID: accountID, AdminAccountID: a.ID, Type: "seat_check", Message: "实时席位规则允许执行", Details: map[string]any{"remote_total": cap.Premium.Total, "remote_remaining": cap.Premium.Remaining, "inside_premium": inside, "in_flight_invites": inFlight, "available": available}})
+					s.enqueueAuditEvent(model.AutoRotationEvent{RunID: runID, AccountID: accountID, AdminAccountID: a.ID, Type: "seat_check", Source: "auto_rotation", Operation: "invite", Stage: "seat_check", Message: "实时席位规则允许执行", Details: map[string]any{"remote_total": cap.Premium.Total, "remote_remaining": cap.Premium.Remaining, "inside_premium": inside, "in_flight_invites": inFlight, "available": available}})
 					return a.ID, nil
 				}
 			}
@@ -483,6 +487,10 @@ func pendingAutoInviteCountForAdmin(tasks []model.AutoRotationTask, accounts []m
 
 func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTask, run *model.AutoRotationRun, runMu *sync.Mutex, settings model.AutoRotationSettings) {
 	taskCtx := context.WithValue(ctx, autoRotationTraceContextKey{}, autoRotationTraceContext{RunID: task.RunID, TaskID: task.ID})
+	provider := "sub2"
+	if subSettings, _, settingsErr := s.store.Sub2Settings(); settingsErr == nil {
+		provider = providerForSettings(subSettings)
+	}
 	defer s.store.ReleaseAutoRotationClaim(task.AccountID)
 	step := func(key string, status string, msg string) {
 		now := time.Now()
@@ -501,7 +509,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 		task.Status = status
 		task.Error = msg
 		_ = s.store.UpdateAutoRotationTask(task)
-		_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, AdminAccountID: task.AdminAccountID, Type: "step", Stage: key, ToStatus: status, Message: msg})
+		s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "step", Operation: key, Source: "auto_rotation", Provider: provider, Stage: key, ToStatus: status, Message: msg})
 	}
 	attemptStep := func(fn func() error) error {
 		var err error
@@ -513,7 +521,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 				if task.CurrentStep == "oauth" {
 					message = "OAuth 失败，重新创建全新 CodexAuthRT 会话并从登录开始执行"
 				}
-				_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, AdminAccountID: task.AdminAccountID, Type: "retry", Stage: task.CurrentStep, Attempt: attempt, Message: message, Details: map[string]any{"fresh_oauth_session": task.CurrentStep == "oauth"}})
+				s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "retry", Operation: task.CurrentStep, Source: "auto_rotation", Provider: provider, Stage: task.CurrentStep, Attempt: attempt, Message: message, Details: map[string]any{"fresh_oauth_session": task.CurrentStep == "oauth"}})
 				time.Sleep(time.Duration(attempt) * time.Second)
 			}
 			started := time.Now()
@@ -522,7 +530,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 			if err != nil {
 				message = err.Error()
 			}
-			_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, AdminAccountID: task.AdminAccountID, Type: "request", Stage: task.CurrentStep, Attempt: attempt + 1, DurationMS: time.Since(started).Milliseconds(), Message: message})
+			s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "request", Operation: task.CurrentStep, Source: "auto_rotation", Provider: provider, Stage: task.CurrentStep, Attempt: attempt + 1, DurationMS: time.Since(started).Milliseconds(), Message: message})
 			if err == nil {
 				return nil
 			}
@@ -545,7 +553,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 		if task.ReservationID != "" {
 			if profile, _, profileErr := s.store.FreeAccountCredential(task.AccountID); profileErr == nil && profile.AcceptStatus != "completed" {
 				_ = s.store.ReleaseSeatReservation(task.ReservationID)
-				_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, AdminAccountID: task.AdminAccountID, Type: "seat_released", Stage: "invite", Message: "邀请失败且账号未进入空间，释放席位"})
+				s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "seat_released", Source: "auto_rotation", Operation: "invite", Stage: "invite", Message: "邀请失败且账号未进入空间，释放席位"})
 			}
 		}
 		runMu.Lock()
@@ -594,7 +602,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 			if settings, _, settingsErr := s.store.Sub2Settings(); settingsErr == nil && strings.EqualFold(settings.Provider, "cpa") {
 				provider = "CPA"
 			}
-			_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, AdminAccountID: task.AdminAccountID, Type: "seat_released", Stage: "quota", Message: provider + " 推送并额度获取成功，释放 5x 席位预占", Details: map[string]any{"reservation_id": task.ReservationID, "provider": strings.ToLower(provider)}})
+			s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "seat_released", Source: "auto_rotation", Provider: strings.ToLower(provider), Operation: "quota", Stage: "quota", Message: provider + " 推送并额度获取成功，释放 5x 席位预占", Details: map[string]any{"reservation_id": task.ReservationID, "provider": strings.ToLower(provider)}})
 		}
 	}
 	task.Status = "completed"
@@ -628,6 +636,23 @@ func (s *Server) invokeFreeHandler(ctx context.Context, op, id string, body map[
 	req.SetPathValue("id", id)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
+	// Capture a compact, secret-free request/response envelope for the
+	// execution history. This is diagnostic-only and does not alter the
+	// handler's response or control flow.
+	var responsePayload map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &responsePayload)
+	provider := ""
+	if settings, _, settingsErr := s.store.Sub2Settings(); settingsErr == nil {
+		provider = providerForSettings(settings)
+	}
+	profile, _, _ := s.store.FreeAccountCredential(id)
+	trace, _ := ctx.Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		RunID: trace.RunID, TaskID: trace.TaskID, AccountID: id, Email: profile.Email,
+		Type: "exchange", Source: "auto_rotation", Provider: provider, Operation: op, Stage: op,
+		HTTPStatus: rec.Code, Message: "自动步骤请求返回", Request: body,
+		Response: responsePayload,
+	})
 	if rec.Code >= 300 {
 		var out response
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)

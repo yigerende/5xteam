@@ -43,6 +43,10 @@ type Server struct {
 	autoMu           sync.Mutex
 	autoAdminLocks   sync.Map
 	autoRunning      bool
+	auditQueue       chan model.AutoRotationEvent
+	auditWG          sync.WaitGroup
+	auditStop        chan struct{}
+	auditCloseOnce   sync.Once
 }
 
 const (
@@ -63,7 +67,26 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 	}
 	_ = dataStore.RecoverAutoRotationClaims()
 	_ = dataStore.RecoverAutoRotationTasks()
-	return &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), cpa: cpa.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any)}, nil
+	// Keep the execution history bounded to the requested two-day window.
+	// Cleanup is a single local transaction and runs once at startup, outside
+	// all request/rotation workers.
+	_ = dataStore.PurgeAutoRotationHistory(time.Now().Add(-48 * time.Hour))
+	server := &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), cpa: cpa.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any), auditQueue: make(chan model.AutoRotationEvent, 2048), auditStop: make(chan struct{})}
+	server.auditWG.Add(1)
+	go server.auditWriter()
+	return server, nil
+}
+
+// Close flushes the diagnostic queue without participating in normal request
+// latency. It is intended for graceful process shutdown only.
+func (s *Server) Close() {
+	if s == nil {
+		return
+	}
+	s.auditCloseOnce.Do(func() {
+		close(s.auditStop)
+		s.auditWG.Wait()
+	})
 }
 
 func (s *Server) Handler() http.Handler {
@@ -116,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/auto-rotation/runs", s.listAutoRotationRuns)
 	mux.HandleFunc("GET /api/auto-rotation/runs/{id}/tasks", s.listAutoRotationTasks)
 	mux.HandleFunc("GET /api/auto-rotation/events", s.listAutoRotationEvents)
+	mux.HandleFunc("GET /api/free-accounts/{id}/events", s.listFreeAccountEvents)
 	mux.HandleFunc("POST /api/free-accounts/import", s.importFreeAccounts)
 	mux.HandleFunc("DELETE /api/free-accounts/{id}", s.deleteFreeAccount)
 	mux.HandleFunc("POST /api/free-accounts/{id}/join", s.joinFreeAccount)
@@ -176,6 +200,20 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) StartBackground(ctx context.Context) {
 	go s.monitorFreeAccounts(ctx)
 	go s.autoRotationLoop(ctx)
+	go s.autoRotationHistoryCleanup(ctx)
+}
+
+func (s *Server) autoRotationHistoryCleanup(ctx context.Context) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = s.store.PurgeAutoRotationHistory(time.Now().Add(-48 * time.Hour))
+		}
+	}
 }
 
 func mustSub(root fs.FS, dir string) fs.FS {

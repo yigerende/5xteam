@@ -307,6 +307,9 @@ type AutoRotationTask struct {
 	StartedAt       time.Time          `json:"started_at"`
 	CompletedAt     *time.Time         `json:"completed_at,omitempty"`
 	Steps           []AutoRotationStep `json:"steps,omitempty"`
+	// Lifecycle marks the durable account history task created when an account
+	// enters Team rotation. It is not an executable auto-rotation task.
+	Lifecycle bool `json:"lifecycle,omitempty"`
 }
 
 type AutoRotationStep struct {
@@ -323,8 +326,12 @@ type AutoRotationEvent struct {
 	RunID          string         `json:"run_id,omitempty"`
 	TaskID         string         `json:"task_id,omitempty"`
 	AccountID      string         `json:"account_id,omitempty"`
+	Email          string         `json:"email,omitempty"`
 	AdminAccountID string         `json:"admin_account_id,omitempty"`
 	Type           string         `json:"type"`
+	Source         string         `json:"source,omitempty"`
+	Provider       string         `json:"provider,omitempty"`
+	Operation      string         `json:"operation,omitempty"`
 	Stage          string         `json:"stage,omitempty"`
 	FromStatus     string         `json:"from_status,omitempty"`
 	ToStatus       string         `json:"to_status,omitempty"`
@@ -332,6 +339,9 @@ type AutoRotationEvent struct {
 	Attempt        int            `json:"attempt,omitempty"`
 	DurationMS     int64          `json:"duration_ms,omitempty"`
 	Message        string         `json:"message,omitempty"`
+	Request        map[string]any `json:"request,omitempty"`
+	Response       map[string]any `json:"response,omitempty"`
+	Level          string         `json:"level,omitempty"`
 	Details        map[string]any `json:"details,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 }

@@ -698,6 +698,10 @@ func (s *Server) importMailAccountToTeam(ctx context.Context, email string) (mod
 		Label: info.Email, Email: info.Email, Name: info.Name, UserID: info.UserID,
 		PersonalAccountID: info.AccountID, PlanType: info.PlanType,
 	}, credentials.AccessToken)
+	if err == nil {
+		_, _ = s.store.EnsureFreeAccountLifecycleTask(profile)
+		s.auditAccountEvent(ctx, profile.ID, "lifecycle", "rotation", "manual_single", "", "账号已从邮件管理进入 Team 轮转", map[string]any{"email": profile.Email})
+	}
 	return profile, err
 }
 

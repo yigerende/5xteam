@@ -27,7 +27,26 @@ import (
 var errDeadAccountHandled = errors.New("dead account detected and removal handled")
 
 func (s *Server) listFreeAccounts(w http.ResponseWriter, _ *http.Request) {
-	writeAPI(w, http.StatusOK, s.store.FreeAccounts(), "")
+	accounts := s.store.FreeAccounts()
+	for _, account := range accounts {
+		_, _ = s.store.EnsureFreeAccountLifecycleTask(account)
+	}
+	writeAPI(w, http.StatusOK, accounts, "")
+}
+
+func (s *Server) listFreeAccountEvents(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	profile, _, err := s.store.FreeAccountCredential(id)
+	if err != nil {
+		writeAPI(w, http.StatusNotFound, nil, err.Error())
+		return
+	}
+	task, taskErr := s.store.EnsureFreeAccountLifecycleTask(profile)
+	if taskErr != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, taskErr.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"account": profile, "lifecycle_task": task, "events": s.store.AutoRotationEventsByAccount(id)}, "")
 }
 
 type freeAccountImportInput struct {
@@ -81,6 +100,8 @@ func (s *Server) importFreeAccounts(w http.ResponseWriter, r *http.Request) {
 			updated++
 		}
 		items = append(items, profile)
+		_, _ = s.store.EnsureFreeAccountLifecycleTask(profile)
+		s.auditAccountEvent(r.Context(), profile.ID, "lifecycle", "rotation", "manual_single", "", "账号已进入 Team 轮转", map[string]any{"email": profile.Email})
 	}
 	writeAPI(w, http.StatusOK, map[string]any{"items": items, "created": created, "updated": updated, "errors": errorsByIndex}, "")
 }
@@ -125,6 +146,7 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
+	s.auditAccountEvent(r.Context(), profile.ID, "join", "invite", "manual_single", "", "开始邀请/进入空间", map[string]any{"seat_type": input.SeatType, "admin_account_id": input.AdminAccountID})
 	if profile.Dead {
 		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不能再次进入空间")
 		return
@@ -163,6 +185,7 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !runAccept {
+		s.auditAccountEvent(r.Context(), profile.ID, "join", "invite", "manual_single", "", "团队关联已更新", map[string]any{"status": "completed"})
 		writeAPI(w, http.StatusOK, profile, "")
 		return
 	}
@@ -208,6 +231,7 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "joined", map[string]any{"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus})
+	s.auditAccountEvent(r.Context(), profile.ID, "join", "accept", "manual_single", "", "邀请并进入空间成功", map[string]any{"admin_account_id": admin.ID, "team_account_id": admin.TeamAccountID})
 	writeAPI(w, http.StatusOK, profile, "")
 }
 
@@ -216,10 +240,19 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 // its purpose is to show exactly which upstream request is slow or stuck.
 func (s *Server) recordJoinTrace(ctx context.Context, accountID, email, adminID, stage string, details map[string]any) {
 	trace, _ := ctx.Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
-	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+	event := model.AutoRotationEvent{
 		RunID: trace.RunID, TaskID: trace.TaskID, AccountID: accountID, AdminAccountID: adminID, Type: "join_trace", Stage: stage,
-		Message: "Team 邀请/确认诊断", Details: details,
-	})
+		Email: email, Operation: "join", Source: "join", Message: "Team 邀请/确认诊断", Details: details,
+	}
+	// Keep a structured, secret-free copy of the upstream exchange. The
+	// details map remains the human-readable diagnostic summary while these
+	// fields let the execution-history view distinguish request from response.
+	if strings.HasSuffix(stage, "_start") {
+		event.Request = details
+	} else if strings.HasSuffix(stage, "_success") || strings.HasSuffix(stage, "_error") {
+		event.Response = details
+	}
+	s.enqueueAuditEvent(event)
 }
 
 func freeAccountJoinSteps(profile model.FreeAccountProfile) (runInvite, runAccept bool) {
@@ -358,6 +391,7 @@ func (s *Server) startFreeAccountOAuth(w http.ResponseWriter, r *http.Request) {
 		item.LastError = ""
 	})
 	go s.runFreeAccountOAuth(jobID, id, profile.Email)
+	s.auditAccountEvent(r.Context(), id, "oauth", "oauth", "manual_single", "", "OAuth 任务已创建", map[string]any{"job_id": jobID})
 	writeAPI(w, http.StatusAccepted, map[string]any{"job": cloneRegistrationJob(job)}, "")
 }
 
@@ -432,6 +466,29 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 			s.handleDeadFreeAccount(accountID, result, message, trigger)
 		}
 	}
+	details := map[string]any{"job_id": jobID, "status": status}
+	if result != nil {
+		for _, key := range []string{"status", "error_code", "stage", "http_status", "dead"} {
+			if value, ok := result[key]; ok {
+				details[key] = value
+			}
+		}
+	}
+	if message != "" {
+		details["error"] = message
+	}
+	provider := ""
+	if settings, _, settingsErr := s.store.Sub2Settings(); settingsErr == nil {
+		provider = providerForSettings(settings)
+	}
+	request := map[string]any{"job_id": jobID, "trigger": trigger, "account_id": accountID}
+	response := map[string]any{}
+	if result != nil {
+		for key, value := range result {
+			response[key] = value
+		}
+	}
+	s.auditAccountEventWithIO(context.Background(), accountID, "oauth", "oauth", "oauth", provider, "OAuth "+map[bool]string{true: "成功", false: "失败"}[status == "success"], details, request, response)
 }
 
 func isDeadOAuthResult(result map[string]any, message string) bool {
@@ -491,12 +548,12 @@ func (s *Server) handleDeadFreeAccount(accountID string, result map[string]any, 
 		item.Status, item.OAuthStatus, item.LastError = "dead", "failed", "账号已判定为死号: "+reason
 	})
 	_ = s.store.MarkMailAccountDead(profile.Email, reason)
-	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+	s.enqueueAuditEvent(model.AutoRotationEvent{
 		AccountID: accountID, AdminAccountID: profile.AdminAccountID, Type: "dead_detected", Stage: stage,
 		Message: "OpenAI 账号判定为死号", HTTPStatus: httpStatus,
 		Details: map[string]any{"error_code": code, "reason": reason, "source": trigger},
 	})
-	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+	s.enqueueAuditEvent(model.AutoRotationEvent{
 		AccountID: accountID, AdminAccountID: profile.AdminAccountID, Type: "dead_remove_start", Stage: "remove",
 		Message: "死号开始自动移出空间", Details: map[string]any{"dead_reason": reason},
 	})
@@ -504,13 +561,13 @@ func (s *Server) handleDeadFreeAccount(accountID string, result map[string]any, 
 	defer cancel()
 	removed, removeErr := s.performFreeAccountRemove(removeCtx, accountID)
 	if removeErr != nil {
-		_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+		s.enqueueAuditEvent(model.AutoRotationEvent{
 			AccountID: accountID, AdminAccountID: profile.AdminAccountID, Type: "dead_remove_failed", Stage: "remove",
 			Message: "死号自动移出空间失败", Details: map[string]any{"error": removeErr.Error()},
 		})
 		return
 	}
-	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{
+	s.enqueueAuditEvent(model.AutoRotationEvent{
 		AccountID: accountID, AdminAccountID: removed.AdminAccountID, Type: "dead_remove_success", Stage: "remove",
 		Message: "死号已自动移出空间", Details: map[string]any{"dead_reason": reason},
 	})
@@ -640,6 +697,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
+	s.auditAccountEvent(r.Context(), profile.ID, "push", "push", "manual_single", providerForSettings(settings), "开始推送当前下游", map[string]any{"provider": providerForSettings(settings)})
 	if strings.EqualFold(settings.Provider, "cpa") {
 		if strings.TrimSpace(profile.CPAAuthFileName) != "" {
 			writeAPI(w, http.StatusOK, profile, "")
@@ -676,6 +734,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAPI(w, 200, profile, "")
+		s.auditAccountEventWithIO(r.Context(), profile.ID, "push", "push", "manual_single", "cpa", "CPA 推送成功", map[string]any{"auth_file": fileName}, map[string]any{"file_name": fileName, "group_ids": cpaSettings.GroupIDs, "plan_type": "team"}, map[string]any{"uploaded": true, "file_name": fileName})
 		return
 	}
 	if profile.Sub2AccountID > 0 {
@@ -744,6 +803,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPI(w, http.StatusOK, profile, "")
+	s.auditAccountEventWithIO(r.Context(), profile.ID, "push", "push", "manual_single", "sub2", "Sub2 推送成功", map[string]any{"account_id": created.ID}, map[string]any{"name": accountName, "group_ids": settings.GroupIDs, "models": settings.Models, "priority": settings.Priority, "cpa_ws": settings.CpaWS}, map[string]any{"account_id": created.ID, "name": created.Name})
 }
 
 func (s *Server) reloginFreeAccount(w http.ResponseWriter, r *http.Request) {
@@ -777,10 +837,13 @@ func (s *Server) reloginFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusConflict, nil, "账号尚未推送到当前 Sub2")
 		return
 	}
+	s.auditAccountEvent(r.Context(), id, "relogin", "relogin", "manual_single", providerForSettings(settings), "开始重登并重新推送", nil)
 	if err := s.reloginAndRepush(r.Context(), id); err != nil {
+		s.auditAccountEvent(r.Context(), id, "relogin", "relogin", "manual_single", providerForSettings(settings), "重登失败", map[string]any{"error": err.Error()})
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
+	s.auditAccountEvent(r.Context(), id, "relogin", "relogin", "manual_single", providerForSettings(settings), "重登并重新推送成功", nil)
 	updated, _, readErr := s.store.FreeAccountCredential(id)
 	if readErr != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, readErr.Error())
@@ -849,11 +912,13 @@ func (s *Server) checkFreeAccountQuota(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	unlock := s.lockFreeAccount(id)
 	defer unlock()
+	s.auditAccountEvent(r.Context(), id, "quota", "quota", "manual_single", "", "开始查询额度", nil)
 	profile, removed, err := s.performFreeAccountQuota(r.Context(), id, true)
 	if err != nil {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
+	s.auditAccountEvent(r.Context(), id, "quota", "quota", "manual_single", "", "额度查询完成", map[string]any{"auto_removed": removed})
 	writeAPI(w, http.StatusOK, map[string]any{"account": profile, "auto_removed": removed}, "")
 }
 
@@ -1148,6 +1213,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 
 func (s *Server) removeFreeAccount(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
+	s.auditAccountEvent(r.Context(), id, "remove", "remove", "manual_single", "", "开始移出空间", nil)
 	// Removal must remain available when an earlier invite/accept request is
 	// stuck in its network call. The manual stage editor can mark that account
 	// as entered, after which this operation is allowed to clean up the remote
@@ -1157,6 +1223,7 @@ func (s *Server) removeFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
+	s.auditAccountEvent(r.Context(), id, "remove", "remove", "manual_single", "", "移出空间成功", nil)
 	writeAPI(w, http.StatusOK, profile, "")
 }
 
@@ -1202,7 +1269,7 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 		item.AutoRemove, item.RemovedAt = false, &now
 	})
 	_ = s.store.ReleaseSeatReservationByAccount(id)
-	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{AccountID: id, Type: "seat_released", Stage: "remove", Message: "账号移出空间，释放席位预占"})
+	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "seat_released", Source: "remove", Operation: "remove", Stage: "remove", Message: "账号移出空间，释放席位预占"})
 	return updated, updateErr
 }
 
@@ -1282,7 +1349,7 @@ func (s *Server) updateFreeAccountStage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if beforeErr == nil {
-		_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{AccountID: id, AdminAccountID: profile.AdminAccountID, Type: "manual_stage", Stage: input.Stage, FromStatus: stageStatus(before, input.Stage), ToStatus: input.Status, Message: "手动修正流程状态", Details: map[string]any{"message": input.Message}})
+		s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "manual_stage", Source: "manual_single", Operation: "stage", Stage: input.Stage, FromStatus: stageStatus(before, input.Stage), ToStatus: input.Status, Message: "手动修正流程状态", Details: map[string]any{"message": input.Message}})
 	}
 	writeAPI(w, http.StatusOK, profile, "")
 }
@@ -1805,6 +1872,7 @@ func (s *Server) failFreeAccount(id, stage string, stageErr error) {
 			item.RemoveStatus = "failed"
 		}
 	})
+	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Type: "final", Operation: stage, Stage: stage, Source: "system", Level: "error", Message: stage + " 执行失败", Details: map[string]any{"error": stageErr.Error()}})
 }
 
 func findJSONString(raw json.RawMessage, keys ...string) string {
@@ -1873,30 +1941,68 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 				quotaInterval = 120 * time.Second
 			}
 			now := time.Now()
+			provider := providerForSettings(settings)
+			type monitorJob struct {
+				account             model.FreeAccountProfile
+				statusDue, quotaDue bool
+			}
+			jobs := make([]monitorJob, 0)
 			for _, account := range s.store.FreeAccounts() {
-				if account.Dead || (account.Sub2AccountID < 1 && account.CPAAuthFileName == "") || account.RemoveStatus == "completed" {
+				// Monitoring is intentionally limited to accounts that are both in
+				// the Team space and successfully pushed to the active downstream.
+				if account.Dead || account.AcceptStatus != "completed" || account.PushStatus != "completed" || account.RemoveStatus == "completed" {
+					continue
+				}
+				hasDownstream := provider == "cpa" && strings.TrimSpace(account.CPAAuthFileName) != ""
+				if provider != "cpa" {
+					hasDownstream = account.Sub2AccountID > 0
+				}
+				if !hasDownstream {
 					continue
 				}
 				statusDue := monitor401Enabled && (account.StatusCheckedAt == nil || now.Sub(*account.StatusCheckedAt) >= statusInterval)
 				quotaDue := account.QuotaCheckedAt == nil || now.Sub(*account.QuotaCheckedAt) >= quotaInterval
-				if !statusDue && !quotaDue {
-					continue
-				}
-				unlock := s.lockFreeAccount(account.ID)
-				reloggedIn := false
-				if statusDue {
-					reloggedIn, _ = s.checkFreeAccountStatus(ctx, account.ID, settings, password)
-				}
-				var err error
-				if quotaDue && !reloggedIn {
-					_, _, err = s.performFreeAccountQuotaInternal(ctx, account.ID, true, monitor401Enabled)
-				}
-				unlock()
-				if err != nil {
-					// The durable account state carries the actionable error for the UI.
-					continue
+				if statusDue || quotaDue {
+					jobs = append(jobs, monitorJob{account: account, statusDue: statusDue, quotaDue: quotaDue})
 				}
 			}
+			if len(jobs) == 0 {
+				continue
+			}
+			// Each account is independent, so monitoring can run in parallel
+			// without changing the account-level serialization guarantees.
+			workers := 8
+			if len(jobs) < workers {
+				workers = len(jobs)
+			}
+			queue := make(chan monitorJob)
+			var wg sync.WaitGroup
+			for i := 0; i < workers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for job := range queue {
+						unlock := s.lockFreeAccount(job.account.ID)
+						reloggedIn := false
+						if job.statusDue {
+							s.auditAccountEvent(ctx, job.account.ID, "status_401", "status", "monitor_401", provider, "开始批量 401 检测", nil)
+							reloggedIn, _ = s.checkFreeAccountStatus(ctx, job.account.ID, settings, password)
+							s.auditAccountEvent(ctx, job.account.ID, "status_401", "status", "monitor_401", provider, "401 检测完成", map[string]any{"relogin_triggered": reloggedIn})
+						}
+						if job.quotaDue && !reloggedIn {
+							s.auditAccountEvent(ctx, job.account.ID, "quota", "quota", "monitor_quota", provider, "开始批量额度检测", nil)
+							_, _, _ = s.performFreeAccountQuotaInternal(ctx, job.account.ID, true, monitor401Enabled)
+							s.auditAccountEvent(ctx, job.account.ID, "quota", "quota", "monitor_quota", provider, "批量额度检测完成", nil)
+						}
+						unlock()
+					}
+				}()
+			}
+			for _, job := range jobs {
+				queue <- job
+			}
+			close(queue)
+			wg.Wait()
 		}
 	}
 }

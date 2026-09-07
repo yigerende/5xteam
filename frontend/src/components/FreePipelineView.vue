@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   BadgeCheck, Cable, DoorOpen, FileJson, FolderOpen, Gauge, KeyRound, Link2,
-  LoaderCircle, RefreshCw, Save, Send, Trash2, Unplug, Upload,
+  History, LoaderCircle, MoreHorizontal, RefreshCw, Save, Send, Trash2, Unplug, Upload,
   Waypoints,
 } from 'lucide-vue-next'
 import { api } from '../api'
@@ -12,6 +12,7 @@ import MessageBar from './MessageBar.vue'
 import StatusPill from './StatusPill.vue'
 import Pagination from './Pagination.vue'
 import AutoRotationView from './AutoRotationView.vue'
+import ExecutionHistoryView from './ExecutionHistoryView.vue'
 
 const props = defineProps({
   accounts: { type: Array, default: () => [] },
@@ -62,6 +63,7 @@ const page = ref(1)
 const pageSize = ref(10)
 const teamSpaceFilter = ref('')
 const selectedAccountIDs = ref(new Set())
+const lifecycleView = reactive({ account: null, events: [], task: null, loading: false, error: '' })
 
 function teamSpaceStatus(account) {
   if (account?.remove_status === 'completed') return 'removed'
@@ -322,6 +324,23 @@ async function refreshLiveAccounts() {
   liveAccounts.value = accounts
   accounts.forEach(syncActivityStage)
   return accounts
+}
+async function openLifecycle(account) {
+  lifecycleView.account = account
+  lifecycleView.events = []
+  lifecycleView.task = null
+  lifecycleView.error = ''
+  lifecycleView.loading = true
+  try {
+    const result = await api(`/api/free-accounts/${encodeURIComponent(account.id)}/events`)
+    lifecycleView.account = result.account || account
+    lifecycleView.task = result.lifecycle_task || null
+    lifecycleView.events = result.events || []
+  } catch (error) {
+    lifecycleView.error = error.message
+  } finally {
+    lifecycleView.loading = false
+  }
 }
 async function runTracked(account, action, request) {
   const meta = operationMeta[action]
@@ -675,6 +694,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
       <button type="button" :class="{ active: teamMenu === 'import' }" @click="teamMenu = 'import'"><Upload :size="14" />导入 Free 账号</button>
       <button type="button" :class="{ active: teamMenu === 'sub2' }" @click="teamMenu = 'sub2'"><Send :size="14" />推送设置</button>
       <button type="button" :class="{ active: teamMenu === 'auto' }" @click="teamMenu = 'auto'"><RefreshCw :size="14" />全自动轮转</button>
+      <button type="button" :class="{ active: teamMenu === 'history' }" @click="teamMenu = 'history'"><History :size="14" />执行历史</button>
     </nav>
 
     <div v-if="teamMenu === 'accounts'" class="metric-grid team-metrics">
@@ -731,6 +751,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
     </form>
 
     <AutoRotationView v-if="teamMenu === 'auto'" :admin-accounts="adminAccounts" />
+    <ExecutionHistoryView v-if="teamMenu === 'history'" />
 
     <MessageBar :message="message" />
 
@@ -759,7 +780,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
           <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
           <td><strong>{{ account.relogin_count || 0 }}</strong><small class="table-note">次</small></td>
-          <td><div class="row-actions"><IconButton :label="joinActionLabel(account)" :disabled="account.dead || isAccountBusy(account) || joinCapacityRefreshing || !adminAccounts.length || account.remove_status === 'completed'" @click="openJoin(account)"><LoaderCircle v-if="activityFor(account)?.action === 'join' || joinCapacityRefreshing" class="spin" :size="15" /><DoorOpen v-else :size="15" /></IconButton><IconButton label="获取 Codex AT / RT" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="acquireOAuth(account)"><LoaderCircle v-if="activityFor(account)?.action === 'oauth'" class="spin" :size="15" /><KeyRound v-else :size="15" /></IconButton><IconButton label="重登并重新推送" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || !hasDownstream(account) || account.remove_status === 'completed'" @click="runAction(account, 'relogin')"><LoaderCircle v-if="activityFor(account)?.action === 'relogin'" class="spin" :size="15" /><RefreshCw v-else :size="15" /></IconButton><IconButton :label="`推送到${activeProviderLabel}`" :disabled="account.dead || isAccountBusy(account) || account.oauth_status !== 'completed' || hasDownstream(account)" @click="runAction(account, 'push')"><LoaderCircle v-if="activityFor(account)?.action === 'push'" class="spin" :size="15" /><Send v-else :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !hasDownstream(account)" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="立即移出空间" danger :disabled="isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="runAction(account, 'remove')"><LoaderCircle v-if="activityFor(account)?.action === 'remove'" class="spin" :size="15" /><Unplug v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
+          <td><div class="row-actions"><IconButton label="查看账号全流程" @click="openLifecycle(account)"><MoreHorizontal :size="15" /></IconButton><IconButton :label="joinActionLabel(account)" :disabled="account.dead || isAccountBusy(account) || joinCapacityRefreshing || !adminAccounts.length || account.remove_status === 'completed'" @click="openJoin(account)"><LoaderCircle v-if="activityFor(account)?.action === 'join' || joinCapacityRefreshing" class="spin" :size="15" /><DoorOpen v-else :size="15" /></IconButton><IconButton label="获取 Codex AT / RT" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="acquireOAuth(account)"><LoaderCircle v-if="activityFor(account)?.action === 'oauth'" class="spin" :size="15" /><KeyRound v-else :size="15" /></IconButton><IconButton label="重登并重新推送" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || !hasDownstream(account) || account.remove_status === 'completed'" @click="runAction(account, 'relogin')"><LoaderCircle v-if="activityFor(account)?.action === 'relogin'" class="spin" :size="15" /><RefreshCw v-else :size="15" /></IconButton><IconButton :label="`推送到${activeProviderLabel}`" :disabled="account.dead || isAccountBusy(account) || account.oauth_status !== 'completed' || hasDownstream(account)" @click="runAction(account, 'push')"><LoaderCircle v-if="activityFor(account)?.action === 'push'" class="spin" :size="15" /><Send v-else :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !hasDownstream(account)" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="立即移出空间" danger :disabled="isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="runAction(account, 'remove')"><LoaderCircle v-if="activityFor(account)?.action === 'remove'" class="spin" :size="15" /><Unplug v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
         </tr>
       </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="allDisplayedAccounts.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
     </section>
@@ -767,6 +788,8 @@ onBeforeUnmount(stopCapacityRefreshTimer)
     <div v-if="joinOpen" class="modal-backdrop" @click.self="joinOpen = false"><form class="modal" @submit.prevent="joinAccount"><span class="overline">JOIN TEAM SPACE</span><h2>{{ joinActionLabel(joinForm.account) }}</h2><p>{{ joinForm.account?.email }}</p><label class="field"><span>邀请母号</span><select v-model="joinForm.adminAccountID" required><option value="">请选择母号</option><option v-for="admin in adminAccounts" :key="admin.id" :value="admin.id">{{ adminOptionLabel(admin) }}</option></select></label><label class="field"><span>本次邀请席位</span><select v-model="joinForm.seatType"><option value="default">Standard（标准）</option><option value="prolite">Premium（5x）</option></select></label><div class="panel-actions"><button class="btn ghost" type="button" @click="joinOpen = false">取消</button><button class="btn primary" type="submit"><DoorOpen :size="15" />确认执行</button></div></form></div>
 
     <div v-if="manualPushForm.account" class="modal-backdrop" @click.self="manualPushForm.account = null"><form class="modal" @submit.prevent="saveManualPushStage"><span class="overline">LINK SUB2 ACCOUNT</span><h2>标记推送成功</h2><p>{{ manualPushForm.account?.email }}</p><label class="field"><span>Sub2 账号 ID</span><input v-model="manualPushForm.sub2AccountID" type="number" min="1" step="1" required placeholder="例如 1024" /></label><div class="panel-actions"><button class="btn ghost" type="button" @click="manualPushForm.account = null">取消</button><button class="btn primary" type="submit"><Link2 :size="15" />关联并标记成功</button></div></form></div>
+
+    <div v-if="lifecycleView.account" class="modal-backdrop" @click.self="lifecycleView.account = null"><section class="modal lifecycle-modal"><div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>从进入 Team 轮转到最终移出的完整流程</p></div><button class="icon-button" type="button" title="关闭" @click="lifecycleView.account = null">×</button></div><div v-if="lifecycleView.loading" class="lifecycle-loading">正在加载执行记录…</div><div v-else-if="lifecycleView.error" class="danger-text">{{ lifecycleView.error }}</div><template v-else><div class="lifecycle-summary"><span>进入时间：{{ formatTime(lifecycleView.account.imported_at) }}</span><span>当前状态：{{ lifecycleView.account.status || '-' }}</span><span>当前线路：{{ lifecycleView.account.push_provider || activeProviderLabel }}</span><span>重登次数：{{ lifecycleView.account.relogin_count || 0 }}</span></div><div class="lifecycle-timeline"><div v-if="!lifecycleView.events.length" class="empty-cell">暂无详细事件</div><article v-for="event in lifecycleView.events" :key="event.id" class="lifecycle-event"><i></i><div><time>{{ formatTime(event.created_at) }}</time><strong>{{ event.stage || event.operation || event.type || '系统事件' }}</strong><span>{{ event.message || '-' }}</span><small v-if="event.attempt || event.duration_ms">{{ event.attempt ? `第 ${event.attempt} 次` : '' }} {{ event.duration_ms ? `· ${event.duration_ms} ms` : '' }}</small><details v-if="event.request || event.response || event.details"><summary>查看请求/返回参数</summary><pre v-if="event.request">请求：{{ JSON.stringify(event.request, null, 2) }}</pre><pre v-if="event.response">返回：{{ JSON.stringify(event.response, null, 2) }}</pre><pre v-if="event.details">详情：{{ JSON.stringify(event.details, null, 2) }}</pre></details></div></article></div></template></section></div>
 
   </section>
 </template>
@@ -784,6 +807,13 @@ onBeforeUnmount(stopCapacityRefreshTimer)
 .team-subnav button.active { border-color: rgba(37, 143, 97, .25); background: var(--green-bg); color: var(--green-strong); }
 .push-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .push-settings-grid .sub2-config-panel, .push-settings-grid .cpa-config-panel { max-width: none; }
+.lifecycle-modal { width: min(900px, calc(100vw - 32px)); max-height: min(820px, calc(100vh - 32px)); overflow: auto; }
+.lifecycle-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 10px; margin: 10px 0 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
+.lifecycle-timeline { display: grid; gap: 0; margin-left: 9px; border-left: 1px solid var(--line); }
+.lifecycle-event { position: relative; display: grid; grid-template-columns: 1fr; gap: 3px; padding: 0 0 15px 18px; }
+.lifecycle-event > i { position: absolute; left: -5px; top: 3px; width: 9px; height: 9px; border: 2px solid var(--surface); border-radius: 50%; background: var(--green); box-shadow: 0 0 0 1px var(--green); }
+.lifecycle-event time, .lifecycle-event small { color: var(--muted); font-size: 10px; }.lifecycle-event strong { font-size: 12px; color: var(--text-2); }.lifecycle-event span { font-size: 11px; color: var(--text); }.lifecycle-event details { margin-top: 4px; }.lifecycle-event summary { color: var(--blue); cursor: pointer; font-size: 10px; }.lifecycle-event pre { max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--line); background: var(--surface-2); white-space: pre-wrap; word-break: break-word; font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.lifecycle-loading { padding: 30px; text-align: center; color: var(--muted); }
 .push-settings-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
 .sub2-config-panel { max-width: 980px; }
 .panel-description { margin-top: 4px; color: var(--muted); font-size: 10px; }

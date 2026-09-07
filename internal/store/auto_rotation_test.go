@@ -167,3 +167,43 @@ func TestAutoRotationEventPersistenceAndFiltering(t *testing.T) {
 		t.Fatalf("unexpected filtered events: %+v", got)
 	}
 }
+
+func TestPurgeAutoRotationHistoryAndDescendingEvents(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	old := time.Now().Add(-72 * time.Hour)
+	newer := time.Now().Add(-time.Hour)
+	if err := s.SaveAutoRotationRun(model.AutoRotationRun{ID: "old-run", StartedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAutoRotationRun(model.AutoRotationRun{ID: "new-run", StartedAt: newer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAutoRotationTask(model.AutoRotationTask{ID: "old-task", RunID: "old-run", AccountID: "a-old"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("UPDATE auto_rotation_tasks SET updated_at=? WHERE id=?", formatTime(old), "old-task"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddAutoRotationEvent(model.AutoRotationEvent{ID: "old-event", RunID: "old-run", CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddAutoRotationEvent(model.AutoRotationEvent{ID: "new-event", RunID: "new-run", CreatedAt: newer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PurgeAutoRotationHistory(time.Now().Add(-48 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.AutoRotationRuns(); len(got) != 1 || got[0].ID != "new-run" {
+		t.Fatalf("unexpected retained runs: %+v", got)
+	}
+	if got := s.AutoRotationTasks(""); len(got) != 0 {
+		t.Fatalf("unexpected retained tasks: %+v", got)
+	}
+	if got := s.AutoRotationEvents("", ""); len(got) != 1 || got[0].ID != "new-event" {
+		t.Fatalf("unexpected retained events: %+v", got)
+	}
+}
