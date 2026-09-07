@@ -68,12 +68,15 @@ docker compose up -d --build
 docker compose logs -f --tail=100
 ```
 
-镜像会自动安装 `python3`、`py3-pip`、`libstdc++` 和 `curl_cffi`，并复制纯协议登录/OAuth 脚本；正式环境不需要在宿主机单独安装 Python。依赖或 Dockerfile 变化后请重新构建镜像，不要只重启旧容器：
+镜像会自动安装 `python3`、`py3-pip`、`nodejs`、`libstdc++`、`curl_cffi` 和 `pyotp`，并复制纯协议登录/OAuth 脚本及完整的 `internal/codex_runtime`（包括 Sentinel 的 Node 运行资源）；正式环境不需要在宿主机单独安装这些运行时。依赖或 Dockerfile 变化后请重新构建镜像，不要只重启旧容器：
 
 ```bash
 docker compose build --no-cache
 docker compose up -d
 docker compose exec chatgpt-space-merge python3 -c "import curl_cffi; print('curl_cffi ok')"
+docker compose exec chatgpt-space-merge python3 -c "import pyotp; print('pyotp ok')"
+docker compose exec chatgpt-space-merge sh -c 'PYTHONPATH=/app/internal/codex_runtime python3 -c "import config, config.codex, core.session; print(\"codex runtime ok\")"'
+docker compose exec chatgpt-space-merge node --version
 ```
 
 Compose 仍只将端口发布到宿主机回环地址。
