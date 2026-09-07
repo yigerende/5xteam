@@ -251,6 +251,63 @@ func (s *Store) RecoverAutoRotationClaims() error {
 	return err
 }
 
+// RecoverAutoRotationTasks closes tasks left in queued/running state by a
+// previous server process. Those goroutines no longer exist after a restart,
+// so keeping them active would incorrectly consume invitation capacity forever.
+// The account's durable Team status remains authoritative; a task that had
+// already entered the space is therefore still counted through free_accounts,
+// while the stale task itself is no longer treated as in-flight.
+func (s *Store) RecoverAutoRotationTasks() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	rows, err := s.db.Query("SELECT id, payload FROM auto_rotation_tasks WHERE json_extract(payload, '$.status') IN ('queued','running')")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type recoveredTask struct {
+		id  string
+		raw []byte
+	}
+	var tasks []recoveredTask
+	for rows.Next() {
+		var id, raw string
+		if rows.Scan(&id, &raw) != nil {
+			continue
+		}
+		tasks = append(tasks, recoveredTask{id: id, raw: []byte(raw)})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range tasks {
+		var task model.AutoRotationTask
+		if json.Unmarshal(item.raw, &task) != nil {
+			continue
+		}
+		task.Status = "failed"
+		task.Error = "服务重启，上一轮自动轮转任务已中断"
+		task.CurrentStep = ""
+		task.CompletedAt = &now
+		for i := range task.Steps {
+			if task.Steps[i].Status == "running" || task.Steps[i].Status == "pending" {
+				task.Steps[i].Status = "failed"
+				task.Steps[i].Message = task.Error
+				task.Steps[i].CompletedAt = &now
+			}
+		}
+		rawJSON, marshalErr := json.Marshal(task)
+		if marshalErr != nil {
+			continue
+		}
+		if _, err := s.db.Exec("UPDATE auto_rotation_tasks SET payload=?, updated_at=? WHERE id=?", string(rawJSON), formatTime(now), item.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) CreateSeatReservation(adminID, accountID, seatType string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

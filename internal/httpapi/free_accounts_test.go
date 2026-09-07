@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,23 @@ import (
 	"chatgpt-space-merge/internal/model"
 	"chatgpt-space-merge/internal/store"
 )
+
+func TestCPAAccountNameAndPayload(t *testing.T) {
+	profile := model.FreeAccountProfile{ID: "id-1", Email: "user@example.com", Label: "User", AcceptStatus: "completed", PlanType: "free", OAuthAccountID: "acct-1"}
+	name := cpaAccountName(profile, false)
+	if !strings.HasPrefix(name, "User--") || strings.HasSuffix(name, "-重登") {
+		t.Fatalf("unexpected CPA account name: %q", name)
+	}
+	reloginName := cpaAccountName(profile, true)
+	if !strings.HasPrefix(reloginName, "User--") || !strings.HasSuffix(reloginName, "-重登") {
+		t.Fatalf("unexpected CPA relogin account name: %q", reloginName)
+	}
+	payload := buildCPAAuthPayloadNamed(profile, store.FreeAccountCredentials{OAuthAccessToken: "at", OAuthRefreshToken: "rt"}, nil, name)
+	if payload["name"] != name || payload["plan_type"] != "team" {
+		encoded, _ := json.Marshal(payload)
+		t.Fatalf("payload name/plan type mismatch: %s", encoded)
+	}
+}
 
 func TestManualFreeAccountStageUpdatesProgress(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)

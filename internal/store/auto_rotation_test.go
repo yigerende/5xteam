@@ -122,6 +122,35 @@ func TestSeatReservationSameAccountCannotDuplicate(t *testing.T) {
 	}
 }
 
+func TestRecoverAutoRotationTasksMarksStaleRunningTasksFailed(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	task := model.AutoRotationTask{
+		ID: "stale-task", RunID: "stale-run", AccountID: "account-1", Email: "a@example.com",
+		SeatType: "prolite", Status: "running", CurrentStep: "invite",
+		Steps:     []model.AutoRotationStep{{Key: "invite", Status: "running"}, {Key: "oauth", Status: "pending"}},
+		StartedAt: time.Now().Add(-time.Minute),
+	}
+	if err := s.SaveAutoRotationTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecoverAutoRotationTasks(); err != nil {
+		t.Fatal(err)
+	}
+	got := s.AutoRotationTasks("stale-run")
+	if len(got) != 1 || got[0].Status != "failed" || got[0].CurrentStep != "" || got[0].CompletedAt == nil {
+		t.Fatalf("stale task was not recovered: %+v", got)
+	}
+	for _, step := range got[0].Steps {
+		if step.Status != "failed" || step.Message == "" || step.CompletedAt == nil {
+			t.Fatalf("stale step was not recovered: %+v", got[0].Steps)
+		}
+	}
+}
+
 func TestAutoRotationEventPersistenceAndFiltering(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {

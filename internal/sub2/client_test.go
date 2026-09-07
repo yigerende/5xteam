@@ -44,7 +44,7 @@ func TestClientLoginGroupsCreateAndQuota(t *testing.T) {
 	}))
 	defer server.Close()
 
-	settings := model.Sub2Settings{URL: server.URL, Email: "admin@example.com", GroupIDs: []int64{44, 45}, GroupNames: []string{"Free pool", "Backup"}, Models: []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}, AccountConcurrency: 12}
+	settings := model.Sub2Settings{URL: server.URL, Email: "admin@example.com", GroupIDs: []int64{44, 45}, GroupNames: []string{"Free pool", "Backup"}, Models: []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}, AccountConcurrency: 12, CpaWS: true}
 	client := New()
 	groups, err := client.Groups(context.Background(), settings, "secret")
 	if err != nil || len(groups) != 1 || groups[0].ID != 44 {
@@ -52,6 +52,7 @@ func TestClientLoginGroupsCreateAndQuota(t *testing.T) {
 	}
 	account, err := client.CreateAccount(context.Background(), settings, "secret", CreateAccountInput{
 		Name: "free@example.com", GroupIDs: settings.GroupIDs, Models: settings.Models, Concurrency: 12,
+		CpaWS: true,
 		Credentials: map[string]any{"access_token": "oauth-access", "refresh_token": "oauth-refresh", "chatgpt_account_id": "account-1"},
 	}, "free-pipeline-account-1")
 	if err != nil || account.ID != 101 {
@@ -59,6 +60,9 @@ func TestClientLoginGroupsCreateAndQuota(t *testing.T) {
 	}
 	if createdBody["platform"] != "openai" || createdBody["type"] != "oauth" || createdBody["confirm_mixed_channel_risk"] != true || createdBody["concurrency"] != float64(12) {
 		t.Fatalf("unexpected create body: %+v", createdBody)
+	}
+	if createdBody["cpa_ws"] != float64(1) {
+		t.Fatalf("cpa_ws should be numeric 1 when enabled: %+v", createdBody["cpa_ws"])
 	}
 	groupIDs, ok := createdBody["group_ids"].([]any)
 	if !ok || len(groupIDs) != 2 || groupIDs[0] != float64(44) || groupIDs[1] != float64(45) {

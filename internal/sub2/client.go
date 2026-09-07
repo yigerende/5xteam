@@ -70,6 +70,7 @@ type CreateAccountInput struct {
 	Models      []string
 	Concurrency int
 	Priority    int
+	CpaWS       bool
 }
 
 type apiEnvelope struct {
@@ -142,6 +143,9 @@ func (c *Client) CreateAccount(ctx context.Context, settings model.Sub2Settings,
 		"credentials": credentials, "concurrency": input.Concurrency,
 		"priority": input.Priority, "group_ids": groupIDs, "confirm_mixed_channel_risk": true,
 	}
+	if input.CpaWS {
+		body["cpa_ws"] = 1
+	}
 	data, err := c.doJSON(ctx, settings, password, http.MethodPost, "/api/v1/admin/accounts", body, map[string]string{"Idempotency-Key": idempotencyKey})
 	if err != nil {
 		return Account{}, err
@@ -154,6 +158,16 @@ func (c *Client) CreateAccount(ctx context.Context, settings model.Sub2Settings,
 		return account, errors.New("Sub2 创建账号响应缺少账号 ID")
 	}
 	return account, nil
+}
+
+// DeleteAccount removes a downstream Sub2 account by its admin ID.
+func (c *Client) DeleteAccount(ctx context.Context, settings model.Sub2Settings, password string, accountID int64) error {
+	if accountID < 1 {
+		return errors.New("Sub2 账号 ID 无效")
+	}
+	path := "/api/v1/admin/accounts/" + strconv.FormatInt(accountID, 10)
+	_, err := c.doJSON(ctx, settings, password, http.MethodDelete, path, nil, nil)
+	return err
 }
 
 func uniquePositiveIDs(values []int64) []int64 {

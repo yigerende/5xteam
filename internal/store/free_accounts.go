@@ -139,6 +139,7 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		profile.ImportMode = existing.ImportMode
 		profile.OAuthAccountID = existing.OAuthAccountID
 		profile.Sub2AccountID, profile.Sub2AccountName, profile.Sub2GroupID, profile.Sub2GroupName = existing.Sub2AccountID, existing.Sub2AccountName, existing.Sub2GroupID, existing.Sub2GroupName
+		profile.CPAAuthFileName, profile.PushProvider = existing.CPAAuthFileName, existing.PushProvider
 		profile.Sub2GroupIDs, profile.Sub2GroupNames = existing.Sub2GroupIDs, existing.Sub2GroupNames
 		profile.ReloginCount = existing.ReloginCount
 		profile.Quota5H, profile.Quota7D, profile.ExhaustionPolicy, profile.AutoRemove = existing.Quota5H, existing.Quota7D, existing.ExhaustionPolicy, existing.AutoRemove

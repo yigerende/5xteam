@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/store"
 	"chatgpt-space-merge/internal/sub2"
 	"chatgpt-space-merge/internal/workflow"
 )
@@ -302,6 +303,13 @@ func (s *Server) attachFreeAccountOAuth(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	if strings.TrimSpace(input.AccessToken) != "" {
+		if info, decodeErr := workflow.DecodeUserInfo(input.AccessToken); decodeErr == nil && strings.TrimSpace(info.PlanType) != "" {
+			profile, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
+				item.PlanType = info.PlanType
+			})
+		}
+	}
 	writeAPI(w, http.StatusOK, profile, "")
 }
 
@@ -397,6 +405,11 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 		} else if _, err := s.store.SaveFreeAccountOAuth(accountID, at, rt, aid); err != nil {
 			status, message = "failed", err.Error()
 		} else if profile, _, err := s.store.FreeAccountCredential(accountID); err == nil {
+			if info, decodeErr := workflow.DecodeUserInfo(at); decodeErr == nil && strings.TrimSpace(info.PlanType) != "" {
+				profile, _ = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
+					item.PlanType = info.PlanType
+				})
+			}
 			// Keep the mail-management projection synchronized with the Team
 			// rotation projection so its RT status and export dialog are current.
 			if syncErr := s.store.SaveMailAccountOAuth(profile.Email, at, rt); syncErr != nil {
@@ -622,17 +635,55 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不再推送到 Sub2")
 		return
 	}
+	settings, password, err := s.store.Sub2Settings()
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	if strings.EqualFold(settings.Provider, "cpa") {
+		if strings.TrimSpace(profile.CPAAuthFileName) != "" {
+			writeAPI(w, http.StatusOK, profile, "")
+			return
+		}
+		cpaSettings, cpaKey, cpaErr := s.store.CPASettings()
+		if cpaErr != nil {
+			writeAPI(w, http.StatusInternalServerError, nil, cpaErr.Error())
+			return
+		}
+		if strings.TrimSpace(cpaSettings.URL) == "" || strings.TrimSpace(cpaKey) == "" {
+			writeAPI(w, http.StatusBadRequest, nil, "请先配置 CPA 地址和管理密钥")
+			return
+		}
+		fileName := cpaFileName(profile)
+		accountName := cpaAccountName(profile, false)
+		payload := buildCPAAuthPayloadNamed(profile, credentials, cpaSettings.GroupIDs, accountName)
+		encoded, _ := json.Marshal(payload)
+		if err := s.cpa.Upload(r.Context(), cpaSettings, cpaKey, fileName, encoded); err != nil {
+			s.failFreeAccount(profile.ID, "push", err)
+			writeAPI(w, 400, nil, err.Error())
+			return
+		}
+		now := time.Now()
+		profile, err = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
+			item.Status, item.PushStatus, item.LastError = "monitoring", "completed", ""
+			item.CPAAuthFileName, item.PushProvider = fileName, "cpa"
+			item.Sub2AccountID, item.Sub2AccountName = 0, accountName
+			item.StatusCheckedAt = nil
+			item.PushedAt = &now
+		})
+		if err != nil {
+			writeAPI(w, 500, nil, err.Error())
+			return
+		}
+		writeAPI(w, 200, profile, "")
+		return
+	}
 	if profile.Sub2AccountID > 0 {
 		writeAPI(w, http.StatusOK, profile, "")
 		return
 	}
 	if profile.OAuthStatus != "completed" || credentials.OAuthAccessToken == "" || credentials.OAuthRefreshToken == "" {
 		writeAPI(w, http.StatusConflict, nil, "请先绑定完整的 Codex OAuth Access Token 和 Refresh Token")
-		return
-	}
-	settings, password, err := s.store.Sub2Settings()
-	if err != nil {
-		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
 	if len(settings.GroupIDs) == 0 {
@@ -654,7 +705,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 			"chatgpt_account_id": profile.OAuthAccountID, "email": profile.Email,
 		},
 		GroupIDs: settings.GroupIDs, Models: settings.Models, Concurrency: settings.AccountConcurrency,
-		Priority: settings.Priority,
+		Priority: settings.Priority, CpaWS: settings.CpaWS,
 	}
 	// Sub2 persists idempotency keys even after an account is deleted. Include
 	// the current OAuth credential fingerprint so a newly authorized/recreated
@@ -675,6 +726,8 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	profile, err = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.PushStatus, item.LastError = "monitoring", "completed", ""
+		item.PushProvider = "sub2"
+		item.CPAAuthFileName = ""
 		item.Sub2AccountID, item.Sub2AccountName = created.ID, created.Name
 		item.StatusCheckedAt = nil
 		item.Sub2GroupIDs, item.Sub2GroupNames = append([]int64(nil), settings.GroupIDs...), append([]string(nil), settings.GroupNames...)
@@ -691,6 +744,105 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPI(w, http.StatusOK, profile, "")
+}
+
+func (s *Server) reloginFreeAccount(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	unlock := s.lockFreeAccount(id)
+	defer unlock()
+	profile, _, err := s.store.FreeAccountCredential(id)
+	if err != nil {
+		writeAPI(w, http.StatusNotFound, nil, err.Error())
+		return
+	}
+	if profile.Dead {
+		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号")
+		return
+	}
+	if profile.AcceptStatus != "completed" {
+		writeAPI(w, http.StatusConflict, nil, "账号尚未进入空间，不能重登")
+		return
+	}
+	settings, _, settingsErr := s.store.Sub2Settings()
+	if settingsErr != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, settingsErr.Error())
+		return
+	}
+	if strings.EqualFold(settings.Provider, "cpa") {
+		if strings.TrimSpace(profile.CPAAuthFileName) == "" {
+			writeAPI(w, http.StatusConflict, nil, "账号尚未推送到当前 CPA")
+			return
+		}
+	} else if profile.Sub2AccountID < 1 {
+		writeAPI(w, http.StatusConflict, nil, "账号尚未推送到当前 Sub2")
+		return
+	}
+	if err := s.reloginAndRepush(r.Context(), id); err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	updated, _, readErr := s.store.FreeAccountCredential(id)
+	if readErr != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, readErr.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, updated, "")
+}
+
+func cpaFileName(profile model.FreeAccountProfile) string {
+	name := strings.TrimSpace(profile.Email)
+	if name == "" {
+		name = profile.ID
+	}
+	name = strings.NewReplacer("@", "-at-", "/", "-", "\\", "-", " ", "-").Replace(name)
+	return "codex-" + name + "--" + time.Now().Format("15:04") + ".json"
+}
+
+func cpaReloginFileName(profile model.FreeAccountProfile) string {
+	name := strings.TrimSpace(profile.Email)
+	if name == "" {
+		name = profile.ID
+	}
+	name = strings.NewReplacer("@", "-at-", "/", "-", "\\", "-", " ", "-").Replace(name)
+	return "codex-" + name + "--" + time.Now().Format("15:04") + "-重登.json"
+}
+
+func cpaAccountName(profile model.FreeAccountProfile, relogin bool) string {
+	name := strings.TrimSpace(profile.Email)
+	if strings.TrimSpace(profile.Label) != "" {
+		name = strings.TrimSpace(profile.Label)
+	}
+	if name == "" {
+		name = profile.ID
+	}
+	name += "--" + time.Now().Format("15:04")
+	if relogin {
+		name += "-重登"
+	}
+	return name
+}
+
+func buildCPAAuthPayload(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials, groupIDs []int64) map[string]any {
+	return buildCPAAuthPayloadNamed(profile, credentials, groupIDs, profile.Email)
+}
+
+func buildCPAAuthPayloadNamed(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials, groupIDs []int64, accountName string) map[string]any {
+	planType := strings.TrimSpace(profile.PlanType)
+	// A Free credential becomes a Team credential after it has accepted the
+	// invitation. CPA selects its per-auth model catalog from plan_type; keeping
+	// the original "free" value would hide the Team/Codex models until CPA's
+	// own refresh job runs.
+	if profile.AcceptStatus == "completed" {
+		planType = "team"
+	}
+	if strings.TrimSpace(accountName) == "" {
+		accountName = profile.Email
+	}
+	payload := map[string]any{"type": "codex", "email": profile.Email, "name": accountName, "account_id": profile.OAuthAccountID, "chatgpt_account_id": profile.OAuthAccountID, "access_token": credentials.OAuthAccessToken, "refresh_token": credentials.OAuthRefreshToken, "plan_type": planType, "chatgpt_plan_type": planType}
+	if len(groupIDs) > 0 {
+		payload["group_ids"] = append([]int64(nil), groupIDs...)
+	}
+	return payload
 }
 
 func (s *Server) checkFreeAccountQuota(w http.ResponseWriter, r *http.Request) {
@@ -710,7 +862,13 @@ func (s *Server) performFreeAccountQuota(ctx context.Context, id string, allowAu
 	if err != nil {
 		return model.FreeAccountProfile{}, false, err
 	}
-	return s.performFreeAccountQuotaInternal(ctx, id, allowAutoRemove, settings.Enable401Check)
+	allowRelogin := settings.Enable401Check
+	if strings.EqualFold(settings.Provider, "cpa") {
+		if cpaSettings, _, cpaErr := s.store.CPASettings(); cpaErr == nil {
+			allowRelogin = cpaSettings.Enable401Check
+		}
+	}
+	return s.performFreeAccountQuotaInternal(ctx, id, allowAutoRemove, allowRelogin)
 }
 
 func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string, allowAutoRemove, allowRelogin bool) (model.FreeAccountProfile, bool, error) {
@@ -721,19 +879,50 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	if profile.Dead {
 		return profile, profile.RemoveStatus == "completed", errors.New("该账号已判定为死号")
 	}
-	if profile.Sub2AccountID < 1 {
-		return profile, false, errors.New("账号尚未推送到 Sub2")
-	}
 	settings, password, err := s.store.Sub2Settings()
 	if err != nil {
 		return profile, false, err
 	}
+	if strings.EqualFold(settings.Provider, "cpa") {
+		if strings.TrimSpace(profile.CPAAuthFileName) == "" {
+			return profile, false, errors.New("账号尚未推送到当前 CPA")
+		}
+	} else if profile.Sub2AccountID < 1 {
+		return profile, false, errors.New("账号尚未推送到当前 Sub2")
+	}
 	_, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.QuotaStatus, item.LastError = "running", ""
 	})
-	quota, err := s.sub2.QueryQuota(ctx, settings, password, profile.Sub2AccountID)
+	var window5H, window7D *model.FreeQuotaWindow
+	if strings.EqualFold(settings.Provider, "cpa") {
+		cpaSettings, cpaKey, cpaErr := s.store.CPASettings()
+		if cpaErr != nil {
+			err = cpaErr
+		} else {
+			var five, seven model.FreeQuotaWindow
+			five, seven, err = s.cpa.Quota(ctx, cpaSettings, cpaKey, profile.CPAAuthFileName)
+			if err == nil {
+				if five.LimitWindowSeconds > 0 {
+					window5H = &five
+				}
+				if seven.LimitWindowSeconds > 0 {
+					window7D = &seven
+				}
+			}
+		}
+	} else {
+		quota, qerr := s.sub2.QueryQuota(ctx, settings, password, profile.Sub2AccountID)
+		err = qerr
+		if err == nil {
+			window5H, window7D = quota.Windows()
+		}
+	}
 	if err != nil {
-		if isSub2Unauthorized(err) {
+		// CPA status/quota errors (including a 401 from the CPA management
+		// endpoint itself) are not an OpenAI account 401. CPA relogin is only
+		// entered from the explicit upstream status returned by cpa.Status.
+		cpaDownstream := strings.EqualFold(settings.Provider, "cpa") || strings.EqualFold(profile.PushProvider, "cpa")
+		if !cpaDownstream && isSub2Unauthorized(err) {
 			// Record the probe time even on a 401 so a failed recovery does not
 			// hammer the same Sub2 account every monitor tick.
 			checkedAt := time.Now()
@@ -741,22 +930,21 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 				item.QuotaCheckedAt = &checkedAt
 			})
 		}
-		if allowRelogin && isSub2Unauthorized(err) && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
+		if !cpaDownstream && allowRelogin && isSub2Unauthorized(err) && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
 			if reloginErr := s.reloginAndRepush(ctx, profile.ID); reloginErr == nil {
 				return s.performFreeAccountQuotaInternal(ctx, id, allowAutoRemove, false)
 			} else if errors.Is(reloginErr, errDeadAccountHandled) {
 				updated, _, readErr := s.store.FreeAccountCredential(profile.ID)
 				return updated, updated.RemoveStatus == "completed", readErr
 			} else {
-				err = fmt.Errorf("Sub2 返回 401，重登并重新推送失败: %w", reloginErr)
+				err = fmt.Errorf("下游返回 401，重登并重新推送失败: %w", reloginErr)
 			}
 		}
 		s.failFreeAccount(profile.ID, "quota", err)
 		return profile, false, err
 	}
-	window5H, window7D := quota.Windows()
 	if window5H == nil && window7D == nil {
-		err = errors.New("Sub2 额度响应中没有 5小时或7天窗口")
+		err = errors.New("额度响应中没有 5小时或7天窗口")
 		s.failFreeAccount(profile.ID, "quota", err)
 		return profile, false, err
 	}
@@ -799,21 +987,38 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 	if err != nil {
 		return false, err
 	}
-	if profile.Sub2AccountID < 1 {
-		return false, errors.New("账号尚未推送到 Sub2")
+	if strings.EqualFold(settings.Provider, "cpa") {
+		if strings.TrimSpace(profile.CPAAuthFileName) == "" {
+			return false, errors.New("账号尚未推送到当前 CPA")
+		}
+	} else if profile.Sub2AccountID < 1 {
+		return false, errors.New("账号尚未推送到当前 Sub2")
 	}
 	checkedAt := time.Now()
-	status, err := s.sub2.AccountStatus(ctx, settings, password, profile.Sub2AccountID)
+	status := 0
+	if strings.EqualFold(settings.Provider, "cpa") {
+		cpaSettings, cpaKey, cpaErr := s.store.CPASettings()
+		if cpaErr != nil {
+			return false, cpaErr
+		}
+		status, err = s.cpa.Status(ctx, cpaSettings, cpaKey, profile.CPAAuthFileName)
+	} else {
+		status, err = s.sub2.AccountStatus(ctx, settings, password, profile.Sub2AccountID)
+	}
 	_, _ = s.store.UpdateFreeAccount(id, func(item *model.FreeAccountProfile) {
 		item.StatusCheckedAt = &checkedAt
 	})
 	if err != nil {
-		if isSub2Unauthorized(err) && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
+		// For CPA, an error talking to the management API must never be
+		// interpreted as the managed account returning 401. cpa.Status returns
+		// the upstream status separately and the branch below handles that.
+		cpaDownstream := strings.EqualFold(settings.Provider, "cpa")
+		if !cpaDownstream && isSub2Unauthorized(err) && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
 			if reloginErr := s.reloginAndRepush(ctx, id); reloginErr != nil {
 				if errors.Is(reloginErr, errDeadAccountHandled) {
 					return true, nil
 				}
-				return false, fmt.Errorf("Sub2 返回 401，重登并重新推送失败: %w", reloginErr)
+				return false, fmt.Errorf("下游返回 401，重登并重新推送失败: %w", reloginErr)
 			}
 			return true, nil
 		}
@@ -824,7 +1029,7 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 			if errors.Is(reloginErr, errDeadAccountHandled) {
 				return true, nil
 			}
-			return false, fmt.Errorf("Sub2 返回 401，重登并重新推送失败: %w", reloginErr)
+			return false, fmt.Errorf("下游返回 401，重登并重新推送失败: %w", reloginErr)
 		}
 		return true, nil
 	}
@@ -845,7 +1050,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	s.oauthJobs[jobID] = job
 	s.oauthMu.Unlock()
 	_, _ = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
-		item.OAuthStatus, item.Status, item.LastError = "running", "oauthing", "Sub2 返回 401，正在重新获取 Codex OAuth"
+		item.OAuthStatus, item.Status, item.LastError = "running", "oauthing", "下游返回 401，正在重新获取 Codex OAuth"
 	})
 	s.runFreeAccountOAuthUnlocked(jobID, accountID, profile.Email)
 	s.oauthMu.RLock()
@@ -865,6 +1070,36 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	if err != nil {
 		return err
 	}
+	if strings.EqualFold(settings.Provider, "cpa") {
+		cpaSettings, cpaKey, cpaErr := s.store.CPASettings()
+		if cpaErr != nil {
+			return cpaErr
+		}
+		oldFileName := strings.TrimSpace(profile.CPAAuthFileName)
+		fileName := cpaReloginFileName(profile)
+		accountName := cpaAccountName(profile, true)
+		payload := buildCPAAuthPayloadNamed(profile, credentials, cpaSettings.GroupIDs, accountName)
+		encoded, _ := json.Marshal(payload)
+		if cpaErr = s.cpa.Upload(ctx, cpaSettings, cpaKey, fileName, encoded); cpaErr != nil {
+			return cpaErr
+		}
+		// CPA uses the deterministic email-based filename. Uploading the
+		// refreshed credential replaces the first file in place; only remove a
+		// legacy filename when it differs, so the new credential is never deleted.
+		if oldFileName != "" && !strings.EqualFold(oldFileName, fileName) {
+			if cpaErr = s.cpa.Delete(ctx, cpaSettings, cpaKey, oldFileName); cpaErr != nil {
+				return cpaErr
+			}
+		}
+		now := time.Now()
+		_, cpaErr = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
+			item.Status, item.OAuthStatus, item.PushStatus, item.QuotaStatus, item.LastError = "monitoring", "completed", "completed", "pending", ""
+			item.Sub2AccountID, item.Sub2AccountName, item.CPAAuthFileName, item.PushProvider = 0, accountName, fileName, "cpa"
+			item.StatusCheckedAt = nil
+			item.PushedAt, item.ReloginCount = &now, item.ReloginCount+1
+		})
+		return cpaErr
+	}
 	name := profile.Email
 	if strings.TrimSpace(profile.Label) != "" {
 		name = profile.Label
@@ -873,7 +1108,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	input := sub2.CreateAccountInput{
 		Name:        name,
 		Credentials: map[string]any{"access_token": credentials.OAuthAccessToken, "refresh_token": credentials.OAuthRefreshToken, "chatgpt_account_id": profile.OAuthAccountID, "email": profile.Email},
-		GroupIDs:    settings.GroupIDs, Models: settings.Models, Concurrency: settings.AccountConcurrency, Priority: settings.Priority,
+		GroupIDs:    settings.GroupIDs, Models: settings.Models, Concurrency: settings.AccountConcurrency, Priority: settings.Priority, CpaWS: settings.CpaWS,
 	}
 	fingerprint := sha256.Sum256([]byte("relogin|" + profile.ID + "|" + fmt.Sprint(profile.ReloginCount+1) + "|" + credentials.OAuthAccessToken + "|" + credentials.OAuthRefreshToken + "|" + fmt.Sprint(settings.GroupIDs) + "|" + fmt.Sprint(settings.Models)))
 	key := "free-pipeline-relogin-" + profile.ID + "-" + fmt.Sprintf("%x", fingerprint[:8])
@@ -884,9 +1119,19 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	if err != nil {
 		return err
 	}
+	oldAccountID := profile.Sub2AccountID
+	if oldAccountID > 0 && oldAccountID != created.ID {
+		if deleteErr := s.sub2.DeleteAccount(ctx, settings, password, oldAccountID); deleteErr != nil {
+			// Avoid leaving two active downstream accounts if cleanup fails.
+			_ = s.sub2.DeleteAccount(ctx, settings, password, created.ID)
+			return fmt.Errorf("重登成功但删除旧 Sub2 账号失败: %w", deleteErr)
+		}
+	}
 	now := time.Now()
 	_, err = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
 		item.Status, item.OAuthStatus, item.PushStatus, item.QuotaStatus, item.LastError = "monitoring", "completed", "completed", "pending", ""
+		item.PushProvider = "sub2"
+		item.CPAAuthFileName = ""
 		item.Sub2AccountID, item.Sub2AccountName = created.ID, created.Name
 		item.StatusCheckedAt = nil
 		item.Sub2GroupIDs, item.Sub2GroupNames = append([]int64(nil), settings.GroupIDs...), append([]string(nil), settings.GroupNames...)
@@ -944,6 +1189,13 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 		s.failFreeAccount(profile.ID, "remove", err)
 		return profile, err
 	}
+	// Removing a Team member also removes the corresponding downstream
+	// credential from the currently enabled provider. This prevents the old
+	// CPA/Sub2 account from continuing to receive traffic after rotation.
+	if deleteErr := s.deleteLinkedDownstream(ctx, profile); deleteErr != nil {
+		s.failFreeAccount(profile.ID, "remove", deleteErr)
+		return profile, deleteErr
+	}
 	now := time.Now()
 	updated, updateErr := s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.RemoveStatus, item.LastError = "removed", "completed", ""
@@ -952,6 +1204,28 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	_ = s.store.ReleaseSeatReservationByAccount(id)
 	_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{AccountID: id, Type: "seat_released", Stage: "remove", Message: "账号移出空间，释放席位预占"})
 	return updated, updateErr
+}
+
+func (s *Server) deleteLinkedDownstream(ctx context.Context, profile model.FreeAccountProfile) error {
+	settings, password, err := s.store.Sub2Settings()
+	if err != nil {
+		return err
+	}
+	provider := strings.ToLower(strings.TrimSpace(settings.Provider))
+	if provider == "cpa" {
+		if strings.TrimSpace(profile.CPAAuthFileName) == "" {
+			return nil
+		}
+		cpaSettings, key, cpaErr := s.store.CPASettings()
+		if cpaErr != nil {
+			return cpaErr
+		}
+		return s.cpa.Delete(ctx, cpaSettings, key, profile.CPAAuthFileName)
+	}
+	if profile.Sub2AccountID > 0 {
+		return s.sub2.DeleteAccount(ctx, settings, password, profile.Sub2AccountID)
+	}
+	return nil
 }
 
 type freeAccountStageInput struct {
@@ -1150,6 +1424,213 @@ func (s *Server) getSub2Settings(w http.ResponseWriter, _ *http.Request) {
 	writeAPI(w, http.StatusOK, settings, "")
 }
 
+// getPushSettings returns the unified downstream settings. Sub2 remains the
+// default for backwards compatibility; CPA credentials are stored separately.
+func (s *Server) getPushSettings(w http.ResponseWriter, _ *http.Request) {
+	sub, _, err := s.store.Sub2Settings()
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	cpas, _, err := s.store.CPASettings()
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(sub.Provider))
+	if provider != "cpa" {
+		provider = "sub2"
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"provider": provider, "sub2": sub, "cpa": cpas}, "")
+}
+
+type cpaSettingsInput struct {
+	URL                        string   `json:"url"`
+	Key                        string   `json:"key"`
+	Websockets                 *bool    `json:"websockets"`
+	Enable401Check             *bool    `json:"enable_401_check"`
+	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
+	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
+	GroupIDs                   []int64  `json:"group_ids"`
+	GroupNames                 []string `json:"group_names"`
+}
+
+type pushSettingsInput struct {
+	Provider string             `json:"provider"`
+	Sub2     *sub2SettingsInput `json:"sub2"`
+	CPA      *cpaSettingsInput  `json:"cpa"`
+}
+
+func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
+	var input pushSettingsInput
+	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	if provider != "cpa" {
+		provider = "sub2"
+	}
+	sub, subPassword, err := s.store.Sub2Settings()
+	if err != nil {
+		writeAPI(w, 500, nil, err.Error())
+		return
+	}
+	previousProvider := strings.ToLower(strings.TrimSpace(sub.Provider))
+	if previousProvider != "cpa" {
+		previousProvider = "sub2"
+	}
+	existingCPA, _, existingCPAErr := s.store.CPASettings()
+	if existingCPAErr != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, existingCPAErr.Error())
+		return
+	}
+	if provider == "cpa" {
+		candidateURL, candidateKeyPresent := existingCPA.URL, existingCPA.KeyPresent
+		if input.CPA != nil {
+			if strings.TrimSpace(input.CPA.URL) != "" {
+				candidateURL = input.CPA.URL
+			}
+			candidateKeyPresent = candidateKeyPresent || strings.TrimSpace(input.CPA.Key) != ""
+		}
+		if strings.TrimSpace(candidateURL) == "" || !candidateKeyPresent {
+			writeAPI(w, http.StatusBadRequest, nil, "启用 CPA 前必须配置 CPA 地址和 Management Key")
+			return
+		}
+	}
+	if input.Sub2 != nil {
+		v := input.Sub2
+		if provider == "sub2" && strings.TrimSpace(v.Password) == "" {
+			v.Password = subPassword
+		}
+		if provider == "sub2" {
+			if err := validateSub2Connection(v.URL, v.Email, v.Password); err != nil {
+				writeAPI(w, 400, nil, err.Error())
+				return
+			}
+		}
+		if v.AccountConcurrency == 0 {
+			v.AccountConcurrency = sub.AccountConcurrency
+		}
+		if v.Priority == 0 {
+			v.Priority = sub.Priority
+		}
+		if v.StatusCheckIntervalSeconds == 0 {
+			v.StatusCheckIntervalSeconds = sub.StatusCheckIntervalSeconds
+		}
+		if v.QuotaCheckIntervalSeconds == 0 {
+			v.QuotaCheckIntervalSeconds = sub.QuotaCheckIntervalSeconds
+		}
+		if v.Enable401Check == nil {
+			v.Enable401Check = &sub.Enable401Check
+		}
+		if v.CpaWS == nil {
+			v.CpaWS = &sub.CpaWS
+		}
+		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds}, v.Password)
+		if err != nil {
+			writeAPI(w, 500, nil, err.Error())
+			return
+		}
+	} else {
+		sub.Provider = provider
+		sub, err = s.store.SaveSub2Settings(sub, "")
+		if err != nil {
+			writeAPI(w, 500, nil, err.Error())
+			return
+		}
+	}
+	cpaSettings, cpaKey, err := s.store.CPASettings()
+	if err != nil {
+		writeAPI(w, 500, nil, err.Error())
+		return
+	}
+	if input.CPA != nil {
+		v := input.CPA
+		if strings.TrimSpace(v.URL) == "" {
+			v.URL = cpaSettings.URL
+		}
+		if v.Websockets == nil {
+			v.Websockets = &cpaSettings.Websockets
+		}
+		if v.Enable401Check == nil {
+			v.Enable401Check = &cpaSettings.Enable401Check
+		}
+		if v.StatusCheckIntervalSeconds == 0 {
+			v.StatusCheckIntervalSeconds = cpaSettings.StatusCheckIntervalSeconds
+		}
+		if v.QuotaCheckIntervalSeconds == 0 {
+			v.QuotaCheckIntervalSeconds = cpaSettings.QuotaCheckIntervalSeconds
+		}
+		cpaSettings, err = s.store.SaveCPASettings(model.CPASettings{URL: v.URL, Websockets: boolValue(v.Websockets), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, GroupIDs: uniquePositiveInt64s(v.GroupIDs), GroupNames: uniqueNonEmptyStrings(v.GroupNames)}, v.Key)
+		if err != nil {
+			writeAPI(w, 500, nil, err.Error())
+			return
+		}
+		_ = cpaKey
+	}
+	if previousProvider != provider {
+		// The remote account from the previous downstream is intentionally not
+		// deleted here. Local monitoring must stop using its old identifier and
+		// make the account selectable for a fresh manual push to the new target.
+		for _, account := range s.store.FreeAccounts() {
+			if account.PushStatus != "completed" && account.Sub2AccountID < 1 && account.CPAAuthFileName == "" {
+				continue
+			}
+			_, _ = s.store.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+				if item.RemoveStatus == "completed" {
+					return
+				}
+				item.PushStatus = "pending"
+				item.QuotaStatus = "pending"
+				item.Status = "monitoring"
+				item.LastError = fmt.Sprintf("推送后端已从 %s 切换为 %s，请重新推送", previousProvider, provider)
+				item.Sub2AccountID, item.Sub2AccountName = 0, ""
+				item.CPAAuthFileName, item.PushProvider = "", ""
+				item.StatusCheckedAt, item.QuotaCheckedAt = nil, nil
+			})
+		}
+	}
+	writeAPI(w, 200, map[string]any{"provider": provider, "sub2": sub, "cpa": cpaSettings}, "")
+}
+
+func boolValue(v *bool) bool { return v != nil && *v }
+
+func (s *Server) testCPASettings(w http.ResponseWriter, r *http.Request) {
+	settings, key, err := s.store.CPASettings()
+	if err != nil {
+		writeAPI(w, 500, nil, err.Error())
+		return
+	}
+	if strings.TrimSpace(settings.URL) == "" || strings.TrimSpace(key) == "" {
+		writeAPI(w, 400, nil, "CPA 地址和管理密钥不能为空")
+		return
+	}
+	if _, err = s.cpa.List(r.Context(), settings, key); err != nil {
+		writeAPI(w, 400, nil, err.Error())
+		return
+	}
+	groups, groupsErr := s.cpa.Groups(r.Context(), settings, key)
+	if groupsErr != nil {
+		writeAPI(w, 400, nil, groupsErr.Error())
+		return
+	}
+	writeAPI(w, 200, map[string]any{"connected": true, "groups": groups}, "")
+}
+
+func (s *Server) getCPAGroups(w http.ResponseWriter, r *http.Request) {
+	settings, key, err := s.store.CPASettings()
+	if err != nil {
+		writeAPI(w, 500, nil, err.Error())
+		return
+	}
+	groups, err := s.cpa.Groups(r.Context(), settings, key)
+	if err != nil {
+		writeAPI(w, 400, nil, err.Error())
+		return
+	}
+	writeAPI(w, 200, groups, "")
+}
+
 type sub2SettingsInput struct {
 	URL                        string   `json:"url"`
 	Email                      string   `json:"email"`
@@ -1161,6 +1642,7 @@ type sub2SettingsInput struct {
 	Models                     []string `json:"models"`
 	AccountConcurrency         int      `json:"account_concurrency"`
 	Priority                   int      `json:"priority"`
+	CpaWS                      *bool    `json:"cpa_ws"`
 	Enable401Check             *bool    `json:"enable_401_check"`
 	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
 	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
@@ -1199,6 +1681,10 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, "Sub2 优先级必须在 1 到 100 之间")
 		return
 	}
+	cpaWS := current.CpaWS
+	if input.CpaWS != nil {
+		cpaWS = *input.CpaWS
+	}
 	if input.StatusCheckIntervalSeconds == 0 {
 		input.StatusCheckIntervalSeconds = current.StatusCheckIntervalSeconds
 	}
@@ -1227,9 +1713,9 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Models = uniqueNonEmptyStrings(input.Models)
 	settings, err := s.store.SaveSub2Settings(model.Sub2Settings{
-		URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
+		Provider: current.Provider, URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
 		GroupIDs: input.GroupIDs, GroupNames: input.GroupNames, Models: input.Models, AccountConcurrency: input.AccountConcurrency, Priority: input.Priority,
-		Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds,
+		CpaWS: cpaWS, Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds,
 	}, input.Password)
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
@@ -1370,20 +1856,28 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 			if settingsErr != nil {
 				continue
 			}
+			monitor401Enabled := settings.Enable401Check
 			statusInterval := time.Duration(settings.StatusCheckIntervalSeconds) * time.Second
+			quotaInterval := time.Duration(settings.QuotaCheckIntervalSeconds) * time.Second
+			if strings.EqualFold(settings.Provider, "cpa") {
+				if cpaSettings, _, cpaErr := s.store.CPASettings(); cpaErr == nil {
+					monitor401Enabled = cpaSettings.Enable401Check
+					statusInterval = time.Duration(cpaSettings.StatusCheckIntervalSeconds) * time.Second
+					quotaInterval = time.Duration(cpaSettings.QuotaCheckIntervalSeconds) * time.Second
+				}
+			}
 			if statusInterval < 10*time.Second {
 				statusInterval = 120 * time.Second
 			}
-			quotaInterval := time.Duration(settings.QuotaCheckIntervalSeconds) * time.Second
 			if quotaInterval < 10*time.Second {
 				quotaInterval = 120 * time.Second
 			}
 			now := time.Now()
 			for _, account := range s.store.FreeAccounts() {
-				if account.Dead || account.Sub2AccountID < 1 || account.RemoveStatus == "completed" {
+				if account.Dead || (account.Sub2AccountID < 1 && account.CPAAuthFileName == "") || account.RemoveStatus == "completed" {
 					continue
 				}
-				statusDue := settings.Enable401Check && (account.StatusCheckedAt == nil || now.Sub(*account.StatusCheckedAt) >= statusInterval)
+				statusDue := monitor401Enabled && (account.StatusCheckedAt == nil || now.Sub(*account.StatusCheckedAt) >= statusInterval)
 				quotaDue := account.QuotaCheckedAt == nil || now.Sub(*account.QuotaCheckedAt) >= quotaInterval
 				if !statusDue && !quotaDue {
 					continue
@@ -1395,7 +1889,7 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 				}
 				var err error
 				if quotaDue && !reloggedIn {
-					_, _, err = s.performFreeAccountQuotaInternal(ctx, account.ID, true, settings.Enable401Check)
+					_, _, err = s.performFreeAccountQuotaInternal(ctx, account.ID, true, monitor401Enabled)
 				}
 				unlock()
 				if err != nil {

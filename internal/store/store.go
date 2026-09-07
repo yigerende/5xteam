@@ -141,6 +141,9 @@ func (s *Store) initSchema() error {
 		CREATE TABLE IF NOT EXISTS sub2_settings (
 			id INTEGER PRIMARY KEY CHECK (id = 1), profile TEXT NOT NULL, encrypted_password TEXT NOT NULL DEFAULT ''
 		);
+		CREATE TABLE IF NOT EXISTS cpa_settings (
+			id INTEGER PRIMARY KEY CHECK (id = 1), profile TEXT NOT NULL, encrypted_key TEXT NOT NULL DEFAULT ''
+		);
 		CREATE TABLE IF NOT EXISTS free_accounts (
 			id TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE, profile TEXT NOT NULL,
 			encrypted_source_token TEXT NOT NULL, encrypted_oauth_access_token TEXT NOT NULL DEFAULT '',

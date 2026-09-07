@@ -346,7 +346,7 @@ func eligibleAutoRotationMail(account model.MailAccountProfile) bool {
 }
 
 func autoSteps() []model.AutoRotationStep {
-	return []model.AutoRotationStep{{Key: "invite", Name: "邀请并进入空间", Status: "pending"}, {Key: "oauth", Name: "获取 Codex OAuth", Status: "pending"}, {Key: "push", Name: "推送 Sub2", Status: "pending"}, {Key: "quota", Name: "查询额度", Status: "pending"}}
+	return []model.AutoRotationStep{{Key: "invite", Name: "邀请并进入空间", Status: "pending"}, {Key: "oauth", Name: "获取 Codex OAuth", Status: "pending"}, {Key: "push", Name: "推送当前下游", Status: "pending"}, {Key: "quota", Name: "查询额度", Status: "pending"}}
 }
 func maxInt(a, b int) int {
 	if a > b {
@@ -444,7 +444,14 @@ func pendingAutoInviteCount(tasks []model.AutoRotationTask, accounts []model.Fre
 			continue
 		}
 		account, ok := byID[task.AccountID]
-		if ok && (account.AcceptStatus == "completed" || account.RemoveStatus == "completed") {
+		// A durable task can outlive its account record (for example when an
+		// operator deletes a failed pipeline record or after an older run was
+		// recovered).  A missing account cannot still hold an invitation seat,
+		// so it must not reduce the current available capacity.
+		if !ok {
+			continue
+		}
+		if account.AcceptStatus == "completed" || account.RemoveStatus == "completed" {
 			continue
 		}
 		count++
@@ -463,7 +470,10 @@ func pendingAutoInviteCountForAdmin(tasks []model.AutoRotationTask, accounts []m
 			continue
 		}
 		account, ok := byID[task.AccountID]
-		if ok && (account.AcceptStatus == "completed" || account.RemoveStatus == "completed") {
+		if !ok {
+			continue
+		}
+		if account.AcceptStatus == "completed" || account.RemoveStatus == "completed" {
 			continue
 		}
 		count++
@@ -572,7 +582,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 	}
 	step("quota", "completed", "")
 	// The reservation protects the invite/enter window. Once the account has
-	// been pushed to Sub2 and its quota has been read successfully, the account
+	// been pushed to the active downstream and its quota has been read successfully, the account
 	// is fully established in the Team space and no longer needs a temporary
 	// reservation. Release it before the next automatic rotation so stale
 	// reservations cannot consume capacity.
@@ -580,7 +590,11 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 		if err := s.store.ReleaseSeatReservation(task.ReservationID); err == nil {
 			task.SeatReserved = false
 			_ = s.store.UpdateAutoRotationTask(task)
-			_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, AdminAccountID: task.AdminAccountID, Type: "seat_released", Stage: "quota", Message: "Sub2 推送并额度获取成功，释放 5x 席位预占", Details: map[string]any{"reservation_id": task.ReservationID}})
+			provider := "Sub2"
+			if settings, _, settingsErr := s.store.Sub2Settings(); settingsErr == nil && strings.EqualFold(settings.Provider, "cpa") {
+				provider = "CPA"
+			}
+			_ = s.store.AddAutoRotationEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, AdminAccountID: task.AdminAccountID, Type: "seat_released", Stage: "quota", Message: provider + " 推送并额度获取成功，释放 5x 席位预占", Details: map[string]any{"reservation_id": task.ReservationID, "provider": strings.ToLower(provider)}})
 		}
 	}
 	task.Status = "completed"

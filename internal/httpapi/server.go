@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"chatgpt-space-merge/internal/cpa"
 	"chatgpt-space-merge/internal/mailbridge"
 	"chatgpt-space-merge/internal/model"
 	"chatgpt-space-merge/internal/store"
@@ -29,6 +30,7 @@ type Server struct {
 	freeLocks        sync.Map
 	freeRemoveLocks  sync.Map
 	sub2             *sub2.Client
+	cpa              *cpa.Client
 	registrationMu   sync.RWMutex
 	registrationJobs map[string]map[string]any
 	mailFetchMu      sync.RWMutex
@@ -60,7 +62,8 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 		return nil, err
 	}
 	_ = dataStore.RecoverAutoRotationClaims()
-	return &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any)}, nil
+	_ = dataStore.RecoverAutoRotationTasks()
+	return &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), cpa: cpa.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any)}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -119,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/free-accounts/{id}/oauth/start", s.startFreeAccountOAuth)
 	mux.HandleFunc("GET /api/free-accounts/{id}/oauth/status/{job_id}", s.freeAccountOAuthStatus)
 	mux.HandleFunc("POST /api/free-accounts/{id}/oauth", s.attachFreeAccountOAuth)
+	mux.HandleFunc("POST /api/free-accounts/{id}/relogin", s.reloginFreeAccount)
 	mux.HandleFunc("POST /api/free-accounts/{id}/push", s.pushFreeAccount)
 	mux.HandleFunc("POST /api/free-accounts/{id}/quota", s.checkFreeAccountQuota)
 	mux.HandleFunc("POST /api/free-accounts/{id}/remove", s.removeFreeAccount)
@@ -127,6 +131,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sub2-settings", s.getSub2Settings)
 	mux.HandleFunc("PUT /api/sub2-settings", s.saveSub2Settings)
 	mux.HandleFunc("POST /api/sub2-settings/test", s.testSub2Settings)
+	mux.HandleFunc("GET /api/push-settings", s.getPushSettings)
+	mux.HandleFunc("PUT /api/push-settings", s.savePushSettings)
+	mux.HandleFunc("POST /api/push-settings/cpa/test", s.testCPASettings)
+	mux.HandleFunc("GET /api/push-settings/cpa/groups", s.getCPAGroups)
 	mux.HandleFunc("GET /api/mail/status", s.mailStatus)
 	mux.HandleFunc("GET /api/mail/accounts", s.listMailAccounts)
 	mux.HandleFunc("POST /api/mail/accounts/import", s.importMailAccounts)

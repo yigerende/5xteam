@@ -22,7 +22,11 @@ const props = defineProps({
 const emit = defineEmits(['reload', 'auto-rotation'])
 
 const importForm = reactive({ tokens: '' })
-const sub2Form = reactive({ url: '', email: '', password: '', groupIDs: [], groupNames: [], models: '', accountConcurrency: 10, priority: 1, enable401Check: true, statusCheckIntervalSeconds: 120, quotaCheckIntervalSeconds: 120, passwordPresent: false })
+const sub2Form = reactive({ url: '', email: '', password: '', groupIDs: [], groupNames: [], models: '', accountConcurrency: 10, priority: 1, cpaWs: false, enable401Check: true, statusCheckIntervalSeconds: 120, quotaCheckIntervalSeconds: 120, passwordPresent: false })
+const cpaForm = reactive({ url: '', key: '', keyPresent: false, websockets: false, enable401Check: true, statusCheckIntervalSeconds: 120, quotaCheckIntervalSeconds: 120, groupIDs: [], groupNames: [] })
+const cpaGroups = ref([])
+const pushProvider = ref('sub2')
+const activeProviderLabel = computed(() => pushProvider.value === 'cpa' ? 'CPA' : 'Sub2')
 const joinForm = reactive({ account: null, adminAccountID: '', seatType: 'default' })
 const manualPushForm = reactive({ account: null, sub2AccountID: '' })
 const groups = ref([])
@@ -122,7 +126,7 @@ function nextCheckSeconds(timestampKey, intervalSeconds, enabled = true) {
   if (!enabled) return null
   const interval = Math.max(10, Number(intervalSeconds) || 120)
   const candidates = liveAccounts.value
-    .filter((item) => Number(item?.sub2_account_id) > 0 && item?.remove_status !== 'completed')
+    .filter((item) => hasDownstream(item) && item?.remove_status !== 'completed')
     .map((item) => {
       const value = item?.[timestampKey]
       if (!value) return 0
@@ -132,8 +136,8 @@ function nextCheckSeconds(timestampKey, intervalSeconds, enabled = true) {
     })
   return candidates.length ? Math.min(...candidates) : null
 }
-const statusCountdown = computed(() => nextCheckSeconds('status_checked_at', sub2Form.statusCheckIntervalSeconds, sub2Form.enable401Check))
-const quotaCountdown = computed(() => nextCheckSeconds('quota_checked_at', sub2Form.quotaCheckIntervalSeconds))
+const statusCountdown = computed(() => nextCheckSeconds('status_checked_at', pushProvider.value === 'cpa' ? cpaForm.statusCheckIntervalSeconds : sub2Form.statusCheckIntervalSeconds, pushProvider.value === 'cpa' ? cpaForm.enable401Check : sub2Form.enable401Check))
+const quotaCountdown = computed(() => nextCheckSeconds('quota_checked_at', pushProvider.value === 'cpa' ? cpaForm.quotaCheckIntervalSeconds : sub2Form.quotaCheckIntervalSeconds))
 function countdownText(value, disabled = false) {
   if (disabled) return '已关闭'
   if (value == null) return '暂无账号'
@@ -145,10 +149,16 @@ const stateLabels = { not_started: '未开始', pending: '待处理', running: '
 const operationMeta = {
   join: { label: '邀请并进入空间', stage: 'invite' },
   oauth: { label: '获取 Codex AT / RT', stage: 'oauth' },
-  push: { label: '推送到 Sub2', stage: 'push' },
+  relogin: { label: '重登并重新推送', stage: 'oauth' },
+  push: { label: '推送到当前下游', stage: 'push' },
   quota: { label: '刷新额度', stage: 'quota' },
   remove: { label: '移出空间', stage: 'remove' },
 }
+// A record may retain a legacy identifier from the other downstream after a
+// provider switch.  All actions must follow only the currently enabled line.
+const hasDownstream = (account) => pushProvider.value === 'cpa'
+  ? !!account?.cpa_auth_file_name
+  : Number(account?.sub2_account_id) > 0
 
 watch(() => props.accounts, (value) => {
   liveAccounts.value = value.map((item) => ({ ...item }))
@@ -287,7 +297,8 @@ function activityText(activity) {
   if (activity.detail) return activity.detail
   if (activity.action === 'join' && activity.stage === 'accept') return '正在接受团队邀请'
   if (activity.action === 'join') return '正在发送团队邀请'
-  return `正在${operationMeta[activity.action]?.label || '执行操作'}`
+  const label = activity.action === 'push' ? `推送到${activeProviderLabel.value}` : operationMeta[activity.action]?.label
+  return `正在${label || '执行操作'}`
 }
 function wait(milliseconds) { return new Promise((resolve) => window.setTimeout(resolve, milliseconds)) }
 function latestJobMessage(job) {
@@ -374,14 +385,34 @@ async function loadSub2() {
     Object.assign(sub2Form, {
       url: settings.url || '', email: settings.email || '', password: '', groupIDs, groupNames,
       models: (settings.models || []).join('\n'), accountConcurrency: settings.account_concurrency || 10, priority: settings.priority || 1,
+      cpaWs: settings.cpa_ws === true || Number(settings.cpa_ws) === 1,
       enable401Check: settings.enable_401_check !== false,
       statusCheckIntervalSeconds: settings.status_check_interval_seconds || settings.quota_check_interval_seconds || 120,
       quotaCheckIntervalSeconds: settings.quota_check_interval_seconds || 120,
       passwordPresent: !!settings.password_present,
     })
-    if (settings.url && settings.password_present) await testSub2(false)
+    if (pushProvider.value === 'sub2' && settings.url && settings.password_present) await testSub2(false)
   } catch (error) { setMessage(error.message, 'error') }
 }
+async function loadPushSettings() {
+  try {
+    const result = await api('/api/push-settings')
+    pushProvider.value = result.provider === 'cpa' ? 'cpa' : 'sub2'
+    const s = result.sub2 || {}; Object.assign(sub2Form, { url: s.url || '', email: s.email || '', groupIDs: s.group_ids || [], groupNames: s.group_names || [], models: (s.models || []).join('\n'), accountConcurrency: s.account_concurrency || 10, priority: s.priority || 1, cpaWs: s.cpa_ws === true || Number(s.cpa_ws) === 1, enable401Check: s.enable_401_check !== false, statusCheckIntervalSeconds: s.status_check_interval_seconds || 120, quotaCheckIntervalSeconds: s.quota_check_interval_seconds || 120, passwordPresent: !!s.password_present })
+    const c = result.cpa || {}; Object.assign(cpaForm, { url: c.url || '', keyPresent: !!c.key_present, websockets: !!c.websockets, enable401Check: c.enable_401_check !== false, statusCheckIntervalSeconds: c.status_check_interval_seconds || 120, quotaCheckIntervalSeconds: c.quota_check_interval_seconds || 120, groupIDs: c.group_ids || [], groupNames: c.group_names || [] })
+    if (cpaForm.url && cpaForm.keyPresent) await loadCPAGroups()
+  } catch (error) { setMessage(error.message, 'error') }
+}
+async function savePushSettings() {
+  busy.value = 'push-settings'
+  try {
+    const payload = { provider: pushProvider.value, sub2: { url: sub2Form.url.trim(), email: sub2Form.email.trim(), password: sub2Form.password, group_ids: sub2Form.groupIDs.map(Number), group_names: selectedGroupNames(), models: selectedModels(), account_concurrency: Number(sub2Form.accountConcurrency) || 10, priority: Number(sub2Form.priority) || 1, cpa_ws: !!sub2Form.cpaWs, enable_401_check: !!sub2Form.enable401Check, status_check_interval_seconds: Number(sub2Form.statusCheckIntervalSeconds) || 120, quota_check_interval_seconds: Number(sub2Form.quotaCheckIntervalSeconds) || 120 }, cpa: { url: cpaForm.url.trim(), key: cpaForm.key, websockets: !!cpaForm.websockets, enable_401_check: !!cpaForm.enable401Check, status_check_interval_seconds: Number(cpaForm.statusCheckIntervalSeconds) || 120, quota_check_interval_seconds: Number(cpaForm.quotaCheckIntervalSeconds) || 120, group_ids: cpaForm.groupIDs.map(Number), group_names: selectedCPAGroupNames() } }
+    const result = await api('/api/push-settings', { method: 'PUT', body: payload }); cpaForm.key = ''; cpaForm.keyPresent = !!result.cpa?.key_present; sub2Form.password = ''; sub2Form.passwordPresent = !!result.sub2?.password_present; setMessage(`推送设置已保存，当前使用${pushProvider.value === 'cpa' ? ' CPA' : ' Sub2'}`, 'success')
+  } catch (error) { setMessage(error.message, 'error') } finally { busy.value = '' }
+}
+async function testCPA() { busy.value = 'cpa-test'; try { await api('/api/push-settings/cpa/test', { method: 'POST', body: {} }); await loadCPAGroups(); setMessage('CPA 已连接', 'success') } catch (error) { setMessage(error.message, 'error') } finally { busy.value = '' } }
+async function loadCPAGroups() { try { const result = await api('/api/push-settings/cpa/groups'); cpaGroups.value = result || [] } catch (error) { setMessage(error.message, 'error') } }
+function selectedCPAGroupNames() { const loaded = new Map(cpaGroups.value.map((group) => [Number(group.id), group.name])); return cpaForm.groupIDs.map((id, index) => loaded.get(Number(id)) || cpaForm.groupNames[index] || `#${id}`) }
 function selectedGroupNames() {
   const loaded = new Map(groups.value.map((group) => [Number(group.id), group.name]))
   return sub2Form.groupIDs.map((id, index) => loaded.get(Number(id)) || sub2Form.groupNames[index] || `#${id}`)
@@ -396,6 +427,7 @@ async function saveSub2(showMessage = true) {
       url: sub2Form.url.trim(), email: sub2Form.email.trim(), password: sub2Form.password,
       group_ids: groupIDs, group_names: selectedGroupNames(), models: selectedModels(),
       account_concurrency: Number(sub2Form.accountConcurrency) || 10, priority: Number(sub2Form.priority) || 1,
+      cpa_ws: !!sub2Form.cpaWs,
       enable_401_check: !!sub2Form.enable401Check,
       status_check_interval_seconds: Number(sub2Form.statusCheckIntervalSeconds) || 120,
       quota_check_interval_seconds: Number(sub2Form.quotaCheckIntervalSeconds) || 120,
@@ -541,20 +573,22 @@ async function runSelectedPipelineTask(action) {
   if (!selected.length) return setMessage('请先勾选要执行的账号', 'error')
   const requirements = {
     oauth: (account) => account.accept_status === 'completed' && account.remove_status !== 'completed',
-    push: (account) => account.oauth_status === 'completed' && !account.sub2_account_id,
-    quota: (account) => !!account.sub2_account_id,
+    relogin: (account) => account.accept_status === 'completed' && account.remove_status !== 'completed' && hasDownstream(account) && !account.dead,
+    push: (account) => account.oauth_status === 'completed' && !hasDownstream(account),
+    quota: (account) => hasDownstream(account),
   }
   const eligible = selected.filter(requirements[action])
   const skipped = selected.length - eligible.length
   if (!eligible.length) return setMessage(`没有符合条件的账号（已跳过 ${skipped} 个）`, 'error')
   selectedAccountIDs.value = new Set()
   busy.value = `batch:${action}`
-  const labels = { oauth: '授权', push: '推送 Sub2', quota: '查额度' }
+  const labels = { oauth: '授权', relogin: '重登', push: `推送${activeProviderLabel.value}`, quota: '查额度' }
   setMessage(`正在批量${labels[action]}：0/${eligible.length}`)
   let completed = 0
   const results = await Promise.all(eligible.map(async (account) => {
     try {
       if (action === 'oauth') await runOAuthSilently(account)
+      else if (action === 'relogin') await runTracked(account, action, () => api(`/api/free-accounts/${encodeURIComponent(account.id)}/relogin`, { method: 'POST', body: {} }))
       else await runTracked(account, action, () => api(`/api/free-accounts/${encodeURIComponent(account.id)}/${action}`, { method: 'POST', body: {} }))
       completed += 1
       setMessage(`正在批量${labels[action]}：${completed}/${eligible.length}`)
@@ -572,7 +606,7 @@ async function runSelectedPipelineTask(action) {
   setMessage(`批量${labels[action]}完成：成功 ${succeeded}，失败 ${failed}${skipped ? `，跳过 ${skipped}` : ''}`, failed ? 'error' : 'success')
 }
 async function runAction(account, action) {
-  const label = { push: '推送 Sub2', quota: '刷新额度', remove: '移出空间' }[action]
+  const label = { relogin: '重登并重新推送', push: `推送${activeProviderLabel.value}`, quota: '刷新额度', remove: '移出空间' }[action]
   try {
     const result = await runTracked(account, action, () => api(`/api/free-accounts/${encodeURIComponent(account.id)}/${action}`, { method: 'POST', body: {} }))
     setMessage(action === 'quota' && result.auto_removed ? `${account.email} 额度已耗尽并自动移出` : `${account.email}：${label}完成`, 'success')
@@ -619,8 +653,8 @@ function quotaText(window) {
 
 let clockTimer
 let liveRefreshTimer
-onMounted(() => {
-  loadSub2()
+onMounted(async () => {
+  await loadPushSettings(); await loadSub2()
   clockTimer = window.setInterval(() => { clock.value = Date.now() }, 1000)
   liveRefreshTimer = window.setInterval(() => { refreshLiveAccounts().catch(() => {}) }, 10000)
 })
@@ -639,7 +673,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
     <nav class="team-subnav" aria-label="Team 轮转菜单">
       <button type="button" :class="{ active: teamMenu === 'accounts' }" @click="teamMenu = 'accounts'"><Waypoints :size="14" />账号管理</button>
       <button type="button" :class="{ active: teamMenu === 'import' }" @click="teamMenu = 'import'"><Upload :size="14" />导入 Free 账号</button>
-      <button type="button" :class="{ active: teamMenu === 'sub2' }" @click="teamMenu = 'sub2'"><Send :size="14" />Sub2 推送配置</button>
+      <button type="button" :class="{ active: teamMenu === 'sub2' }" @click="teamMenu = 'sub2'"><Send :size="14" />推送设置</button>
       <button type="button" :class="{ active: teamMenu === 'auto' }" @click="teamMenu = 'auto'"><RefreshCw :size="14" />全自动轮转</button>
     </nav>
 
@@ -662,21 +696,38 @@ onBeforeUnmount(stopCapacityRefreshTimer)
       </form>
     </div>
 
-    <form v-if="teamMenu === 'sub2'" class="panel sub2-config-panel" @submit.prevent="persistSub2">
-      <div class="panel-title"><div><span>SUB2 CONNECTION</span><h2>Sub2 推送配置</h2><p class="panel-description">配置 Sub2 地址、管理员账号、分组和推送并发参数</p></div><StatusPill :tone="groups.length ? 'success' : 'pending'">{{ groups.length ? '已连接' : '未连接' }}</StatusPill></div>
+    <form v-if="teamMenu === 'sub2'" class="push-settings-grid" @submit.prevent="savePushSettings">
+      <div class="panel sub2-config-panel">
+      <div class="panel-title"><div><span>SUB2 CONNECTION</span><h2>Sub2 设置</h2><p class="panel-description">配置 Sub2 地址、管理员账号、分组和推送参数</p></div><label class="mini-toggle"><input v-model="pushProvider" value="sub2" type="radio" name="push-provider" /><i></i><span>{{ pushProvider === 'sub2' ? '当前启用' : '启用 Sub2' }}</span></label></div>
       <div class="sub2-fields">
-        <label class="field wide"><span>Sub2 地址</span><input v-model="sub2Form.url" type="url" placeholder="https://sub2.example.com" required /></label>
-        <label class="field"><span>管理员邮箱</span><input v-model="sub2Form.email" type="email" required /></label>
-        <label class="field"><span>管理员密码 <small>{{ sub2Form.passwordPresent ? '已保存，留空不修改' : '' }}</small></span><input v-model="sub2Form.password" type="password" autocomplete="new-password" :required="!sub2Form.passwordPresent" /></label>
+        <label class="field wide"><span>Sub2 地址</span><input v-model="sub2Form.url" type="url" placeholder="https://sub2.example.com" :required="pushProvider === 'sub2'" /></label>
+        <label class="field"><span>管理员邮箱</span><input v-model="sub2Form.email" type="email" :required="pushProvider === 'sub2'" /></label>
+        <label class="field"><span>管理员密码 <small>{{ sub2Form.passwordPresent ? '已保存，留空不修改' : '' }}</small></span><input v-model="sub2Form.password" type="password" autocomplete="new-password" :required="pushProvider === 'sub2' && !sub2Form.passwordPresent" /></label>
         <div class="field wide"><span>OpenAI 分组 <small>已选 {{ sub2Form.groupIDs.length }} 个</small></span><div class="group-picker"><label v-for="group in groups" :key="group.id"><input v-model="sub2Form.groupIDs" type="checkbox" :value="Number(group.id)" /><span>{{ group.name }}</span><small>#{{ group.id }}</small></label><p v-if="!groups.length">连接 Sub2 后读取可选分组</p></div></div>
         <label class="field wide"><span>可用模型 <small>每行或逗号分隔，留空表示不限制</small></span><textarea v-model="sub2Form.models" rows="4" spellcheck="false" placeholder="gpt-5.2-codex&#10;gpt-5.1-codex-mini"></textarea></label>
         <label class="field"><span>账号并发数</span><input v-model.number="sub2Form.accountConcurrency" type="number" min="1" max="100" required /></label>
         <label class="field"><span>优先级 <small>数值越小优先级越高</small></span><input v-model.number="sub2Form.priority" type="number" min="1" max="100" required /></label>
+        <div class="field checkbox-field"><span>WS 推荐配置 <small>推送 Sub2 时启用 cpa_ws=1</small></span><label class="mini-toggle"><input v-model="sub2Form.cpaWs" type="checkbox" /><i></i><span>{{ sub2Form.cpaWs ? '已开启' : '已关闭' }}</span></label></div>
         <div class="field checkbox-field"><span>401 状态检测 <small>关闭后不自动查询 401，也不会触发重登</small></span><label class="mini-toggle"><input v-model="sub2Form.enable401Check" type="checkbox" /><i></i><span>{{ sub2Form.enable401Check ? '已开启' : '已关闭' }}</span></label></div>
         <label class="field"><span>401 状态查询间隔（秒） <small>检测到 401 后自动重登并重新推送</small></span><input v-model.number="sub2Form.statusCheckIntervalSeconds" type="number" min="10" max="86400" required /></label>
         <label class="field"><span>额度检测 / 自动移出间隔（秒） <small>检查 5 小时/7 天额度并按策略移出</small></span><input v-model.number="sub2Form.quotaCheckIntervalSeconds" type="number" min="10" max="86400" required /></label>
       </div>
-      <div class="split-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="connectSub2"><Cable :size="15" />连接并读取分组</button><button class="btn primary" type="submit" :disabled="!!busy || !sub2Form.groupIDs.length"><Save :size="15" />保存配置</button></div>
+      <div class="split-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="connectSub2"><Cable :size="15" />连接并读取分组</button></div>
+      </div>
+      <div class="panel cpa-config-panel">
+        <div class="panel-title"><div><span>CPA MANAGEMENT</span><h2>CPA 设置</h2><p class="panel-description">配置 CPA Management API 和 Codex auth 文件推送</p></div><label class="mini-toggle"><input v-model="pushProvider" value="cpa" type="radio" name="push-provider" /><i></i><span>{{ pushProvider === 'cpa' ? '当前启用' : '启用 CPA' }}</span></label></div>
+        <div class="sub2-fields">
+          <label class="field wide"><span>CPA 地址</span><input v-model="cpaForm.url" type="url" placeholder="http://127.0.0.1:8317" /></label>
+          <label class="field wide"><span>Management Key <small>{{ cpaForm.keyPresent ? '已保存，留空不修改' : '' }}</small></span><input v-model="cpaForm.key" type="password" autocomplete="new-password" /></label>
+          <div class="field wide"><span>CPA 账号分组 <small>已选 {{ cpaForm.groupIDs.length }} 个</small></span><div class="group-picker"><label v-for="group in cpaGroups" :key="group.id"><input v-model="cpaForm.groupIDs" type="checkbox" :value="Number(group.id)" /><span>{{ group.name }}</span><small>#{{ group.id }}</small></label><p v-if="!cpaGroups.length">测试 CPA 连接后读取可选分组</p></div></div>
+          <div class="field checkbox-field"><span>WS 推荐配置</span><label class="mini-toggle"><input v-model="cpaForm.websockets" type="checkbox" /><i></i><span>{{ cpaForm.websockets ? '已开启' : '已关闭' }}</span></label></div>
+          <div class="field checkbox-field"><span>401 状态检测</span><label class="mini-toggle"><input v-model="cpaForm.enable401Check" type="checkbox" /><i></i><span>{{ cpaForm.enable401Check ? '已开启' : '已关闭' }}</span></label></div>
+          <label class="field"><span>401 检测间隔（秒）</span><input v-model.number="cpaForm.statusCheckIntervalSeconds" type="number" min="10" max="86400" /></label>
+          <label class="field"><span>额度检测间隔（秒）</span><input v-model.number="cpaForm.quotaCheckIntervalSeconds" type="number" min="10" max="86400" /></label>
+        </div>
+        <div class="split-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="testCPA"><Cable :size="15" />测试 CPA 连接</button></div>
+      </div>
+      <div class="push-settings-actions"><button class="btn primary" type="submit" :disabled="!!busy"><Save :size="15" />保存推送设置（仅启用一套）</button></div>
     </form>
 
     <AutoRotationView v-if="teamMenu === 'auto'" :admin-accounts="adminAccounts" />
@@ -684,7 +735,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
     <MessageBar :message="message" />
 
     <section v-if="teamMenu === 'accounts'" class="panel list-panel free-list">
-      <div class="panel-title responsive"><div><span>PIPELINE</span><h2>账号流程状态</h2></div><div class="heading-actions"><StatusPill v-if="activeActivities.length" tone="running"><LoaderCircle class="spin" :size="12" />执行中 {{ activeActivities.length }}</StatusPill><div class="monitor-countdowns" title="后台监控任务倒计时"><span class="countdown-pill status-countdown">401 检测 <strong>{{ countdownText(statusCountdown, !sub2Form.enable401Check) }}</strong></span><span class="countdown-pill quota-countdown">额度 / 移出 <strong>{{ countdownText(quotaCountdown) }}</strong></span></div><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('oauth')"><KeyRound :size="15" />批量授权<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('push')"><Send :size="15" />批量推送 Sub2<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('quota')"><Gauge :size="15" />批量查额度<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="removeSelectedRecords"><Trash2 :size="15" />批量删除<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button></div></div>
+      <div class="panel-title responsive"><div><span>PIPELINE</span><h2>账号流程状态</h2></div><div class="heading-actions"><StatusPill v-if="activeActivities.length" tone="running"><LoaderCircle class="spin" :size="12" />执行中 {{ activeActivities.length }}</StatusPill><div class="monitor-countdowns" title="后台监控任务倒计时"><span class="countdown-pill status-countdown">401 检测 <strong>{{ countdownText(statusCountdown, pushProvider === 'cpa' ? !cpaForm.enable401Check : !sub2Form.enable401Check) }}</strong></span><span class="countdown-pill quota-countdown">额度 / 移出 <strong>{{ countdownText(quotaCountdown) }}</strong></span></div><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('relogin')"><RefreshCw :size="15" />批量重登<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('oauth')"><KeyRound :size="15" />批量授权<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('push')"><Send :size="15" />批量推送 {{ activeProviderLabel }}<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('quota')"><Gauge :size="15" />批量查额度<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="removeSelectedRecords"><Trash2 :size="15" />批量删除<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button></div></div>
       <div v-if="activeActivities.length" class="execution-list" aria-live="polite">
         <div v-for="activity in activeActivities" :key="activity.id" class="execution-item">
           <LoaderCircle class="spin" :size="18" />
@@ -708,7 +759,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
           <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
           <td><strong>{{ account.relogin_count || 0 }}</strong><small class="table-note">次</small></td>
-          <td><div class="row-actions"><IconButton :label="joinActionLabel(account)" :disabled="account.dead || isAccountBusy(account) || joinCapacityRefreshing || !adminAccounts.length || account.remove_status === 'completed'" @click="openJoin(account)"><LoaderCircle v-if="activityFor(account)?.action === 'join' || joinCapacityRefreshing" class="spin" :size="15" /><DoorOpen v-else :size="15" /></IconButton><IconButton label="获取 Codex AT / RT" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="acquireOAuth(account)"><LoaderCircle v-if="activityFor(account)?.action === 'oauth'" class="spin" :size="15" /><KeyRound v-else :size="15" /></IconButton><IconButton label="推送到 Sub2" :disabled="account.dead || isAccountBusy(account) || account.oauth_status !== 'completed' || !!account.sub2_account_id" @click="runAction(account, 'push')"><LoaderCircle v-if="activityFor(account)?.action === 'push'" class="spin" :size="15" /><Send v-else :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !account.sub2_account_id" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="立即移出空间" danger :disabled="isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="runAction(account, 'remove')"><LoaderCircle v-if="activityFor(account)?.action === 'remove'" class="spin" :size="15" /><Unplug v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
+          <td><div class="row-actions"><IconButton :label="joinActionLabel(account)" :disabled="account.dead || isAccountBusy(account) || joinCapacityRefreshing || !adminAccounts.length || account.remove_status === 'completed'" @click="openJoin(account)"><LoaderCircle v-if="activityFor(account)?.action === 'join' || joinCapacityRefreshing" class="spin" :size="15" /><DoorOpen v-else :size="15" /></IconButton><IconButton label="获取 Codex AT / RT" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="acquireOAuth(account)"><LoaderCircle v-if="activityFor(account)?.action === 'oauth'" class="spin" :size="15" /><KeyRound v-else :size="15" /></IconButton><IconButton label="重登并重新推送" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || !hasDownstream(account) || account.remove_status === 'completed'" @click="runAction(account, 'relogin')"><LoaderCircle v-if="activityFor(account)?.action === 'relogin'" class="spin" :size="15" /><RefreshCw v-else :size="15" /></IconButton><IconButton :label="`推送到${activeProviderLabel}`" :disabled="account.dead || isAccountBusy(account) || account.oauth_status !== 'completed' || hasDownstream(account)" @click="runAction(account, 'push')"><LoaderCircle v-if="activityFor(account)?.action === 'push'" class="spin" :size="15" /><Send v-else :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !hasDownstream(account)" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="立即移出空间" danger :disabled="isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="runAction(account, 'remove')"><LoaderCircle v-if="activityFor(account)?.action === 'remove'" class="spin" :size="15" /><Unplug v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
         </tr>
       </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="allDisplayedAccounts.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
     </section>
@@ -731,6 +782,9 @@ onBeforeUnmount(stopCapacityRefreshTimer)
 .team-subnav button { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 12px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; }
 .team-subnav button:hover { background: var(--surface-2); color: var(--text-2); }
 .team-subnav button.active { border-color: rgba(37, 143, 97, .25); background: var(--green-bg); color: var(--green-strong); }
+.push-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.push-settings-grid .sub2-config-panel, .push-settings-grid .cpa-config-panel { max-width: none; }
+.push-settings-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
 .sub2-config-panel { max-width: 980px; }
 .panel-description { margin-top: 4px; color: var(--muted); font-size: 10px; }
 .split-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -790,5 +844,6 @@ onBeforeUnmount(stopCapacityRefreshTimer)
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes progress-scan { from { transform: translateX(-110%); } to { transform: translateX(290%); } }
 @media (max-width: 980px) { .free-config-grid { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .push-settings-grid { grid-template-columns: 1fr; } .push-settings-actions { grid-column: auto; } }
 @media (max-width: 620px) { .sub2-fields { grid-template-columns: 1fr; } .sub2-fields .wide { grid-column: auto; } .split-actions { align-items: stretch; flex-direction: column; } .split-actions > .btn { width: 100%; } .execution-item { grid-template-columns: auto minmax(0, 1fr); } .execution-item > .status-pill { display: none; } }
 </style>

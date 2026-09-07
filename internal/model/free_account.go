@@ -5,6 +5,8 @@ import "time"
 // Sub2Settings contains the non-secret part of the Sub2API connection.
 // The password is encrypted separately by the store.
 type Sub2Settings struct {
+	// Provider selects the active downstream: sub2 (default) or cpa.
+	Provider                   string   `json:"provider"`
 	URL                        string   `json:"url"`
 	Email                      string   `json:"email"`
 	PasswordPresent            bool     `json:"password_present"`
@@ -15,13 +17,14 @@ type Sub2Settings struct {
 	Models                     []string `json:"models,omitempty"`
 	AccountConcurrency         int      `json:"account_concurrency"`
 	Priority                   int      `json:"priority"`
+	CpaWS                      bool     `json:"cpa_ws"`
 	Enable401Check             bool     `json:"enable_401_check"`
 	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
 	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
 }
 
 func DefaultSub2Settings() Sub2Settings {
-	return Sub2Settings{AccountConcurrency: 10, Priority: 1, Enable401Check: true, StatusCheckIntervalSeconds: 120, QuotaCheckIntervalSeconds: 120}
+	return Sub2Settings{Provider: "sub2", AccountConcurrency: 10, Priority: 1, Enable401Check: true, StatusCheckIntervalSeconds: 120, QuotaCheckIntervalSeconds: 120}
 }
 
 type FreeQuotaWindow struct {
@@ -65,6 +68,8 @@ type FreeAccountProfile struct {
 	OAuthAccountID           string           `json:"oauth_account_id,omitempty"`
 	Sub2AccountID            int64            `json:"sub2_account_id,omitempty"`
 	Sub2AccountName          string           `json:"sub2_account_name,omitempty"`
+	CPAAuthFileName          string           `json:"cpa_auth_file_name,omitempty"`
+	PushProvider             string           `json:"push_provider,omitempty"`
 	Sub2GroupID              int64            `json:"sub2_group_id,omitempty"`
 	Sub2GroupName            string           `json:"sub2_group_name,omitempty"`
 	Sub2GroupIDs             []int64          `json:"sub2_group_ids,omitempty"`
