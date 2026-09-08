@@ -615,16 +615,84 @@ func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
 		s.finishOAuthJob(jobID, accountID, nil, errors.New("账号缺少源 Access Token"))
 		return
 	}
+	trigger := s.oauthJobTrigger(jobID)
 	result, err := s.executeCodexOAuth(email, func(message string) {
 		s.updateOAuthJob(jobID, "running", message)
+	}, func(event protocolOAuthDiagnostic) {
+		s.auditOAuthProtocolDiagnostic(accountID, jobID, trigger, event)
 	})
 	s.finishOAuthJob(jobID, accountID, result, err)
 	_ = profile
 }
 
+const protocolOAuthEventPrefix = "[protocol-event]"
+
+type protocolOAuthDiagnostic struct {
+	SchemaVersion int            `json:"schema_version"`
+	Stage         string         `json:"stage"`
+	Event         string         `json:"event"`
+	Message       string         `json:"message"`
+	HTTPStatus    int            `json:"http_status"`
+	Attempt       int            `json:"attempt"`
+	Level         string         `json:"level"`
+	Request       map[string]any `json:"request"`
+	Response      map[string]any `json:"response"`
+	Details       map[string]any `json:"details"`
+}
+
+func parseProtocolOAuthDiagnostic(line string) (protocolOAuthDiagnostic, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, protocolOAuthEventPrefix) {
+		return protocolOAuthDiagnostic{}, false
+	}
+	var event protocolOAuthDiagnostic
+	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, protocolOAuthEventPrefix))), &event); err != nil {
+		return protocolOAuthDiagnostic{}, false
+	}
+	if strings.TrimSpace(event.Stage) == "" || strings.TrimSpace(event.Event) == "" {
+		return protocolOAuthDiagnostic{}, false
+	}
+	return event, true
+}
+
+func (s *Server) oauthJobTrigger(jobID string) string {
+	s.oauthMu.RLock()
+	defer s.oauthMu.RUnlock()
+	if job := s.oauthJobs[jobID]; job != nil {
+		if trigger := strings.TrimSpace(fmt.Sprint(job["trigger"])); trigger != "" && trigger != "<nil>" {
+			return trigger
+		}
+	}
+	return "oauth"
+}
+
+func (s *Server) auditOAuthProtocolDiagnostic(accountID, jobID, trigger string, diagnostic protocolOAuthDiagnostic) {
+	details := make(map[string]any, len(diagnostic.Details)+3)
+	for key, value := range diagnostic.Details {
+		details[key] = value
+	}
+	details["job_id"] = jobID
+	details["protocol_event"] = diagnostic.Event
+	details["schema_version"] = diagnostic.SchemaVersion
+	level := strings.ToLower(strings.TrimSpace(diagnostic.Level))
+	if level != "warning" && level != "error" {
+		level = "info"
+	}
+	message := strings.TrimSpace(diagnostic.Message)
+	if message == "" {
+		message = diagnostic.Event
+	}
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		AccountID: accountID, Type: "oauth_protocol", Source: trigger,
+		Operation: "oauth", Stage: diagnostic.Stage, Message: message,
+		HTTPStatus: diagnostic.HTTPStatus, Attempt: diagnostic.Attempt, Level: level,
+		Request: diagnostic.Request, Response: diagnostic.Response, Details: details,
+	})
+}
+
 // executeCodexOAuth owns the protocol process only. Team OAuth and mailbox
 // OAuth share this exact implementation but persist their results separately.
-func (s *Server) executeCodexOAuth(email string, progress func(string)) (map[string]any, error) {
+func (s *Server) executeCodexOAuth(email string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
 	_, mailCreds, err := s.store.MailAccountCredential(email)
 	if err != nil || strings.TrimSpace(mailCreds.PickupURL) == "" {
 		return nil, errors.New("邮箱未配置取件链接")
@@ -673,7 +741,14 @@ func (s *Server) executeCodexOAuth(email string, progress func(string)) (map[str
 		defer close(done)
 		sc := bufio.NewScanner(errPipe)
 		for sc.Scan() {
-			line := strings.TrimSpace(strings.TrimPrefix(sc.Text(), "[protocol]"))
+			rawLine := strings.TrimSpace(sc.Text())
+			if event, ok := parseProtocolOAuthDiagnostic(rawLine); ok {
+				if diagnostic != nil {
+					diagnostic(event)
+				}
+				continue
+			}
+			line := strings.TrimSpace(strings.TrimPrefix(rawLine, "[protocol]"))
 			if strings.HasPrefix(line, "<") || strings.Contains(strings.ToLower(line), "<style") {
 				line = "OpenAI 返回 HTML 拒绝页（HTTP 403），请更换代理出口后重试"
 			}
@@ -1023,7 +1098,15 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 				updated, _, readErr := s.store.FreeAccountCredential(profile.ID)
 				return updated, updated.RemoveStatus == "completed", readErr
 			} else {
-				err = fmt.Errorf("下游返回 401，重登并重新推送失败: %w", reloginErr)
+				outcome, cleanupErr := s.record401ReloginFailure(ctx, profile.ID, "sub2", reloginErr)
+				if outcome.Removed {
+					return outcome.Profile, true, cleanupErr
+				}
+				if cleanupErr != nil {
+					return outcome.Profile, false, cleanupErr
+				}
+				profile = outcome.Profile
+				err = fmt.Errorf("下游返回 401，重登并重新推送失败（连续 %d/%d 次）: %w", outcome.Count, outcome.Limit, reloginErr)
 			}
 		}
 		s.failFreeAccount(profile.ID, "quota", err)
@@ -1065,6 +1148,80 @@ func isSub2Unauthorized(err error) bool {
 	return strings.Contains(text, "http 401") || strings.Contains(text, "status 401") || strings.Contains(text, "code 401") || strings.Contains(text, "unauthorized")
 }
 
+type reloginFailureOutcome struct {
+	Profile model.FreeAccountProfile
+	Count   int
+	Limit   int
+	Removed bool
+}
+
+func (s *Server) reloginFailureLimit(provider string) int {
+	limit := 2
+	if strings.EqualFold(provider, "cpa") {
+		if settings, _, err := s.store.CPASettings(); err == nil {
+			limit = settings.ReloginFailureLimit
+		}
+	} else if settings, _, err := s.store.Sub2Settings(); err == nil {
+		limit = settings.ReloginFailureLimit
+	}
+	if limit < 1 || limit > 20 {
+		return 2
+	}
+	return limit
+}
+
+// record401ReloginFailure is called only after the active downstream has
+// explicitly reported 401 and a complete OAuth + repush attempt has failed.
+// The counter survives restarts, resets after any successful relogin, and
+// reaches the existing serialized Team-removal path at the configured limit.
+func (s *Server) record401ReloginFailure(ctx context.Context, accountID, provider string, reloginErr error) (reloginFailureOutcome, error) {
+	limit := s.reloginFailureLimit(provider)
+	now := time.Now()
+	profile, err := s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
+		item.ReloginFailureCount++
+		item.ReloginLastFailedAt = &now
+		item.LastError = fmt.Sprintf("401 重登连续失败 %d/%d 次: %v", item.ReloginFailureCount, limit, reloginErr)
+	})
+	outcome := reloginFailureOutcome{Profile: profile, Count: profile.ReloginFailureCount, Limit: limit}
+	if err != nil {
+		return outcome, err
+	}
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		AccountID: accountID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
+		Type: "relogin_failure", Source: "monitor_401", Provider: provider, Operation: "relogin", Stage: "oauth", Level: "error",
+		Attempt: profile.ReloginFailureCount, Message: "401 重登并重新推送失败",
+		Details: map[string]any{"consecutive_failures": profile.ReloginFailureCount, "failure_limit": limit, "error": reloginErr.Error()},
+	})
+	if profile.ReloginFailureCount < limit {
+		return outcome, nil
+	}
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		AccountID: accountID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
+		Type: "relogin_failure_remove_start", Source: "monitor_401", Provider: provider, Operation: "remove", Stage: "remove", Level: "error",
+		Message: "401 重登连续失败达到阈值，开始自动移出空间",
+		Details: map[string]any{"consecutive_failures": profile.ReloginFailureCount, "failure_limit": limit},
+	})
+	removed, removeErr := s.performFreeAccountRemove(ctx, accountID)
+	outcome.Profile = removed
+	if removeErr != nil {
+		s.enqueueAuditEvent(model.AutoRotationEvent{
+			AccountID: accountID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
+			Type: "relogin_failure_remove_failed", Source: "monitor_401", Provider: provider, Operation: "remove", Stage: "remove", Level: "error",
+			Message: "401 重登失败账号自动移出空间失败",
+			Details: map[string]any{"consecutive_failures": profile.ReloginFailureCount, "failure_limit": limit, "error": removeErr.Error()},
+		})
+		return outcome, fmt.Errorf("401 重登连续失败已达到 %d 次，但自动移出空间失败: %w", limit, removeErr)
+	}
+	outcome.Removed = true
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		AccountID: accountID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
+		Type: "relogin_failure_remove_success", Source: "monitor_401", Provider: provider, Operation: "remove", Stage: "remove", Level: "error",
+		Message: "401 重登连续失败账号已自动移出空间",
+		Details: map[string]any{"consecutive_failures": profile.ReloginFailureCount, "failure_limit": limit},
+	})
+	return outcome, nil
+}
+
 // checkFreeAccountStatus performs the lightweight Sub2 account status probe
 // independently from quota polling. A 401 triggers the existing relogin and
 // repush flow; quota polling remains responsible only for quota/removal work.
@@ -1104,7 +1261,14 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 				if errors.Is(reloginErr, errDeadAccountHandled) {
 					return true, nil
 				}
-				return false, fmt.Errorf("下游返回 401，重登并重新推送失败: %w", reloginErr)
+				outcome, cleanupErr := s.record401ReloginFailure(ctx, id, "sub2", reloginErr)
+				if cleanupErr != nil {
+					return true, cleanupErr
+				}
+				if outcome.Removed {
+					return true, nil
+				}
+				return true, fmt.Errorf("下游返回 401，重登并重新推送失败（连续 %d/%d 次）: %w", outcome.Count, outcome.Limit, reloginErr)
 			}
 			return true, nil
 		}
@@ -1115,7 +1279,18 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 			if errors.Is(reloginErr, errDeadAccountHandled) {
 				return true, nil
 			}
-			return false, fmt.Errorf("下游返回 401，重登并重新推送失败: %w", reloginErr)
+			provider := "sub2"
+			if strings.EqualFold(settings.Provider, "cpa") {
+				provider = "cpa"
+			}
+			outcome, cleanupErr := s.record401ReloginFailure(ctx, id, provider, reloginErr)
+			if cleanupErr != nil {
+				return true, cleanupErr
+			}
+			if outcome.Removed {
+				return true, nil
+			}
+			return true, fmt.Errorf("下游返回 401，重登并重新推送失败（连续 %d/%d 次）: %w", outcome.Count, outcome.Limit, reloginErr)
 		}
 		return true, nil
 	}
@@ -1190,8 +1365,12 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 			item.Status, item.OAuthStatus, item.PushStatus, item.QuotaStatus, item.LastError = "monitoring", "completed", "completed", "pending", ""
 			item.Sub2AccountID, item.Sub2AccountName, item.CPAAuthFileName, item.PushProvider = 0, accountName, fileName, "cpa"
 			item.StatusCheckedAt = nil
+			clearReloginFailures(item)
 			item.PushedAt, item.ReloginCount = &now, item.ReloginCount+1
 		})
+		if cpaErr == nil && profile.ReloginFailureCount > 0 {
+			s.auditAccountEvent(ctx, accountID, "relogin", "relogin", "relogin", "cpa", "重登成功，连续失败次数已清零", map[string]any{"previous_failures": profile.ReloginFailureCount})
+		}
 		return cpaErr
 	}
 	name := profile.Email
@@ -1228,6 +1407,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 		item.CPAAuthFileName = ""
 		item.Sub2AccountID, item.Sub2AccountName = created.ID, created.Name
 		item.StatusCheckedAt = nil
+		clearReloginFailures(item)
 		item.Sub2GroupIDs, item.Sub2GroupNames = append([]int64(nil), settings.GroupIDs...), append([]string(nil), settings.GroupNames...)
 		if len(settings.GroupIDs) > 0 {
 			item.Sub2GroupID = settings.GroupIDs[0]
@@ -1237,7 +1417,15 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 		}
 		item.PushedAt, item.ReloginCount = &now, item.ReloginCount+1
 	})
+	if err == nil && profile.ReloginFailureCount > 0 {
+		s.auditAccountEvent(ctx, accountID, "relogin", "relogin", "relogin", "sub2", "重登成功，连续失败次数已清零", map[string]any{"previous_failures": profile.ReloginFailureCount})
+	}
 	return err
+}
+
+func clearReloginFailures(profile *model.FreeAccountProfile) {
+	profile.ReloginFailureCount = 0
+	profile.ReloginLastFailedAt = nil
 }
 
 func (s *Server) removeFreeAccount(w http.ResponseWriter, r *http.Request) {
@@ -1551,6 +1739,7 @@ type cpaSettingsInput struct {
 	Websockets                 *bool    `json:"websockets"`
 	Enable401Check             *bool    `json:"enable_401_check"`
 	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
+	ReloginFailureLimit        int      `json:"relogin_failure_limit"`
 	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
 	GroupIDs                   []int64  `json:"group_ids"`
 	GroupNames                 []string `json:"group_names"`
@@ -1618,6 +1807,13 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.StatusCheckIntervalSeconds == 0 {
 			v.StatusCheckIntervalSeconds = sub.StatusCheckIntervalSeconds
 		}
+		if v.ReloginFailureLimit == 0 {
+			v.ReloginFailureLimit = sub.ReloginFailureLimit
+		}
+		if v.ReloginFailureLimit < 1 || v.ReloginFailureLimit > 20 {
+			writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 1 到 20 之间")
+			return
+		}
 		if v.QuotaCheckIntervalSeconds == 0 {
 			v.QuotaCheckIntervalSeconds = sub.QuotaCheckIntervalSeconds
 		}
@@ -1627,7 +1823,7 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.CpaWS == nil {
 			v.CpaWS = &sub.CpaWS
 		}
-		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds}, v.Password)
+		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: v.ReloginFailureLimit, QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds}, v.Password)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -1659,10 +1855,17 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.StatusCheckIntervalSeconds == 0 {
 			v.StatusCheckIntervalSeconds = cpaSettings.StatusCheckIntervalSeconds
 		}
+		if v.ReloginFailureLimit == 0 {
+			v.ReloginFailureLimit = cpaSettings.ReloginFailureLimit
+		}
+		if v.ReloginFailureLimit < 1 || v.ReloginFailureLimit > 20 {
+			writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 1 到 20 之间")
+			return
+		}
 		if v.QuotaCheckIntervalSeconds == 0 {
 			v.QuotaCheckIntervalSeconds = cpaSettings.QuotaCheckIntervalSeconds
 		}
-		cpaSettings, err = s.store.SaveCPASettings(model.CPASettings{URL: v.URL, Websockets: boolValue(v.Websockets), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, GroupIDs: uniquePositiveInt64s(v.GroupIDs), GroupNames: uniqueNonEmptyStrings(v.GroupNames)}, v.Key)
+		cpaSettings, err = s.store.SaveCPASettings(model.CPASettings{URL: v.URL, Websockets: boolValue(v.Websockets), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: v.ReloginFailureLimit, QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, GroupIDs: uniquePositiveInt64s(v.GroupIDs), GroupNames: uniqueNonEmptyStrings(v.GroupNames)}, v.Key)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -1688,6 +1891,7 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 				item.Sub2AccountID, item.Sub2AccountName = 0, ""
 				item.CPAAuthFileName, item.PushProvider = "", ""
 				item.StatusCheckedAt, item.QuotaCheckedAt = nil, nil
+				item.ReloginFailureCount, item.ReloginLastFailedAt = 0, nil
 			})
 		}
 	}
@@ -1746,6 +1950,7 @@ type sub2SettingsInput struct {
 	CpaWS                      *bool    `json:"cpa_ws"`
 	Enable401Check             *bool    `json:"enable_401_check"`
 	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
+	ReloginFailureLimit        int      `json:"relogin_failure_limit"`
 	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
 }
 
@@ -1793,6 +1998,13 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, "401 状态查询间隔必须在 10 到 86400 秒之间")
 		return
 	}
+	if input.ReloginFailureLimit == 0 {
+		input.ReloginFailureLimit = current.ReloginFailureLimit
+	}
+	if input.ReloginFailureLimit < 1 || input.ReloginFailureLimit > 20 {
+		writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 1 到 20 之间")
+		return
+	}
 	enable401Check := current.Enable401Check
 	if input.Enable401Check != nil {
 		enable401Check = *input.Enable401Check
@@ -1816,7 +2028,7 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.store.SaveSub2Settings(model.Sub2Settings{
 		Provider: current.Provider, URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
 		GroupIDs: input.GroupIDs, GroupNames: input.GroupNames, Models: input.Models, AccountConcurrency: input.AccountConcurrency, Priority: input.Priority,
-		CpaWS: cpaWS, Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds,
+		CpaWS: cpaWS, Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, ReloginFailureLimit: input.ReloginFailureLimit, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds,
 	}, input.Password)
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())

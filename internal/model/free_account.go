@@ -20,11 +20,12 @@ type Sub2Settings struct {
 	CpaWS                      bool     `json:"cpa_ws"`
 	Enable401Check             bool     `json:"enable_401_check"`
 	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
+	ReloginFailureLimit        int      `json:"relogin_failure_limit"`
 	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
 }
 
 func DefaultSub2Settings() Sub2Settings {
-	return Sub2Settings{Provider: "sub2", AccountConcurrency: 10, Priority: 1, Enable401Check: true, StatusCheckIntervalSeconds: 120, QuotaCheckIntervalSeconds: 120}
+	return Sub2Settings{Provider: "sub2", AccountConcurrency: 10, Priority: 1, Enable401Check: true, StatusCheckIntervalSeconds: 120, ReloginFailureLimit: 2, QuotaCheckIntervalSeconds: 120}
 }
 
 type FreeQuotaWindow struct {
@@ -75,6 +76,8 @@ type FreeAccountProfile struct {
 	Sub2GroupIDs             []int64          `json:"sub2_group_ids,omitempty"`
 	Sub2GroupNames           []string         `json:"sub2_group_names,omitempty"`
 	ReloginCount             int              `json:"relogin_count"`
+	ReloginFailureCount      int              `json:"relogin_failure_count"`
+	ReloginLastFailedAt      *time.Time       `json:"relogin_last_failed_at,omitempty"`
 	Quota5H                  *FreeQuotaWindow `json:"quota_5h,omitempty"`
 	Quota7D                  *FreeQuotaWindow `json:"quota_7d,omitempty"`
 	ExhaustionPolicy         string           `json:"exhaustion_policy"`

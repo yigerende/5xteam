@@ -82,7 +82,7 @@ func TestSub2PasswordIsEncryptedAndCanBeRetained(t *testing.T) {
 	}
 	const password = "sub2-admin-password-secret"
 	settings, err := dataStore.SaveSub2Settings(model.Sub2Settings{
-		URL: "https://sub2.example.com", Email: "admin@example.com", GroupIDs: []int64{44, 46}, GroupNames: []string{"Free pool", "Reserve"}, Models: []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}, AccountConcurrency: 10,
+		URL: "https://sub2.example.com", Email: "admin@example.com", GroupIDs: []int64{44, 46}, GroupNames: []string{"Free pool", "Reserve"}, Models: []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}, AccountConcurrency: 10, ReloginFailureLimit: 4,
 	}, password)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestSub2PasswordIsEncryptedAndCanBeRetained(t *testing.T) {
 	}
 	defer reopened.Close()
 	got, gotPassword, err := reopened.Sub2Settings()
-	if err != nil || gotPassword != password || !slices.Equal(got.GroupIDs, []int64{45, 47}) || !slices.Equal(got.GroupNames, []string{"Next pool", "Second pool"}) || !slices.Equal(got.Models, []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}) {
+	if err != nil || gotPassword != password || got.ReloginFailureLimit != 4 || !slices.Equal(got.GroupIDs, []int64{45, 47}) || !slices.Equal(got.GroupNames, []string{"Next pool", "Second pool"}) || !slices.Equal(got.Models, []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}) {
 		t.Fatalf("Sub2 settings did not persist: %+v password=%q err=%v", got, gotPassword, err)
 	}
 }

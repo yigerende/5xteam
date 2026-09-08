@@ -425,7 +425,7 @@ func (s *Server) runMailAccountOAuth(jobID, email string) {
 	defer unlock()
 	result, err := s.executeCodexOAuth(email, func(message string) {
 		s.updateOAuthJob(jobID, "running", message)
-	})
+	}, nil)
 	s.finishMailAccountOAuthJob(jobID, email, result, err)
 }
 

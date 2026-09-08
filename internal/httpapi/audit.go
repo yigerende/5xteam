@@ -3,10 +3,20 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"chatgpt-space-merge/internal/model"
+)
+
+var (
+	sensitiveQueryValuePattern = regexp.MustCompile(`(?i)(access_token|refresh_token|id_token|code_verifier|authorization|cookie|state|code)=([^&\s]+)`)
+	bearerValuePattern         = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
+	jwtValuePattern            = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?`)
+	oauthTokenValuePattern     = regexp.MustCompile(`\b(?:rt_|ac_)[A-Za-z0-9._~-]{10,}`)
+	otpValuePattern            = regexp.MustCompile(`(?i)(otp|verification[ _-]?code|验证码)(\s*[:=：]?\s*)\d{6}\b`)
+	phoneValuePattern          = regexp.MustCompile(`\+\d[\d -]{7,16}\d`)
 )
 
 // auditWriter is deliberately separate from the request/worker goroutines.
@@ -61,6 +71,7 @@ func (s *Server) enqueueAuditEvent(event model.AutoRotationEvent) {
 	}
 	event.Request = redactMap(event.Request)
 	event.Response = redactMap(event.Response)
+	event.Details = redactMap(event.Details)
 	// Dead-account handling is an exceptional terminal path. Persist its
 	// markers immediately so an operator (or a subsequent recovery request)
 	// can observe the decision before the removal call returns. All ordinary
@@ -130,9 +141,21 @@ func redactValue(value any) any {
 		}
 		return result
 	case string:
+		item = redactSensitiveText(item)
 		if len(item) > 16000 {
 			return fmt.Sprintf("%s… [已截断]", item[:16000])
 		}
+		return item
 	}
+	return value
+}
+
+func redactSensitiveText(value string) string {
+	value = sensitiveQueryValuePattern.ReplaceAllString(value, "$1=***")
+	value = bearerValuePattern.ReplaceAllString(value, "Bearer ***")
+	value = jwtValuePattern.ReplaceAllString(value, "***")
+	value = oauthTokenValuePattern.ReplaceAllString(value, "***")
+	value = otpValuePattern.ReplaceAllString(value, "$1$2***")
+	value = phoneValuePattern.ReplaceAllString(value, "+***")
 	return value
 }

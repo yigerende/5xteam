@@ -5,10 +5,17 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"chatgpt-space-merge/internal/model"
 )
+
+var autoRotationEventSequence atomic.Uint64
+
+func nextAutoRotationEventID() string {
+	return strconv.FormatInt(time.Now().UnixNano(), 36) + "-" + strconv.FormatUint(autoRotationEventSequence.Add(1), 36)
+}
 
 func (s *Store) AutoRotationSettings() model.AutoRotationSettings {
 	s.mu.Lock()
@@ -172,7 +179,7 @@ func (s *Store) AddAutoRotationEvent(event model.AutoRotationEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if event.ID == "" {
-		event.ID = strconv.FormatInt(time.Now().UnixNano(), 36)
+		event.ID = nextAutoRotationEventID()
 	}
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now()
@@ -206,7 +213,7 @@ func (s *Store) AddAutoRotationEvents(events []model.AutoRotationEvent) error {
 	defer stmt.Close()
 	for _, event := range events {
 		if event.ID == "" {
-			event.ID = strconv.FormatInt(time.Now().UnixNano(), 36)
+			event.ID = nextAutoRotationEventID()
 		}
 		if event.CreatedAt.IsZero() {
 			event.CreatedAt = time.Now()

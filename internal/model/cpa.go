@@ -8,11 +8,12 @@ type CPASettings struct {
 	Websockets                 bool     `json:"websockets"`
 	Enable401Check             bool     `json:"enable_401_check"`
 	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
+	ReloginFailureLimit        int      `json:"relogin_failure_limit"`
 	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
 	GroupIDs                   []int64  `json:"group_ids,omitempty"`
 	GroupNames                 []string `json:"group_names,omitempty"`
 }
 
 func DefaultCPASettings() CPASettings {
-	return CPASettings{Enable401Check: true, StatusCheckIntervalSeconds: 120, QuotaCheckIntervalSeconds: 120}
+	return CPASettings{Enable401Check: true, StatusCheckIntervalSeconds: 120, ReloginFailureLimit: 2, QuotaCheckIntervalSeconds: 120}
 }

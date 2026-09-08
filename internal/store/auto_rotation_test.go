@@ -168,6 +168,35 @@ func TestAutoRotationEventPersistenceAndFiltering(t *testing.T) {
 	}
 }
 
+func TestBatchAutoRotationEventsReceiveUniqueIDs(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	events := make([]model.AutoRotationEvent, 128)
+	for i := range events {
+		events[i] = model.AutoRotationEvent{AccountID: "account-batch", Type: "oauth_protocol", CreatedAt: time.Now()}
+	}
+	if err := s.AddAutoRotationEvents(events); err != nil {
+		t.Fatal(err)
+	}
+	stored := s.AutoRotationEventsByAccount("account-batch")
+	if len(stored) != len(events) {
+		t.Fatalf("stored batch events=%d, want %d", len(stored), len(events))
+	}
+	seen := make(map[string]struct{}, len(stored))
+	for _, event := range stored {
+		if event.ID == "" {
+			t.Fatal("stored event has no ID")
+		}
+		if _, exists := seen[event.ID]; exists {
+			t.Fatalf("duplicate event ID: %s", event.ID)
+		}
+		seen[event.ID] = struct{}{}
+	}
+}
+
 func TestPurgeAutoRotationHistoryAndDescendingEvents(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {

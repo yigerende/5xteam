@@ -810,6 +810,7 @@ def _bootstrap_authorize(
         lambda: session.get(auth_url, headers=headers, allow_redirects=True),
     )
     logger.debug(f"[Codex] authorize 落点: {getattr(resp, 'url', '')}, status={getattr(resp, 'status_code', '')}")
+    return resp
 
 
 # ============================================================

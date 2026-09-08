@@ -302,6 +302,92 @@ func TestOrdinaryOAuthFailureDoesNotRemoveAccount(t *testing.T) {
 	}
 }
 
+func TestConsecutive401ReloginFailuresRemoveAtConfiguredLimit(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+
+	var kicks atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || !strings.Contains(r.URL.Path, "/accounts/team-401/users/user-401") {
+			http.NotFound(w, r)
+			return
+		}
+		kicks.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"removed"}`))
+	}))
+	defer upstream.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = upstream.URL
+	if err := dataStore.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	pushSettings := model.DefaultSub2Settings()
+	pushSettings.ReloginFailureLimit = 2
+	if _, err := dataStore.SaveSub2Settings(pushSettings, ""); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := dataStore.SaveAdminAccount(model.AdminAccountProfile{Label: "admin-401", TeamAccountID: "team-401"}, "admin-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, _, err := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "fail401@example.com", UserID: "user-401"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err = dataStore.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+		item.AdminAccountID, item.TeamAccountID, item.UserID = admin.ID, "team-401", "user-401"
+		item.InviteStatus, item.AcceptStatus, item.PushStatus = "completed", "completed", "completed"
+		item.RemoveStatus, item.Status = "pending", "monitoring"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(dataStore, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := server.record401ReloginFailure(t.Context(), account.ID, "sub2", errors.New("first OAuth failure"))
+	if err != nil || first.Removed || first.Count != 1 || kicks.Load() != 0 {
+		t.Fatalf("first failure must remain retryable: outcome=%+v kicks=%d err=%v", first, kicks.Load(), err)
+	}
+	second, err := server.record401ReloginFailure(t.Context(), account.ID, "sub2", errors.New("second OAuth failure"))
+	if err != nil || !second.Removed || second.Count != 2 || kicks.Load() != 1 {
+		t.Fatalf("second failure must remove once: outcome=%+v kicks=%d err=%v", second, kicks.Load(), err)
+	}
+	stored, _, err := dataStore.FreeAccountCredential(account.ID)
+	if err != nil || stored.RemoveStatus != "completed" || stored.Status != "removed" || stored.ReloginFailureCount != 2 {
+		t.Fatalf("removed account state mismatch: profile=%+v err=%v", stored, err)
+	}
+	server.Close()
+	events := dataStore.AutoRotationEventsByAccount(account.ID)
+	var failedEvents int
+	var removeStarted, removeSucceeded bool
+	for _, event := range events {
+		if event.Type == "relogin_failure" {
+			failedEvents++
+		}
+		removeStarted = removeStarted || event.Type == "relogin_failure_remove_start"
+		removeSucceeded = removeSucceeded || event.Type == "relogin_failure_remove_success"
+	}
+	if failedEvents != 2 || !removeStarted || !removeSucceeded {
+		t.Fatalf("401 failure timeline incomplete: %+v", events)
+	}
+}
+
+func TestSuccessfulReloginClearsConsecutiveFailureState(t *testing.T) {
+	failedAt := time.Now()
+	profile := model.FreeAccountProfile{ReloginFailureCount: 1, ReloginLastFailedAt: &failedAt}
+	clearReloginFailures(&profile)
+	if profile.ReloginFailureCount != 0 || profile.ReloginLastFailedAt != nil {
+		t.Fatalf("successful relogin did not reset consecutive failure state: %+v", profile)
+	}
+}
+
 func TestReloginOAuthCompletionWritesNewTokensToMailAccount(t *testing.T) {
 	dataStore, err := store.Open(t.TempDir())
 	if err != nil {

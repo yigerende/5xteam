@@ -141,7 +141,7 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		profile.Sub2AccountID, profile.Sub2AccountName, profile.Sub2GroupID, profile.Sub2GroupName = existing.Sub2AccountID, existing.Sub2AccountName, existing.Sub2GroupID, existing.Sub2GroupName
 		profile.CPAAuthFileName, profile.PushProvider = existing.CPAAuthFileName, existing.PushProvider
 		profile.Sub2GroupIDs, profile.Sub2GroupNames = existing.Sub2GroupIDs, existing.Sub2GroupNames
-		profile.ReloginCount = existing.ReloginCount
+		profile.ReloginCount, profile.ReloginFailureCount, profile.ReloginLastFailedAt = existing.ReloginCount, existing.ReloginFailureCount, existing.ReloginLastFailedAt
 		profile.Quota5H, profile.Quota7D, profile.ExhaustionPolicy, profile.AutoRemove = existing.Quota5H, existing.Quota7D, existing.ExhaustionPolicy, existing.AutoRemove
 		profile.JoinedAt, profile.OAuthReadyAt, profile.PushedAt, profile.QuotaCheckedAt, profile.StatusCheckedAt, profile.RemovedAt = existing.JoinedAt, existing.OAuthReadyAt, existing.PushedAt, existing.QuotaCheckedAt, existing.StatusCheckedAt, existing.RemovedAt
 		profile.ImportedAt, profile.CreatedAt = existing.ImportedAt, existing.CreatedAt
@@ -339,6 +339,9 @@ func normalizeSub2Settings(settings *model.Sub2Settings) {
 	// status check so upgrading does not silently change its cadence.
 	if settings.StatusCheckIntervalSeconds < 10 {
 		settings.StatusCheckIntervalSeconds = settings.QuotaCheckIntervalSeconds
+	}
+	if settings.ReloginFailureLimit < 1 || settings.ReloginFailureLimit > 20 {
+		settings.ReloginFailureLimit = 2
 	}
 	if settings.Priority < 1 {
 		settings.Priority = 1
