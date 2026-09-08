@@ -262,9 +262,16 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 	defer func() { s.autoMu.Lock(); s.autoRunning = false; s.autoMu.Unlock() }()
 	admins := s.store.AdminAccounts()
 	candidates := s.store.FreeAccounts()
+	proEmails := make(map[string]struct{})
+	for _, account := range s.store.MailAccountsByManagementScope("pro") {
+		proEmails[strings.ToLower(strings.TrimSpace(account.Email))] = struct{}{}
+	}
 	// Prefer accounts already in the rotation list but not yet invited.
 	selected := make([]model.FreeAccountProfile, 0)
 	for _, a := range candidates {
+		if _, managedByPro := proEmails[strings.ToLower(strings.TrimSpace(a.Email))]; managedByPro {
+			continue
+		}
 		// Records already placed into the Team rotation list are preferred.
 		// Pure mailbox imports are only considered in the fallback pass below.
 		if eligibleAutoRotationAccount(a) {
@@ -277,7 +284,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "plan", Stage: "seat_snapshot", Message: "自动补充前实时席位快照", Details: map[string]any{"available_after_reservation": need, "max_per_run": settings.MaxPerRun}})
 	need = autoRotationPlan(settings.MaxPerRun, need, 0, len(candidates))
 	for len(selected) < need {
-		for _, mail := range s.store.MailAccounts() {
+		for _, mail := range s.store.MailAccountsByManagementScope("mail") {
 			if len(selected) >= need {
 				break
 			}

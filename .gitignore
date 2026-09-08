@@ -1,6 +1,7 @@
 data/*
 !data/.gitkeep
 data-qa-mail/
+data-pro-qa/
 accounts-response.json
 __pycache__/
 internal/__pycache__/

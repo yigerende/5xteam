@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
-  ArrowLeftRight, Bot, ChevronDown, History, Inbox, LogIn, Menu, Moon, Network, Settings,
+  ArrowLeftRight, Bot, ChevronDown, Crown, History, Inbox, LogIn, Menu, Moon, Network, Settings,
   Smartphone, Sun, UserRoundCog, UsersRound, Waypoints, X, LogOut, KeyRound,
 } from 'lucide-vue-next'
 import { api } from './api'
@@ -11,6 +11,7 @@ import FreePipelineView from './components/FreePipelineView.vue'
 import MailManagementView from './components/MailManagementView.vue'
 import SmsManagementView from './components/SmsManagementView.vue'
 import OpenAIAccountsView from './components/OpenAIAccountsView.vue'
+import ProManagementView from './components/ProManagementView.vue'
 import ProxiesView from './components/ProxiesView.vue'
 import SettingsView from './components/SettingsView.vue'
 import StatusPill from './components/StatusPill.vue'
@@ -18,6 +19,7 @@ import WorkflowView from './components/WorkflowView.vue'
 import LoginView from './components/LoginView.vue'
 
 const nav = [
+  { id: 'pro', label: 'Pro 管理', icon: Crown, group: '账号' },
   { id: 'space-merge', label: '空间合并', icon: ArrowLeftRight, group: '空间合并' },
   { id: 'mail', label: '邮件管理', icon: Inbox, group: '账号流水线' },
   { id: 'free', label: 'Team 轮转', icon: Waypoints, group: '账号流水线' },
@@ -37,6 +39,7 @@ const adminAccounts = ref([])
 const openAIAccounts = ref([])
 const history = ref([])
 const freeAccounts = ref([])
+const proAccounts = ref([])
 const teamEntryEmail = ref('')
 const loadingError = ref('')
 const health = ref(true)
@@ -68,13 +71,14 @@ watch(theme, (value) => {
 }, { immediate: true })
 watch(current, (value) => localStorage.setItem('space-console-tab', value))
 
-function selectTab(id) { current.value = id; mobileOpen.value = false }
+function selectTab(id) { current.value = id; mobileOpen.value = false; if (id === 'pro') reloadProAccounts() }
 function isNavActive(item) { return item.id === 'space-merge' ? spaceMergeActive.value : current.value === item.id }
 async function reloadAdmins() { try { adminAccounts.value = await api('/api/admin-accounts') } catch (error) { loadingError.value = error.message } }
 async function reloadOpenAI() { try { openAIAccounts.value = await api('/api/openai-accounts') } catch (error) { loadingError.value = error.message } }
 async function reloadProxies() { try { proxies.value = await api('/api/proxies') } catch (error) { loadingError.value = error.message } }
 async function reloadHistory() { try { history.value = await api('/api/history') } catch (error) { loadingError.value = error.message } }
 async function reloadFreeAccounts() { try { freeAccounts.value = await api('/api/free-accounts') } catch (error) { loadingError.value = error.message } }
+async function reloadProAccounts() { try { proAccounts.value = await api('/api/pro-accounts') } catch (error) { loadingError.value = error.message } }
 async function selectProxy(url) {
   if (!settings.value) return
   try {
@@ -90,10 +94,10 @@ async function openTeamFromMail(profile) {
 }
 async function load() {
   try {
-    const [settingsData, proxyData, adminsData, openAIData, historyData, freeData] = await Promise.all([
-      api('/api/settings'), api('/api/proxies'), api('/api/admin-accounts'), api('/api/openai-accounts'), api('/api/history'), api('/api/free-accounts'),
+    const [settingsData, proxyData, adminsData, openAIData, historyData, freeData, proData] = await Promise.all([
+      api('/api/settings'), api('/api/proxies'), api('/api/admin-accounts'), api('/api/openai-accounts'), api('/api/history'), api('/api/free-accounts'), api('/api/pro-accounts'),
     ])
-    settings.value = settingsData; proxies.value = proxyData; adminAccounts.value = adminsData; openAIAccounts.value = openAIData; history.value = historyData; freeAccounts.value = freeData
+    settings.value = settingsData; proxies.value = proxyData; adminAccounts.value = adminsData; openAIAccounts.value = openAIData; history.value = historyData; freeAccounts.value = freeData; proAccounts.value = proData
   } catch (error) { loadingError.value = error.message; health.value = false }
 }
 async function checkAuth() {
@@ -127,12 +131,13 @@ onMounted(checkAuth)
 
     <main class="app-main">
       <div v-if="loadingError" class="global-alert"><strong>数据加载失败</strong><span>{{ loadingError }}</span><button type="button" @click="loadingError = ''; load()">重试</button></div>
-      <WorkflowView v-show="current === 'full'" mode="full" :admin-accounts="adminAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
-      <WorkflowView v-show="current === 'enter'" mode="enter" :admin-accounts="adminAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
-      <WorkflowView v-show="current === 'transfer'" mode="transfer" :admin-accounts="adminAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
-      <WorkflowView v-show="current === 'kick'" mode="kick" :admin-accounts="adminAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
+      <ProManagementView v-if="current === 'pro'" :accounts="proAccounts" :admin-accounts="adminAccounts" @reload="reloadProAccounts" />
+      <WorkflowView v-show="current === 'full'" mode="full" :admin-accounts="adminAccounts" :pro-accounts="proAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
+      <WorkflowView v-show="current === 'enter'" mode="enter" :admin-accounts="adminAccounts" :pro-accounts="proAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
+      <WorkflowView v-show="current === 'transfer'" mode="transfer" :admin-accounts="adminAccounts" :pro-accounts="proAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
+      <WorkflowView v-show="current === 'kick'" mode="kick" :admin-accounts="adminAccounts" :pro-accounts="proAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
       <FreePipelineView v-show="current === 'free'" :active="current === 'free'" :accounts="freeAccounts" :admin-accounts="adminAccounts" :entry-email="teamEntryEmail" @reload="reloadFreeAccounts" />
-      <MailManagementView v-if="current === 'mail'" @open-team="openTeamFromMail" />
+      <MailManagementView v-if="current === 'mail'" @open-team="openTeamFromMail" @pro-changed="reloadProAccounts" />
       <SmsManagementView v-if="current === 'sms'" />
       <HistoryView v-if="current === 'history'" :history="history" @reload="reloadHistory" />
       <AdminAccountsView v-if="current === 'admins'" :accounts="adminAccounts" @reload="reloadAdmins" />

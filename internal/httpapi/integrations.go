@@ -29,6 +29,7 @@ func (s *Server) importTurbRegistration(w http.ResponseWriter, r *http.Request) 
 		ClientID         string          `json:"client_id"`
 		MailRefreshToken string          `json:"mail_refresh_token"`
 		PickupURL        string          `json:"pickup_url"`
+		ChatGPTSession   json.RawMessage `json:"chatgpt_session"`
 	}
 	if err := decodeJSON(w, r, &input, 2<<20); err != nil {
 		return
@@ -52,9 +53,14 @@ func (s *Server) importTurbRegistration(w http.ResponseWriter, r *http.Request) 
 	email := firstImportValue(strings.TrimSpace(input.Email), info.Email)
 	userID := firstImportValue(strings.TrimSpace(input.UserID), info.UserID)
 	accountID := firstImportValue(stringValue(input.AccountID), info.AccountID)
+	chatgptSession, sessionErr := normalizeChatGPTSession(input.ChatGPTSession)
+	if sessionErr != nil {
+		writeAPI(w, http.StatusBadRequest, nil, "chatgpt_session 无效: "+sessionErr.Error())
+		return
+	}
 	mailSaved := false
 	if email != "" {
-		mailCreds := model.MailAccountCredentials{Email: email, MailPassword: strings.TrimSpace(input.MailPassword), ClientID: strings.TrimSpace(input.ClientID), MailRefreshToken: strings.TrimSpace(input.MailRefreshToken), PickupURL: strings.TrimSpace(input.PickupURL), GptPassword: strings.TrimSpace(input.GptPassword), AccessToken: token}
+		mailCreds := model.MailAccountCredentials{Email: email, MailPassword: strings.TrimSpace(input.MailPassword), ClientID: strings.TrimSpace(input.ClientID), MailRefreshToken: strings.TrimSpace(input.MailRefreshToken), PickupURL: strings.TrimSpace(input.PickupURL), GptPassword: strings.TrimSpace(input.GptPassword), AccessToken: token, ChatGPTSession: chatgptSession}
 		if _, old, oldErr := s.store.MailAccountCredential(email); oldErr == nil {
 			if mailCreds.MailPassword == "" {
 				mailCreds.MailPassword = old.MailPassword
@@ -70,6 +76,9 @@ func (s *Server) importTurbRegistration(w http.ResponseWriter, r *http.Request) 
 			}
 			if mailCreds.GptPassword == "" {
 				mailCreds.GptPassword = old.GptPassword
+			}
+			if mailCreds.ChatGPTSession == "" {
+				mailCreds.ChatGPTSession = old.ChatGPTSession
 			}
 		}
 		_, mailErr := s.store.SaveMailAccount(model.MailAccountProfile{Email: email, Label: email, Group: "free"}, mailCreds)
@@ -112,6 +121,25 @@ func (s *Server) importTurbRegistration(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeAPI(w, http.StatusOK, map[string]any{"account": openAIProfile, "created": openAIID == "", "mail_account_saved": mailSaved, "oauth_attached": oauthAttached, "message": "注册完成，账号资料已保存（未进入 Team 轮转）"}, "")
+}
+
+func normalizeChatGPTSession(raw json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "", nil
+	}
+	var session map[string]any
+	if err := json.Unmarshal(raw, &session); err != nil {
+		return "", err
+	}
+	if len(session) == 0 {
+		return "", nil
+	}
+	canonical, err := json.Marshal(session)
+	if err != nil {
+		return "", err
+	}
+	return string(canonical), nil
 }
 
 func stringValue(raw json.RawMessage) string {

@@ -648,6 +648,10 @@ func setOpenAITargetHeaders(req *http.Request, path string) {
 // team endpoints apply stricter browser/TLS checks than /me, and the Chrome
 // impersonation keeps those requests consistent with the web client.
 func (c *Client) browserDo(ctx context.Context, req *http.Request, body []byte) (int, []byte, error) {
+	return c.browserDoWithRedirects(ctx, req, body, true)
+}
+
+func (c *Client) browserDoWithRedirects(ctx context.Context, req *http.Request, body []byte, allowRedirects bool) (int, []byte, error) {
 	headers := make(map[string]string, len(req.Header))
 	for key, values := range req.Header {
 		if len(values) > 0 {
@@ -657,7 +661,8 @@ func (c *Client) browserDo(ctx context.Context, req *http.Request, body []byte) 
 	input := map[string]any{
 		"method": req.Method, "url": req.URL.String(), "headers": headers,
 		"body": string(body), "proxy": c.settings.ProxyURL,
-		"timeout": c.settings.RequestTimeoutSeconds,
+		"timeout":         c.settings.RequestTimeoutSeconds,
+		"allow_redirects": allowRedirects,
 	}
 	encoded, err := json.Marshal(input)
 	if err != nil {
@@ -670,7 +675,7 @@ s=requests.Session(impersonate="chrome136")
 proxy=p.get("proxy","")
 if proxy:
     s.proxies={"http":proxy,"https":proxy}
-r=s.request(p["method"],p["url"],headers=p.get("headers",{}),data=p.get("body","") or None,timeout=p.get("timeout",45),allow_redirects=True)
+r=s.request(p["method"],p["url"],headers=p.get("headers",{}),data=p.get("body","") or None,timeout=p.get("timeout",45),allow_redirects=bool(p.get("allow_redirects",True)))
 print(json.dumps({"status":r.status_code,"body":base64.b64encode(r.content).decode("ascii")}))`
 	command := exec.CommandContext(ctx, c.python, "-c", script)
 	command.Stdin = bytes.NewReader(encoded)

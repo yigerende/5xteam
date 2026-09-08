@@ -1,7 +1,7 @@
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
-  ArrowLeftRight, Check, FileJson, FolderOpen, LogIn, Play, RotateCcw, ScanLine, Square, Upload, UsersRound,
+  ArrowLeftRight, Check, Crown, FileJson, FolderOpen, LogIn, Play, RotateCcw, ScanLine, Square, Upload, UsersRound,
 } from 'lucide-vue-next'
 import { api } from '../api'
 import { extractAccessTokens, extractTokensFromFiles, progressLabel, shortID, statusText } from '../utils'
@@ -11,6 +11,7 @@ import MessageBar from './MessageBar.vue'
 const props = defineProps({
   mode: { type: String, required: true },
   adminAccounts: { type: Array, default: () => [] },
+  proAccounts: { type: Array, default: () => [] },
   anyActive: Boolean,
 })
 const emit = defineEmits(['job-state', 'history-changed', 'navigate'])
@@ -50,7 +51,11 @@ const busy = ref(false)
 const confirmOpen = ref(false)
 const fileInput = ref(null)
 const folderInput = ref(null)
+const selectedProEmails = ref(new Set())
+const proTokensLoading = ref(false)
 let pollTimer
+let proLoadTimer
+let proLoadSequence = 0
 
 const tokens = computed(() => form.tokenText.split(/\s+/).map((item) => item.trim()).filter(Boolean))
 const validUsers = computed(() => inspection.value?.users?.filter((item) => !item.error).length || 0)
@@ -60,6 +65,9 @@ const progressPercent = computed(() => job.value?.total ? Math.round((job.value.
 const progressByUser = computed(() => new Map(progressRecords.value.map((item) => [item.user_id, item])))
 const selectedAdmin = computed(() => props.adminAccounts.find((item) => item.id === form.admin))
 const teamID = computed(() => form.team || selectedAdmin.value?.team_account_id || inspection.value?.admin?.account_id || '')
+const selectableProAccounts = computed(() => props.proAccounts.filter((account) => account.access_token_present && account.chatgpt_status !== 'dead' && !(account.at_checked_at && !account.at_valid)))
+const selectedProAccounts = computed(() => props.proAccounts.filter((account) => selectedProEmails.value.has(String(account.email || '').toLowerCase())))
+const allProSelected = computed(() => selectableProAccounts.value.length > 0 && selectableProAccounts.value.every((account) => selectedProEmails.value.has(account.email.toLowerCase())))
 
 function setMessage(text = '', type = '') {
   message.text = text
@@ -89,6 +97,7 @@ async function importFile(event) {
   event.target.value = ''
   if (!file) return
   try {
+    clearProSelection(false)
     form.tokenText = await file.text()
     parseJSON()
   } catch (error) {
@@ -101,8 +110,82 @@ async function importFolder(event) {
   event.target.value = ''
   if (!result.files.length) return setMessage('所选文件夹中没有 JSON 文件', 'error')
   if (!result.tokens.length) return setMessage('JSON 文件中没有找到 Access Token', 'error')
+  clearProSelection(false)
   form.tokenText = result.tokens.join('\n')
   setMessage(`已从 ${result.files.length} 个文件解析出 ${result.tokens.length} 个 Token${result.invalid ? `，跳过 ${result.invalid} 个无效文件` : ''}`, 'success')
+}
+
+function isProSelectable(account) {
+  return account.access_token_present && account.chatgpt_status !== 'dead' && !(account.at_checked_at && !account.at_valid)
+}
+
+function proAccountState(account) {
+  if (account.chatgpt_status === 'dead') return '死号'
+  if (!account.access_token_present) return 'AT 缺失'
+  if (account.at_checked_at && !account.at_valid) return 'AT 无效'
+  if (account.at_checked_at) return 'AT 有效'
+  return 'AT 已保存'
+}
+
+function scheduleProTokenLoad() {
+  clearTimeout(proLoadTimer)
+  proLoadSequence += 1
+  proTokensLoading.value = true
+  proLoadTimer = setTimeout(loadSelectedProTokens, 120)
+}
+
+function toggleProAccount(account) {
+  if (!isProSelectable(account)) return
+  const next = new Set(selectedProEmails.value)
+  const email = account.email.toLowerCase()
+  if (next.has(email)) next.delete(email)
+  else {
+    if (next.size >= 500) return setMessage('单次最多选择 500 个 Pro 账号', 'error')
+    next.add(email)
+  }
+  selectedProEmails.value = next
+  scheduleProTokenLoad()
+}
+
+function toggleAllProAccounts() {
+  if (allProSelected.value) selectedProEmails.value = new Set()
+  else selectedProEmails.value = new Set(selectableProAccounts.value.slice(0, 500).map((account) => account.email.toLowerCase()))
+  scheduleProTokenLoad()
+}
+
+function clearProSelection(clearTokens = true) {
+  clearTimeout(proLoadTimer)
+  proLoadSequence += 1
+  proTokensLoading.value = false
+  selectedProEmails.value = new Set()
+  if (clearTokens) {
+    form.tokenText = ''
+    inspection.value = null
+  }
+}
+
+async function loadSelectedProTokens() {
+  const emails = [...selectedProEmails.value]
+  const sequence = ++proLoadSequence
+  if (!emails.length) {
+    form.tokenText = ''
+    inspection.value = null
+    proTokensLoading.value = false
+    setMessage()
+    return
+  }
+  proTokensLoading.value = true
+  try {
+    const result = await api('/api/pro-accounts/access-tokens', { method: 'POST', body: { emails } })
+    if (sequence !== proLoadSequence) return
+    form.tokenText = (result.items || []).map((item) => item.access_token).filter(Boolean).join('\n')
+    inspection.value = null
+    setMessage(`已从 Pro 管理载入 ${result.total || emails.length} 个账号的 AT`, 'success')
+  } catch (error) {
+    if (sequence === proLoadSequence) setMessage(error.message, 'error')
+  } finally {
+    if (sequence === proLoadSequence) proTokensLoading.value = false
+  }
 }
 
 async function inspect() {
@@ -135,6 +218,7 @@ async function inspect() {
 }
 
 async function prepareStart() {
+  if (proTokensLoading.value) return setMessage('Pro 账号 AT 正在载入，请稍候', 'error')
   if (props.anyActive && !jobActive.value) return setMessage('已有任务正在执行，请等待或先停止', 'error')
   const result = await inspect()
   if (!result?.admin || result.users.some((item) => item.error)) return setMessage('请先修正无效凭据', 'error')
@@ -197,6 +281,7 @@ async function cancel() {
 function reset() {
   if (jobActive.value) return setMessage('请先停止当前任务', 'error')
   Object.assign(form, { admin: '', team: '', seatType: 'default', tokenText: '' })
+  clearProSelection(false)
   inspection.value = null
   progressRecords.value = []
   job.value = null
@@ -215,7 +300,16 @@ function resultMessage(result) {
   return result.error || [...(result.steps || [])].reverse().find((step) => step.message)?.message || '-'
 }
 
-onBeforeUnmount(() => clearTimeout(pollTimer))
+watch(() => props.proAccounts, (accounts) => {
+  const available = new Set(accounts.filter(isProSelectable).map((account) => account.email.toLowerCase()))
+  const retained = new Set([...selectedProEmails.value].filter((email) => available.has(email)))
+  if (retained.size !== selectedProEmails.value.size) {
+    selectedProEmails.value = retained
+    scheduleProTokenLoad()
+  }
+}, { deep: true })
+
+onBeforeUnmount(() => { clearTimeout(pollTimer); clearTimeout(proLoadTimer) })
 </script>
 
 <template>
@@ -229,7 +323,7 @@ onBeforeUnmount(() => clearTimeout(pollTimer))
       <div class="heading-actions">
         <StatusPill :tone="jobActive ? 'running' : 'success'">{{ jobActive ? 'Live' : 'Ready' }}</StatusPill>
         <button class="btn ghost" type="button" @click="reset"><RotateCcw :size="15" />重置</button>
-        <button class="btn primary" type="button" :disabled="busy" @click="prepareStart"><Play :size="15" />{{ config.action }}</button>
+        <button class="btn primary" type="button" :disabled="busy || proTokensLoading" @click="prepareStart"><Play :size="15" />{{ config.action }}</button>
       </div>
     </header>
 
@@ -250,7 +344,8 @@ onBeforeUnmount(() => clearTimeout(pollTimer))
           <label class="field"><span>团队 Account ID <small>可留空自动读取</small></span><input v-model="form.team" placeholder="account-..." /></label>
           <label v-if="config.seat" class="field"><span>本次邀请席位</span><select v-model="form.seatType"><option value="default">Standard（标准）</option><option value="prolite">Premium（5x）</option></select></label>
         </div>
-        <label class="field grow"><span>子号 Access Token <small>每行一个，支持 Sub2API / CPA JSON</small></span><textarea v-model="form.tokenText" rows="10" spellcheck="false"></textarea></label>
+        <div class="field pro-account-source"><div class="pro-source-heading"><span><Crown :size="14" />Pro 管理账号 <small>选择后自动载入 AT</small></span><div><button class="source-action" type="button" :disabled="!selectableProAccounts.length" @click="toggleAllProAccounts">{{ allProSelected ? '取消全选' : '全选可用' }}</button><button class="source-action" type="button" :disabled="!selectedProAccounts.length" @click="clearProSelection()">清空</button></div></div><div class="pro-account-picker"><p v-if="!proAccounts.length">暂无 Pro 账号，请先从邮件管理移入</p><label v-for="account in proAccounts" :key="account.email" :class="{ disabled: !isProSelectable(account) }"><input type="checkbox" :checked="selectedProEmails.has(account.email.toLowerCase())" :disabled="!isProSelectable(account)" @change="toggleProAccount(account)" /><span :title="account.email">{{ account.email }}</span><small>{{ proAccountState(account) }}</small></label></div><div class="pro-source-status"><span>已选择 {{ selectedProAccounts.length }} 个</span><span v-if="proTokensLoading">正在载入 AT…</span></div></div>
+        <label class="field grow"><span>子号 Access Token <small>每行一个，支持 Pro 管理、Sub2API / CPA JSON</small></span><textarea v-model="form.tokenText" rows="10" spellcheck="false" @input="clearProSelection(false)"></textarea></label>
         <input ref="fileInput" hidden type="file" accept=".json,application/json" @change="importFile" />
         <input ref="folderInput" hidden type="file" accept=".json,application/json" webkitdirectory directory multiple @change="importFolder" />
         <div class="compact-actions">
@@ -259,7 +354,7 @@ onBeforeUnmount(() => clearTimeout(pollTimer))
           <button class="btn ghost" type="button" @click="parseJSON()"><Upload :size="15" />解析 JSON</button>
         </div>
         <MessageBar :message="message" />
-        <div class="panel-actions"><button class="btn ghost" type="button" :disabled="busy" @click="inspect"><ScanLine :size="15" />解析凭据</button><button class="btn primary" type="submit" :disabled="busy"><Play :size="15" />{{ config.action }}</button></div>
+        <div class="panel-actions"><button class="btn ghost" type="button" :disabled="busy || proTokensLoading" @click="inspect"><ScanLine :size="15" />解析凭据</button><button class="btn primary" type="submit" :disabled="busy || proTokensLoading"><Play :size="15" />{{ config.action }}</button></div>
       </form>
 
       <section class="panel preview-panel">
@@ -292,3 +387,22 @@ onBeforeUnmount(() => clearTimeout(pollTimer))
     <div v-if="confirmOpen" class="modal-backdrop" @click.self="confirmOpen = false"><section class="modal"><span class="overline">CONFIRM EXECUTION</span><h2>启动{{ config.title }}</h2><p>将使用团队 {{ shortID(teamID) }} 对 {{ tokens.length }} 个子号执行“{{ config.confirm }}”。</p><div class="panel-actions"><button class="btn ghost" type="button" @click="confirmOpen = false">取消</button><button class="btn primary" type="button" @click="start"><Play :size="15" />确认启动</button></div></section></div>
   </section>
 </template>
+
+<style scoped>
+.pro-account-source { min-width: 0; }
+.pro-source-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.pro-source-heading > span { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 11px; font-weight: 650; }
+.pro-source-heading small { color: var(--muted); font-size: 9px; font-weight: 500; }
+.pro-source-heading > div { display: flex; gap: 10px; }
+.source-action { border: 0; background: transparent; color: var(--blue); font-size: 10px; font-weight: 650; cursor: pointer; }
+.source-action:disabled { color: var(--muted); cursor: not-allowed; opacity: .55; }
+.pro-account-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 170px; overflow-y: auto; padding: 6px; gap: 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg-elevated); }
+.pro-account-picker > p { grid-column: 1 / -1; padding: 18px 8px; color: var(--muted); font-size: 10px; text-align: center; }
+.pro-account-picker label { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; min-height: 32px; padding: 5px 7px; gap: 7px; border-radius: 4px; color: var(--text-2); cursor: pointer; }
+.pro-account-picker label:hover:not(.disabled) { background: var(--surface-2); }
+.pro-account-picker label.disabled { color: var(--muted); cursor: not-allowed; opacity: .6; }
+.pro-account-picker label span { min-width: 0; overflow: hidden; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.pro-account-picker label small, .pro-source-status { color: var(--muted); font-size: 9px; }
+.pro-source-status { display: flex; justify-content: space-between; min-height: 18px; padding-top: 5px; }
+@media (max-width: 620px) { .pro-account-picker { grid-template-columns: 1fr; } .pro-source-heading { align-items: flex-start; flex-direction: column; } }
+</style>

@@ -98,6 +98,34 @@ func TestMailAccountsKeepEntryTimeAndSortNewestFirst(t *testing.T) {
 	}
 }
 
+func TestMailAccountChatGPTSessionRoundTripsEncrypted(t *testing.T) {
+	dataStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+
+	const session = `{"user":{"email":"session@example.com"},"accessToken":"session-at","expires":"2026-12-01T00:00:00.000Z"}`
+	profile, err := dataStore.SaveMailAccount(
+		model.MailAccountProfile{Email: "session@example.com"},
+		model.MailAccountCredentials{Email: "session@example.com", AccessToken: "session-at", ChatGPTSession: session},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.ChatGPTSessionPresent {
+		t.Fatal("chatgpt_session_present = false, want true")
+	}
+
+	reopenedProfile, credentials, err := dataStore.MailAccountCredential("session@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopenedProfile.ChatGPTSessionPresent || credentials.ChatGPTSession != session {
+		t.Fatalf("session did not round-trip: profile=%+v session=%q", reopenedProfile, credentials.ChatGPTSession)
+	}
+}
+
 func TestMailAccountDeadStatusPersistsAcrossReimport(t *testing.T) {
 	dataStore, err := Open(t.TempDir())
 	if err != nil {
@@ -120,6 +148,138 @@ func TestMailAccountDeadStatusPersistsAcrossReimport(t *testing.T) {
 	}
 	if profile.ChatGPTStatus != "dead" || profile.RegistrationStatus != "dead" || profile.ChatGPTStatusAt == nil || profile.ChatGPTStatusMessage != "account_deactivated" {
 		t.Fatalf("dead status was reset by reimport: %+v", profile)
+	}
+}
+
+func TestMailAccountManagementScopeMovesWithoutDuplicatingCredentials(t *testing.T) {
+	dataStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	const email = "pro-managed@example.com"
+	if _, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: email, Label: "Pro managed"}, model.MailAccountCredentials{
+		Email: email, PickupURL: "https://mail.example/pickup", AccessToken: "saved-at", RefreshToken: "saved-rt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := dataStore.UpdateMailAccountManagementScope(email, "pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ManagementScope != "pro" || profile.ProManagedAt == nil {
+		t.Fatalf("account was not moved to Pro management: %+v", profile)
+	}
+	if got := dataStore.MailAccountsByManagementScope("mail"); len(got) != 0 {
+		t.Fatalf("Pro account still appears in mail scope: %+v", got)
+	}
+	if got := dataStore.MailAccountsByManagementScope("pro"); len(got) != 1 || got[0].Email != email {
+		t.Fatalf("Pro scope does not contain moved account: %+v", got)
+	}
+	if _, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: email, Label: "Reimported"}, model.MailAccountCredentials{
+		Email: email, PickupURL: "https://mail.example/new", AccessToken: "updated-at", RefreshToken: "updated-rt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reimported, credentials, err := dataStore.MailAccountCredential(email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reimported.ManagementScope != "pro" || reimported.ProManagedAt == nil || credentials.AccessToken != "updated-at" {
+		t.Fatalf("reimport reset Pro scope or credentials: profile=%+v credentials=%+v", reimported, credentials)
+	}
+	returned, err := dataStore.UpdateMailAccountManagementScope(email, "mail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if returned.ManagementScope != "mail" || returned.ProManagedAt != nil {
+		t.Fatalf("account was not returned to mail management: %+v", returned)
+	}
+}
+
+func TestProOAuthSessionRoundTripAndExpiry(t *testing.T) {
+	dataStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	now := time.Now()
+	session := model.ProOAuthSession{ID: "session-1", State: "state", RedirectURI: "http://localhost", CreatedAt: now, ExpiresAt: now.Add(time.Minute)}
+	if err = dataStore.SaveProOAuthSession(session, "secret-verifier"); err != nil {
+		t.Fatal(err)
+	}
+	got, verifier, err := dataStore.ProOAuthSession(session.ID)
+	if err != nil || got.State != "state" || verifier != "secret-verifier" {
+		t.Fatalf("got=%+v verifier=%q err=%v", got, verifier, err)
+	}
+	expired := session
+	expired.ID = "expired"
+	expired.ExpiresAt = now.Add(-time.Minute)
+	if err = dataStore.SaveProOAuthSession(expired, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = dataStore.ProOAuthSession(expired.ID); err == nil {
+		t.Fatal("expected expired session rejection")
+	}
+}
+
+func TestSaveMailAccountOAuthBundleRotatesTokensAtomically(t *testing.T) {
+	dataStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	_, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: "pro@example.com"}, model.MailAccountCredentials{Email: "pro@example.com", AccessToken: "old-at", RefreshToken: "old-rt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = dataStore.UpdateMailAccountManagementScope("pro@example.com", "pro"); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err = dataStore.SaveMailAccountOAuthBundle("pro@example.com", "new-at", "", "new-id", "acc", "user", expires); err != nil {
+		t.Fatal(err)
+	}
+	p, c, err := dataStore.MailAccountCredential("pro@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AccessToken != "new-at" || c.RefreshToken != "old-rt" || c.IDToken != "new-id" || p.OAuthStatus != "completed" || p.OAuthAccountID != "acc" || p.OAuthUserID != "user" || !p.IDTokenPresent {
+		t.Fatalf("profile=%+v credentials=%+v", p, c)
+	}
+}
+
+func TestMailAccountPlanCheckFailureKeepsLastSuccessfulPlan(t *testing.T) {
+	dataStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	const email = "plan@example.com"
+	if _, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: email}, model.MailAccountCredentials{Email: email, AccessToken: "saved-at"}); err != nil {
+		t.Fatal(err)
+	}
+	checkedAt := time.Now().Add(-time.Minute)
+	if _, err = dataStore.UpdateMailAccountPlanCheck(email, model.AccountPlanCheckResult{
+		OK: true, HTTPStatus: 200, CurrentPlanType: "free", SubscriptionPlan: "chatgptfreeplan",
+		PlusTrialEligible: true, CheckedAt: checkedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failedAt := time.Now()
+	profile, err := dataStore.UpdateMailAccountPlanCheck(email, model.AccountPlanCheckResult{HTTPStatus: 429, CheckedAt: failedAt, Error: "HTTP 429"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.PlanCheckStatus != "failed" || profile.PlanCheckError != "HTTP 429" || profile.CurrentPlanType != "free" || !profile.PlusTrialEligible || profile.PlanLastSuccessAt == nil || !profile.PlanLastSuccessAt.Equal(checkedAt) {
+		t.Fatalf("last successful plan was not preserved: %+v", profile)
+	}
+	if _, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: email, Label: "reimported"}, model.MailAccountCredentials{Email: email, AccessToken: "new-at"}); err != nil {
+		t.Fatal(err)
+	}
+	reimported, _, err := dataStore.MailAccountCredential(email)
+	if err != nil || reimported.CurrentPlanType != "free" || reimported.PlanCheckStatus != "failed" || !reimported.PlusTrialEligible {
+		t.Fatalf("reimport erased plan state: %+v err=%v", reimported, err)
 	}
 }
 

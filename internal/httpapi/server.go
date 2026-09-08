@@ -23,31 +23,36 @@ import (
 )
 
 type Server struct {
-	store            *store.Store
-	jobs             *workflow.Manager
-	static           fs.FS
-	refreshMu        sync.Mutex
-	freeLocks        sync.Map
-	freeRemoveLocks  sync.Map
-	teamRemoveLocks  sync.Map
-	sub2             *sub2.Client
-	cpa              *cpa.Client
-	registrationMu   sync.RWMutex
-	registrationJobs map[string]map[string]any
-	mailFetchMu      sync.RWMutex
-	mailFetchJobs    map[string]map[string]any
-	oauthMu          sync.RWMutex
-	oauthJobs        map[string]map[string]any
-	mail             *mailbridge.Client // retained for API compatibility; local mail flows never call it
-	authMu           sync.Mutex
-	sessions         map[string]time.Time
-	autoMu           sync.Mutex
-	autoAdminLocks   sync.Map
-	autoRunning      bool
-	auditQueue       chan model.AutoRotationEvent
-	auditWG          sync.WaitGroup
-	auditStop        chan struct{}
-	auditCloseOnce   sync.Once
+	store             *store.Store
+	jobs              *workflow.Manager
+	static            fs.FS
+	refreshMu         sync.Mutex
+	freeLocks         sync.Map
+	freeRemoveLocks   sync.Map
+	teamRemoveLocks   sync.Map
+	sub2              *sub2.Client
+	cpa               *cpa.Client
+	registrationMu    sync.RWMutex
+	registrationJobs  map[string]map[string]any
+	mailFetchMu       sync.RWMutex
+	mailFetchJobs     map[string]map[string]any
+	oauthMu           sync.RWMutex
+	oauthJobs         map[string]map[string]any
+	planCheckMu       sync.Mutex
+	planCheckNext     time.Time
+	proLocks          sync.Map
+	proMonitorMu      sync.Mutex
+	proMonitorRunning bool
+	mail              *mailbridge.Client // retained for API compatibility; local mail flows never call it
+	authMu            sync.Mutex
+	sessions          map[string]time.Time
+	autoMu            sync.Mutex
+	autoAdminLocks    sync.Map
+	autoRunning       bool
+	auditQueue        chan model.AutoRotationEvent
+	auditWG           sync.WaitGroup
+	auditStop         chan struct{}
+	auditCloseOnce    sync.Once
 }
 
 const (
@@ -68,6 +73,7 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 	}
 	_ = dataStore.RecoverAutoRotationClaims()
 	_ = dataStore.RecoverAutoRotationTasks()
+	_ = dataStore.RecoverProWorkflows()
 	// Keep the execution history bounded to the requested two-day window.
 	// Cleanup is a single local transaction and runs once at startup, outside
 	// all request/rotation workers.
@@ -165,10 +171,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/push-settings/cpa/groups", s.getCPAGroups)
 	mux.HandleFunc("GET /api/mail/status", s.mailStatus)
 	mux.HandleFunc("GET /api/mail/accounts", s.listMailAccounts)
+	mux.HandleFunc("GET /api/pro-accounts", s.listProAccounts)
+	mux.HandleFunc("POST /api/pro-accounts/access-tokens", s.proAccountAccessTokens)
+	mux.HandleFunc("POST /api/pro-accounts/check-plan", s.checkProAccountPlans)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/check-plan", s.checkProAccountPlan)
+	mux.HandleFunc("POST /api/pro-accounts/oauth/start", s.startProOAuth)
+	mux.HandleFunc("POST /api/pro-accounts/oauth/complete", s.completeProOAuth)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/oauth/refresh", s.refreshProOAuth)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/push", s.pushProAccount)
+	mux.HandleFunc("POST /api/pro-accounts/push", s.pushProAccounts)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/quota", s.checkProAccountQuota)
+	mux.HandleFunc("POST /api/pro-accounts/quota", s.checkProAccountQuotas)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/merge", s.mergeProAccount)
+	mux.HandleFunc("GET /api/pro-settings", s.getProSettings)
+	mux.HandleFunc("PUT /api/pro-settings", s.saveProSettings)
+	mux.HandleFunc("POST /api/pro-settings/sub2/test", s.testProSub2)
+	mux.HandleFunc("GET /api/pro-settings/sub2/groups", s.getProSub2Groups)
+	mux.HandleFunc("POST /api/pro-settings/cpa/test", s.testProCPA)
+	mux.HandleFunc("GET /api/pro-settings/cpa/groups", s.getProCPAGroups)
 	mux.HandleFunc("POST /api/mail/accounts/import", s.importMailAccounts)
 	mux.HandleFunc("POST /api/mail/accounts/check-at", s.checkMailAccountsAT)
 	mux.HandleFunc("POST /api/mail/accounts/{email}/check-at", s.checkMailAccountAT)
 	mux.HandleFunc("DELETE /api/mail/accounts/{email}", s.deleteMailAccount)
+	mux.HandleFunc("PUT /api/mail/accounts/{email}/management-scope", s.updateMailAccountManagementScope)
 	mux.HandleFunc("POST /api/mail/accounts/{email}/register", s.startMailAccountRegistration)
 	mux.HandleFunc("POST /api/mail/accounts/{email}/register-at", s.startMailAccountRegistrationWithAT)
 	mux.HandleFunc("POST /api/mail/accounts/{email}/login", s.startMailAccountLogin)
@@ -207,6 +232,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 	go s.monitorFreeAccounts(ctx)
 	go s.autoRotationLoop(ctx)
 	go s.autoRotationHistoryCleanup(ctx)
+	go s.monitorProAccounts(ctx)
 }
 
 func (s *Server) autoRotationHistoryCleanup(ctx context.Context) {

@@ -20,6 +20,9 @@ func TestRedactMailPayloadRemovesSecretsRecursively(t *testing.T) {
 		"email":         "person@example.com",
 		"mail_password": "mail-secret",
 		"pickup_url":    "https://mail.example/pickup?token=pickup-secret",
+		"chatgpt_session": map[string]any{
+			"accessToken": "full-session-secret",
+		},
 		"nested": map[string]any{
 			"client_id":          "client-secret",
 			"mail_refresh_token": "mail-rt-secret",
@@ -44,6 +47,7 @@ func TestRedactMailPayloadRemovesSecretsRecursively(t *testing.T) {
 	for _, secret := range []string{
 		"mail-secret", "pickup-secret", "client-secret", "mail-rt-secret", "gpt-secret",
 		"totp-secret", "at-secret", "rt-secret", "id-secret", "session-secret",
+		"full-session-secret",
 	} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("redacted payload still contains secret %q: %s", secret, text)
@@ -69,6 +73,33 @@ func TestRedactMailPayloadMarksEmptySecretAsMissing(t *testing.T) {
 	}
 	if present, ok := payload["pickup_url_present"].(bool); !ok || present {
 		t.Fatalf("pickup_url_present = %#v, want false", payload["pickup_url_present"])
+	}
+}
+
+func TestRedactMailPayloadMarksObjectSessionPresent(t *testing.T) {
+	payload := map[string]any{
+		"chatgpt_session": map[string]any{"accessToken": "session-at"},
+	}
+
+	redactMailPayload(payload)
+
+	if _, exists := payload["chatgpt_session"]; exists {
+		t.Fatal("chatgpt_session was not removed")
+	}
+	if present, ok := payload["chatgpt_session_present"].(bool); !ok || !present {
+		t.Fatalf("chatgpt_session_present = %#v, want true", payload["chatgpt_session_present"])
+	}
+}
+
+func TestNormalizeAndReadChatGPTSession(t *testing.T) {
+	raw := json.RawMessage(`{"accessToken":"at","user":{"email":"session@example.com"}}`)
+	stored, err := normalizeChatGPTSession(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, ok := chatGPTSessionValue(stored).(map[string]any)
+	if !ok || value["accessToken"] != "at" {
+		t.Fatalf("unexpected session value: %#v", value)
 	}
 }
 

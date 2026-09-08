@@ -16,6 +16,7 @@ import {
   ChevronDown,
   Circle,
   Copy,
+  Crown,
   Download,
   Eye,
   EyeOff,
@@ -41,7 +42,7 @@ import MessageBar from "./MessageBar.vue";
 import StatusPill from "./StatusPill.vue";
 import Pagination from "./Pagination.vue";
 
-const emit = defineEmits(["open-team"]);
+const emit = defineEmits(["open-team", "pro-changed"]);
 const activeTab = ref("accounts");
 const accounts = ref([]);
 const pipelineAccounts = ref([]);
@@ -99,6 +100,7 @@ const credentialDialog = reactive({
   gptPassword: "",
   accessToken: "",
   refreshToken: "",
+  chatgptSession: "",
   accountID: "",
   loading: false,
   exporting: "",
@@ -657,6 +659,7 @@ async function openCredentialDialog(account) {
     gptPassword: "",
     accessToken: "",
     refreshToken: "",
+    chatgptSession: "",
     accountID: "",
     loading: true,
     exporting: "",
@@ -671,6 +674,7 @@ async function openCredentialDialog(account) {
       gptPassword: credentials.gpt_password || "",
       accessToken: credentials.access_token || "",
       refreshToken: credentials.refresh_token || "",
+      chatgptSession: formatChatGPTSession(credentials.chatgpt_session),
       accountID: credentials.chatgpt_account_id || "",
     });
   } catch (error) {
@@ -686,12 +690,24 @@ function closeCredentialDialog() {
     gptPassword: "",
     accessToken: "",
     refreshToken: "",
+    chatgptSession: "",
     accountID: "",
     loading: false,
     exporting: "",
     copied: "",
     error: "",
   });
+}
+function formatChatGPTSession(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  return JSON.stringify(value, null, 2);
 }
 async function copyAccountForImport(account) {
   if (!account?.access_token_present) {
@@ -719,7 +735,9 @@ async function copyCredential(kind) {
       ? credentialDialog.accessToken
       : kind === "password"
         ? credentialDialog.gptPassword
-        : credentialDialog.refreshToken;
+        : kind === "session"
+          ? credentialDialog.chatgptSession
+          : credentialDialog.refreshToken;
   if (!value) return;
   try {
     await navigator.clipboard.writeText(value);
@@ -1083,6 +1101,24 @@ async function openTeam(account) {
   }
 }
 
+async function moveToPro(account) {
+  if (!account.access_token_present) return setMessage('该账号尚未保存 AT，不能进入 Pro 管理', 'error');
+  if (!window.confirm(`确认将“${account.email}”移入 Pro 管理？移入后将不再显示在邮件账号列表。`)) return;
+  busy.value = account.email;
+  try {
+    await api(`/api/mail/accounts/${encodeURIComponent(account.email)}/management-scope`, {
+      method: 'PUT', body: { scope: 'pro' },
+    });
+    await loadAccounts();
+    emit('pro-changed');
+    setMessage(`${account.email} 已移入 Pro 管理`, 'success');
+  } catch (error) {
+    setMessage(error.message, 'error');
+  } finally {
+    busy.value = '';
+  }
+}
+
 function mailKey(item) {
   return [
     item.source,
@@ -1281,6 +1317,10 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                       >ChatGPT密码：{{
                         account.gpt_password_present ? "已保存" : "未设置"
                       }}</small
+                    ><small :class="{ ready: account.chatgpt_session_present }"
+                      >Session：{{
+                        account.chatgpt_session_present ? "已保存" : "未保存"
+                      }}</small
                     ><small :class="{ ready: account.totp_secret_present }"
                       >2FA：{{
                         account.totp_secret_present ? "已配置" : "未配置"
@@ -1357,6 +1397,15 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                     >
                       {{ isInTeamPipeline(account) ? "已进轮转" : "Team 轮转"
                       }}<ArrowRight :size="14" />
+                    </button>
+                    <button
+                      class="btn ghost compact"
+                      type="button"
+                      :disabled="!!busy || !account.access_token_present"
+                      :title="account.access_token_present ? '移入 Pro 管理' : '请先获取 AT'"
+                      @click="moveToPro(account)"
+                    >
+                      <Crown :size="14" />Pro 管理
                     </button>
                     <div class="action-menu" @mouseenter="showActionMenu(account, $event)" @mouseleave="scheduleCloseActionMenu">
                       <button
@@ -1704,6 +1753,29 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
               :value="credentialDialog.refreshToken || '未获取'"
               readonly
               rows="4"
+              spellcheck="false"
+              @focus="$event.target.select()"
+            ></textarea>
+          </label>
+          <label class="credential-token-field"
+            ><span
+              ><strong>完整 ChatGPT Session</strong
+              ><button
+                type="button"
+                :disabled="!credentialDialog.chatgptSession"
+                @click="copyCredential('session')"
+              >
+                <Check
+                  v-if="credentialDialog.copied === 'session'"
+                  :size="14"
+                /><Copy v-else :size="14" />{{
+                  credentialDialog.copied === "session" ? "已复制" : "复制 Session"
+                }}
+              </button></span
+            ><textarea
+              :value="credentialDialog.chatgptSession || '未保存'"
+              readonly
+              rows="8"
               spellcheck="false"
               @focus="$event.target.select()"
             ></textarea>

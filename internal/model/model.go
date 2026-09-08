@@ -24,30 +24,91 @@ type Settings struct {
 // MailAccountProfile is the local mailbox projection used by registration.
 // Secrets are encrypted in Store and never returned by list APIs.
 type MailAccountProfile struct {
-	ID                    string     `json:"id"`
-	Email                 string     `json:"email"`
-	Label                 string     `json:"label"`
-	Group                 string     `json:"group"`
-	MailPasswordPresent   bool       `json:"mail_password_present"`
-	ClientIDPresent       bool       `json:"client_id_present"`
-	MailRefreshPresent    bool       `json:"mail_refresh_token_present"`
-	PickupURLPresent      bool       `json:"pickup_url_present"`
-	GptPasswordPresent    bool       `json:"gpt_password_present"`
-	TotpSecretPresent     bool       `json:"totp_secret_present"`
-	AccessTokenPresent    bool       `json:"access_token_present"`
-	RefreshTokenPresent   bool       `json:"refresh_token_present"`
-	ATCheckedAt           *time.Time `json:"at_checked_at,omitempty"`
-	ATValid               bool       `json:"at_valid"`
-	ATCheckHTTPStatus     int        `json:"at_check_http_status,omitempty"`
-	ATCheckMessage        string     `json:"at_check_message,omitempty"`
-	ChatGPTStatus         string     `json:"chatgpt_status,omitempty"`
-	ChatGPTStatusMessage  string     `json:"chatgpt_status_message,omitempty"`
-	ChatGPTStatusAt       *time.Time `json:"chatgpt_status_at,omitempty"`
-	LoginMethod           string     `json:"login_method,omitempty"`
-	RegistrationStatus    string     `json:"registration_status"`
-	RegistrationLastError string     `json:"registration_last_error,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	ID                    string           `json:"id"`
+	Email                 string           `json:"email"`
+	Label                 string           `json:"label"`
+	Group                 string           `json:"group"`
+	ManagementScope       string           `json:"management_scope,omitempty"`
+	ProManagedAt          *time.Time       `json:"pro_managed_at,omitempty"`
+	MailPasswordPresent   bool             `json:"mail_password_present"`
+	ClientIDPresent       bool             `json:"client_id_present"`
+	MailRefreshPresent    bool             `json:"mail_refresh_token_present"`
+	PickupURLPresent      bool             `json:"pickup_url_present"`
+	GptPasswordPresent    bool             `json:"gpt_password_present"`
+	TotpSecretPresent     bool             `json:"totp_secret_present"`
+	AccessTokenPresent    bool             `json:"access_token_present"`
+	RefreshTokenPresent   bool             `json:"refresh_token_present"`
+	IDTokenPresent        bool             `json:"id_token_present"`
+	OAuthStatus           string           `json:"oauth_status,omitempty"`
+	OAuthAccountID        string           `json:"oauth_account_id,omitempty"`
+	OAuthUserID           string           `json:"oauth_user_id,omitempty"`
+	OAuthExpiresAt        *time.Time       `json:"oauth_expires_at,omitempty"`
+	OAuthAuthorizedAt     *time.Time       `json:"oauth_authorized_at,omitempty"`
+	PushProvider          string           `json:"push_provider,omitempty"`
+	PushStatus            string           `json:"push_status,omitempty"`
+	Sub2AccountID         int64            `json:"sub2_account_id,omitempty"`
+	Sub2AccountName       string           `json:"sub2_account_name,omitempty"`
+	CPAAuthFileName       string           `json:"cpa_auth_file_name,omitempty"`
+	Quota5H               *FreeQuotaWindow `json:"quota_5h,omitempty"`
+	Quota7D               *FreeQuotaWindow `json:"quota_7d,omitempty"`
+	QuotaStatus           string           `json:"quota_status,omitempty"`
+	QuotaCheckedAt        *time.Time       `json:"quota_checked_at,omitempty"`
+	SpaceMergedOnce       bool             `json:"space_merged_once"`
+	SpaceMergedAt         *time.Time       `json:"space_merged_at,omitempty"`
+	TargetAdminID         string           `json:"target_admin_id,omitempty"`
+	TargetTeamID          string           `json:"target_team_id,omitempty"`
+	TargetSeatType        string           `json:"target_seat_type,omitempty"`
+	InviteStatus          string           `json:"pro_invite_status,omitempty"`
+	AcceptStatus          string           `json:"pro_accept_status,omitempty"`
+	TransferStatus        string           `json:"pro_transfer_status,omitempty"`
+	RemoveStatus          string           `json:"pro_remove_status,omitempty"`
+	ProLastError          string           `json:"pro_last_error,omitempty"`
+	ProWorkflowRunning    bool             `json:"pro_workflow_running"`
+	ChatGPTSessionPresent bool             `json:"chatgpt_session_present"`
+	ATCheckedAt           *time.Time       `json:"at_checked_at,omitempty"`
+	ATValid               bool             `json:"at_valid"`
+	ATCheckHTTPStatus     int              `json:"at_check_http_status,omitempty"`
+	ATCheckMessage        string           `json:"at_check_message,omitempty"`
+	ChatGPTStatus         string           `json:"chatgpt_status,omitempty"`
+	ChatGPTStatusMessage  string           `json:"chatgpt_status_message,omitempty"`
+	ChatGPTStatusAt       *time.Time       `json:"chatgpt_status_at,omitempty"`
+	CurrentPlanType       string           `json:"current_plan_type,omitempty"`
+	SubscriptionPlan      string           `json:"subscription_plan,omitempty"`
+	HasActiveSubscription bool             `json:"has_active_subscription"`
+	PlusTrialEligible     bool             `json:"plus_trial_eligible"`
+	PlanCheckStatus       string           `json:"plan_check_status,omitempty"`
+	PlanCheckedAt         *time.Time       `json:"plan_checked_at,omitempty"`
+	PlanLastSuccessAt     *time.Time       `json:"plan_last_success_at,omitempty"`
+	PlanCheckHTTPStatus   int              `json:"plan_check_http_status,omitempty"`
+	PlanCheckError        string           `json:"plan_check_error,omitempty"`
+	PlanExpiresAt         string           `json:"plan_expires_at,omitempty"`
+	PlanRenewsAt          string           `json:"plan_renews_at,omitempty"`
+	BillingPeriod         string           `json:"billing_period,omitempty"`
+	BillingCurrency       string           `json:"billing_currency,omitempty"`
+	LoginMethod           string           `json:"login_method,omitempty"`
+	RegistrationStatus    string           `json:"registration_status"`
+	RegistrationLastError string           `json:"registration_last_error,omitempty"`
+	CreatedAt             time.Time        `json:"created_at"`
+	UpdatedAt             time.Time        `json:"updated_at"`
+}
+
+// AccountPlanCheckResult is the normalized subset of ChatGPT's accounts/check
+// response needed by the Pro account list.
+type AccountPlanCheckResult struct {
+	OK                    bool      `json:"ok"`
+	HTTPStatus            int       `json:"http_status,omitempty"`
+	AccountID             string    `json:"account_id,omitempty"`
+	CurrentPlanType       string    `json:"current_plan_type,omitempty"`
+	SubscriptionPlan      string    `json:"subscription_plan,omitempty"`
+	HasActiveSubscription bool      `json:"has_active_subscription"`
+	PlusTrialEligible     bool      `json:"plus_trial_eligible"`
+	ExpiresAt             string    `json:"expires_at,omitempty"`
+	RenewsAt              string    `json:"renews_at,omitempty"`
+	BillingPeriod         string    `json:"billing_period,omitempty"`
+	BillingCurrency       string    `json:"billing_currency,omitempty"`
+	CheckedAt             time.Time `json:"checked_at"`
+	AttemptCount          int       `json:"attempt_count"`
+	Error                 string    `json:"error,omitempty"`
 }
 
 type MailAccountCredentials struct {
@@ -60,6 +121,8 @@ type MailAccountCredentials struct {
 	TotpSecret       string `json:"totp_secret"`
 	AccessToken      string `json:"access_token"`
 	RefreshToken     string `json:"refresh_token"`
+	IDToken          string `json:"id_token"`
+	ChatGPTSession   string `json:"chatgpt_session"`
 }
 
 type MailMessage struct {

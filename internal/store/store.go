@@ -144,6 +144,15 @@ func (s *Store) initSchema() error {
 		CREATE TABLE IF NOT EXISTS cpa_settings (
 			id INTEGER PRIMARY KEY CHECK (id = 1), profile TEXT NOT NULL, encrypted_key TEXT NOT NULL DEFAULT ''
 		);
+		CREATE TABLE IF NOT EXISTS pro_settings (
+			id INTEGER PRIMARY KEY CHECK (id = 1), profile TEXT NOT NULL,
+			encrypted_sub2_password TEXT NOT NULL DEFAULT '', encrypted_cpa_key TEXT NOT NULL DEFAULT ''
+		);
+		CREATE TABLE IF NOT EXISTS pro_oauth_sessions (
+			id TEXT PRIMARY KEY, profile TEXT NOT NULL, encrypted_verifier TEXT NOT NULL,
+			expires_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS pro_oauth_sessions_expires_at_idx ON pro_oauth_sessions(expires_at);
 		CREATE TABLE IF NOT EXISTS free_accounts (
 			id TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE, profile TEXT NOT NULL,
 			encrypted_source_token TEXT NOT NULL, encrypted_oauth_access_token TEXT NOT NULL DEFAULT '',
@@ -275,6 +284,25 @@ func (s *Store) MailAccounts() []model.MailAccountProfile {
 	return result
 }
 
+func (s *Store) MailAccountsByManagementScope(scope string) []model.MailAccountProfile {
+	scope = normalizeMailManagementScope(scope)
+	accounts := s.MailAccounts()
+	result := make([]model.MailAccountProfile, 0, len(accounts))
+	for _, account := range accounts {
+		if normalizeMailManagementScope(account.ManagementScope) == scope {
+			result = append(result, account)
+		}
+	}
+	return result
+}
+
+func normalizeMailManagementScope(scope string) string {
+	if strings.EqualFold(strings.TrimSpace(scope), "pro") {
+		return "pro"
+	}
+	return "mail"
+}
+
 func mailProfileWithCredentials(p model.MailAccountProfile, c model.MailAccountCredentials) model.MailAccountProfile {
 	c.MailPassword = cleanImportedCredential(c.MailPassword)
 	c.ClientID = cleanImportedCredential(c.ClientID)
@@ -284,6 +312,8 @@ func mailProfileWithCredentials(p model.MailAccountProfile, c model.MailAccountC
 	c.TotpSecret = cleanImportedCredential(c.TotpSecret)
 	c.AccessToken = cleanImportedCredential(c.AccessToken)
 	c.RefreshToken = cleanImportedCredential(c.RefreshToken)
+	c.IDToken = cleanImportedCredential(c.IDToken)
+	c.ChatGPTSession = cleanImportedCredential(c.ChatGPTSession)
 	p.MailPasswordPresent = strings.TrimSpace(c.MailPassword) != ""
 	p.ClientIDPresent = strings.TrimSpace(c.ClientID) != ""
 	p.MailRefreshPresent = strings.TrimSpace(c.MailRefreshToken) != ""
@@ -292,6 +322,8 @@ func mailProfileWithCredentials(p model.MailAccountProfile, c model.MailAccountC
 	p.TotpSecretPresent = strings.TrimSpace(c.TotpSecret) != ""
 	p.AccessTokenPresent = strings.TrimSpace(c.AccessToken) != ""
 	p.RefreshTokenPresent = strings.TrimSpace(c.RefreshToken) != ""
+	p.IDTokenPresent = strings.TrimSpace(c.IDToken) != ""
+	p.ChatGPTSessionPresent = strings.TrimSpace(c.ChatGPTSession) != ""
 	switch {
 	case p.PickupURLPresent:
 		p.LoginMethod = "directurl"
@@ -335,7 +367,10 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 			var old model.MailAccountProfile
 			_ = json.Unmarshal([]byte(oldProfile), &old)
 			profile.CreatedAt = old.CreatedAt
+			profile.ManagementScope, profile.ProManagedAt = old.ManagementScope, old.ProManagedAt
 			profile.ChatGPTStatus, profile.ChatGPTStatusMessage, profile.ChatGPTStatusAt = old.ChatGPTStatus, old.ChatGPTStatusMessage, old.ChatGPTStatusAt
+			preserveMailPlanCheck(&profile, old)
+			preserveProProfile(&profile, old)
 			if profile.RegistrationStatus == "" {
 				profile.RegistrationStatus, profile.RegistrationLastError = old.RegistrationStatus, old.RegistrationLastError
 			}
@@ -354,7 +389,10 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 		var old model.MailAccountProfile
 		_ = json.Unmarshal([]byte(oldProfile), &old)
 		profile.CreatedAt = old.CreatedAt
+		profile.ManagementScope, profile.ProManagedAt = old.ManagementScope, old.ProManagedAt
 		profile.ChatGPTStatus, profile.ChatGPTStatusMessage, profile.ChatGPTStatusAt = old.ChatGPTStatus, old.ChatGPTStatusMessage, old.ChatGPTStatusAt
+		preserveMailPlanCheck(&profile, old)
+		preserveProProfile(&profile, old)
 		if profile.RegistrationStatus == "" {
 			profile.RegistrationStatus, profile.RegistrationLastError = old.RegistrationStatus, old.RegistrationLastError
 		}
@@ -376,6 +414,8 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 	profile.TotpSecretPresent = credentials.TotpSecret != ""
 	profile.AccessTokenPresent = credentials.AccessToken != ""
 	profile.RefreshTokenPresent = credentials.RefreshToken != ""
+	profile.IDTokenPresent = credentials.IDToken != ""
+	profile.ChatGPTSessionPresent = credentials.ChatGPTSession != ""
 	switch {
 	case credentials.PickupURL != "":
 		profile.LoginMethod = "directurl"
@@ -392,6 +432,70 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return model.MailAccountProfile{}, errors.New("邮箱账号已存在")
 		}
+		return model.MailAccountProfile{}, err
+	}
+	return profile, nil
+}
+
+func preserveMailPlanCheck(profile *model.MailAccountProfile, old model.MailAccountProfile) {
+	profile.CurrentPlanType = old.CurrentPlanType
+	profile.SubscriptionPlan = old.SubscriptionPlan
+	profile.HasActiveSubscription = old.HasActiveSubscription
+	profile.PlusTrialEligible = old.PlusTrialEligible
+	profile.PlanCheckStatus = old.PlanCheckStatus
+	profile.PlanCheckedAt = old.PlanCheckedAt
+	profile.PlanLastSuccessAt = old.PlanLastSuccessAt
+	profile.PlanCheckHTTPStatus = old.PlanCheckHTTPStatus
+	profile.PlanCheckError = old.PlanCheckError
+	profile.PlanExpiresAt = old.PlanExpiresAt
+	profile.PlanRenewsAt = old.PlanRenewsAt
+	profile.BillingPeriod = old.BillingPeriod
+	profile.BillingCurrency = old.BillingCurrency
+}
+
+func preserveProProfile(profile *model.MailAccountProfile, old model.MailAccountProfile) {
+	profile.OAuthStatus, profile.OAuthAccountID, profile.OAuthUserID = old.OAuthStatus, old.OAuthAccountID, old.OAuthUserID
+	profile.OAuthExpiresAt, profile.OAuthAuthorizedAt = old.OAuthExpiresAt, old.OAuthAuthorizedAt
+	profile.PushProvider, profile.PushStatus = old.PushProvider, old.PushStatus
+	profile.Sub2AccountID, profile.Sub2AccountName, profile.CPAAuthFileName = old.Sub2AccountID, old.Sub2AccountName, old.CPAAuthFileName
+	profile.Quota5H, profile.Quota7D, profile.QuotaStatus, profile.QuotaCheckedAt = old.Quota5H, old.Quota7D, old.QuotaStatus, old.QuotaCheckedAt
+	profile.SpaceMergedOnce, profile.SpaceMergedAt = old.SpaceMergedOnce, old.SpaceMergedAt
+	profile.TargetAdminID, profile.TargetTeamID, profile.TargetSeatType = old.TargetAdminID, old.TargetTeamID, old.TargetSeatType
+	profile.InviteStatus, profile.AcceptStatus, profile.TransferStatus, profile.RemoveStatus = old.InviteStatus, old.AcceptStatus, old.TransferStatus, old.RemoveStatus
+	profile.ProLastError, profile.ProWorkflowRunning = old.ProLastError, old.ProWorkflowRunning
+}
+
+func (s *Store) UpdateMailAccountManagementScope(email, scope string) (model.MailAccountProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	email = strings.ToLower(strings.TrimSpace(email))
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope != "mail" && scope != "pro" {
+		return model.MailAccountProfile{}, errors.New("账号归属只能是 mail 或 pro")
+	}
+	var raw string
+	if err := s.db.QueryRow("SELECT profile FROM mail_accounts WHERE email=?", email).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.MailAccountProfile{}, errors.New("邮箱账号不存在")
+		}
+		return model.MailAccountProfile{}, err
+	}
+	var profile model.MailAccountProfile
+	if err := json.Unmarshal([]byte(raw), &profile); err != nil {
+		return model.MailAccountProfile{}, err
+	}
+	now := time.Now()
+	profile.ManagementScope, profile.UpdatedAt = scope, now
+	if scope == "pro" {
+		profile.ProManagedAt = &now
+	} else {
+		profile.ProManagedAt = nil
+	}
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		return model.MailAccountProfile{}, err
+	}
+	if _, err = s.db.Exec("UPDATE mail_accounts SET profile=?, updated_at=? WHERE email=?", string(encoded), formatTime(now), email); err != nil {
 		return model.MailAccountProfile{}, err
 	}
 	return profile, nil
@@ -425,6 +529,8 @@ func (s *Store) MailAccountCredential(email string) (model.MailAccountProfile, m
 	c.TotpSecret = cleanImportedCredential(c.TotpSecret)
 	c.AccessToken = cleanImportedCredential(c.AccessToken)
 	c.RefreshToken = cleanImportedCredential(c.RefreshToken)
+	c.IDToken = cleanImportedCredential(c.IDToken)
+	c.ChatGPTSession = cleanImportedCredential(c.ChatGPTSession)
 	p = mailProfileWithCredentials(p, c)
 	return p, c, nil
 }
@@ -434,6 +540,12 @@ func (s *Store) MailAccountCredential(email string) (model.MailAccountProfile, m
 // mail-management screen reads mail_accounts, so both projections must stay
 // synchronized.
 func (s *Store) SaveMailAccountOAuth(email, accessToken, refreshToken string) error {
+	return s.SaveMailAccountOAuthBundle(email, accessToken, refreshToken, "", "", "", time.Time{})
+}
+
+// SaveMailAccountOAuthBundle atomically stores a Codex OAuth token bundle and
+// its non-secret identity projection. A blank rotated RT keeps the old RT.
+func (s *Store) SaveMailAccountOAuthBundle(email, accessToken, refreshToken, idToken, accountID, userID string, expiresAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -466,8 +578,22 @@ func (s *Store) SaveMailAccountOAuth(email, accessToken, refreshToken string) er
 	if strings.TrimSpace(refreshToken) != "" {
 		credentials.RefreshToken = strings.TrimSpace(refreshToken)
 	}
+	if strings.TrimSpace(idToken) != "" {
+		credentials.IDToken = strings.TrimSpace(idToken)
+	}
 	profile = mailProfileWithCredentials(profile, credentials)
-	profile.UpdatedAt = time.Now()
+	now := time.Now()
+	profile.OAuthStatus, profile.OAuthAuthorizedAt = "completed", &now
+	if strings.TrimSpace(accountID) != "" {
+		profile.OAuthAccountID = strings.TrimSpace(accountID)
+	}
+	if strings.TrimSpace(userID) != "" {
+		profile.OAuthUserID = strings.TrimSpace(userID)
+	}
+	if !expiresAt.IsZero() {
+		profile.OAuthExpiresAt = &expiresAt
+	}
+	profile.ProLastError, profile.UpdatedAt = "", now
 	sealed, err := s.encrypt(mustJSON(credentials))
 	if err != nil {
 		return err
@@ -547,6 +673,54 @@ func (s *Store) UpdateMailAccountATStatus(email string, checkedAt time.Time, val
 		return model.MailAccountProfile{}, err
 	}
 	return p, nil
+}
+
+func (s *Store) UpdateMailAccountPlanCheck(email string, result model.AccountPlanCheckResult) (model.MailAccountProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var raw string
+	if err := s.db.QueryRow("SELECT profile FROM mail_accounts WHERE email=?", strings.ToLower(strings.TrimSpace(email))).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.MailAccountProfile{}, errors.New("邮箱账号不存在")
+		}
+		return model.MailAccountProfile{}, err
+	}
+	var profile model.MailAccountProfile
+	if err := json.Unmarshal([]byte(raw), &profile); err != nil {
+		return model.MailAccountProfile{}, err
+	}
+	checkedAt := result.CheckedAt
+	if checkedAt.IsZero() {
+		checkedAt = time.Now()
+	}
+	profile.PlanCheckedAt = &checkedAt
+	profile.PlanCheckHTTPStatus = result.HTTPStatus
+	profile.UpdatedAt = time.Now()
+	if result.OK {
+		profile.CurrentPlanType = strings.TrimSpace(result.CurrentPlanType)
+		profile.SubscriptionPlan = strings.TrimSpace(result.SubscriptionPlan)
+		profile.HasActiveSubscription = result.HasActiveSubscription
+		profile.PlusTrialEligible = result.PlusTrialEligible
+		profile.PlanExpiresAt = strings.TrimSpace(result.ExpiresAt)
+		profile.PlanRenewsAt = strings.TrimSpace(result.RenewsAt)
+		profile.BillingPeriod = strings.TrimSpace(result.BillingPeriod)
+		profile.BillingCurrency = strings.TrimSpace(result.BillingCurrency)
+		profile.PlanCheckStatus, profile.PlanCheckError = "success", ""
+		profile.PlanLastSuccessAt = &checkedAt
+	} else {
+		// Keep the last successful plan visible while surfacing this attempt's
+		// error, matching turb's account-list behavior.
+		profile.PlanCheckStatus = "failed"
+		profile.PlanCheckError = strings.TrimSpace(result.Error)
+	}
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		return model.MailAccountProfile{}, err
+	}
+	if _, err = s.db.Exec("UPDATE mail_accounts SET profile=?, updated_at=? WHERE email=?", string(encoded), formatTime(profile.UpdatedAt), profile.Email); err != nil {
+		return model.MailAccountProfile{}, err
+	}
+	return profile, nil
 }
 
 func (s *Store) DeleteMailAccount(email string) error {

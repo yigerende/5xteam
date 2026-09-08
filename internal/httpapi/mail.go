@@ -22,6 +22,19 @@ import (
 var mailSecretFields = []string{
 	"mail_password", "client_id", "mail_refresh_token", "gpt_password", "totp_secret",
 	"pickup_url", "access_token", "refresh_token", "id_token", "session_token",
+	"chatgpt_session",
+}
+
+func mailSecretPresent(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case nil:
+		return false
+	default:
+		encoded, err := json.Marshal(typed)
+		return err == nil && string(encoded) != "null" && string(encoded) != "{}" && string(encoded) != "[]"
+	}
 }
 
 func importedString(raw map[string]any, key string) string {
@@ -46,8 +59,7 @@ func redactMailPayload(value any) {
 	case map[string]any:
 		for _, key := range mailSecretFields {
 			if raw, ok := typed[key]; ok {
-				text, _ := raw.(string)
-				typed[key+"_present"] = strings.TrimSpace(text) != ""
+				typed[key+"_present"] = mailSecretPresent(raw)
 				delete(typed, key)
 			}
 		}
@@ -72,7 +84,7 @@ func (s *Server) mailStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listMailAccounts(w http.ResponseWriter, r *http.Request) {
 	// 邮箱管理属于 Space Console 自身数据，不再依赖外部管理器。
-	if local := s.store.MailAccounts(); local != nil {
+	if local := s.store.MailAccountsByManagementScope("mail"); local != nil {
 		query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
 		items := make([]any, 0, len(local))
 		for _, item := range local {
@@ -133,7 +145,7 @@ func (s *Server) checkMailAccountsAT(w http.ResponseWriter, r *http.Request) {
 	}
 	emails := input.Emails
 	if len(emails) == 0 {
-		for _, account := range s.store.MailAccounts() {
+		for _, account := range s.store.MailAccountsByManagementScope("mail") {
 			emails = append(emails, account.Email)
 		}
 	}
@@ -224,7 +236,7 @@ func (s *Server) startMailFetch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(emails) == 0 {
-		for _, a := range s.store.MailAccounts() {
+		for _, a := range s.store.MailAccountsByManagementScope("mail") {
 			emails = append(emails, a.Email)
 		}
 	}
@@ -497,6 +509,7 @@ func (s *Server) exportMailAccountCredentials(w http.ResponseWriter, r *http.Req
 			"access_token":       credentials.AccessToken,
 			"refresh_token":      credentials.RefreshToken,
 			"chatgpt_account_id": credentials.AccountID,
+			"chatgpt_session":    chatGPTSessionValue(credentials.ChatGPTSession),
 		}, "")
 	case "cpa":
 		if credentials.RefreshToken == "" {
@@ -912,13 +925,25 @@ type mailGPTCredentials struct {
 	AccountID        string `json:"account_id"`
 	ChatGPTAccountID string `json:"chatgpt_account_id"`
 	OpenAIAccountID  string `json:"openai_account_id"`
+	ChatGPTSession   string `json:"chatgpt_session"`
+}
+
+func chatGPTSessionValue(raw string) any {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var value any
+	if json.Unmarshal([]byte(raw), &value) == nil {
+		return value
+	}
+	return raw
 }
 
 func (s *Server) loadMailGPTCredentials(ctx context.Context, email string) (mailGPTCredentials, error) {
 	// Prefer credentials owned by this application. This keeps Team import and
 	// credential export functional when the standalone mail manager is absent.
 	if _, local, localErr := s.store.MailAccountCredential(email); localErr == nil && strings.TrimSpace(local.AccessToken) != "" {
-		result := mailGPTCredentials{Email: strings.TrimSpace(local.Email), GPTPassword: strings.TrimSpace(local.GptPassword), AccessToken: strings.TrimSpace(local.AccessToken), RefreshToken: strings.TrimSpace(local.RefreshToken)}
+		result := mailGPTCredentials{Email: strings.TrimSpace(local.Email), GPTPassword: strings.TrimSpace(local.GptPassword), AccessToken: strings.TrimSpace(local.AccessToken), RefreshToken: strings.TrimSpace(local.RefreshToken), ChatGPTSession: strings.TrimSpace(local.ChatGPTSession)}
 		// Older records may have OAuth RT only in free_accounts. Fall back to
 		// that projection so export remains usable after an upgrade.
 		if result.RefreshToken == "" {
