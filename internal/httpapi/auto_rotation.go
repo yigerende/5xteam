@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -43,7 +44,47 @@ func (s *Server) listAutoRotationTasks(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, 200, s.store.AutoRotationTasks(r.PathValue("id")), "")
 }
 func (s *Server) listAutoRotationEvents(w http.ResponseWriter, r *http.Request) {
-	writeAPI(w, 200, s.store.AutoRotationEvents(r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id")), "")
+	writeAPI(w, 200, redactExecutionEvents(s.store.AutoRotationEvents(r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id"))), "")
+}
+
+type executionLogExport struct {
+	ExportedAt    time.Time                 `json:"exported_at"`
+	Retention     string                    `json:"retention"`
+	Account       *model.FreeAccountProfile `json:"account,omitempty"`
+	LifecycleTask *model.AutoRotationTask   `json:"lifecycle_task,omitempty"`
+	Events        []model.AutoRotationEvent `json:"events"`
+}
+
+var logFilePartPattern = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+func writeExecutionLogExport(w http.ResponseWriter, filename string, payload executionLogExport) {
+	filename = strings.Trim(logFilePartPattern.ReplaceAllString(filename, "-"), "-.")
+	if filename == "" {
+		filename = "execution-logs"
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.json"`, filename))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func redactExecutionEvents(events []model.AutoRotationEvent) []model.AutoRotationEvent {
+	result := make([]model.AutoRotationEvent, len(events))
+	for i, event := range events {
+		event.Request = redactMap(event.Request)
+		event.Response = redactMap(event.Response)
+		event.Details = redactMap(event.Details)
+		result[i] = event
+	}
+	return result
+}
+
+func (s *Server) exportAutoRotationEvents(w http.ResponseWriter, r *http.Request) {
+	events := redactExecutionEvents(s.store.AutoRotationEvents(r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id")))
+	writeExecutionLogExport(w, "team-execution-logs-"+time.Now().Format("20060102-150405"), executionLogExport{
+		ExportedAt: time.Now(), Retention: "48h", Events: events,
+	})
 }
 func (s *Server) triggerAutoRotation(w http.ResponseWriter, r *http.Request) {
 	run, started, err := s.startAutoRotation(r.Context(), "manual")
@@ -550,12 +591,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 		return s.invokeFreeHandler(taskCtx, "join", task.AccountID, map[string]any{"admin_account_id": task.AdminAccountID, "seat_type": "prolite"})
 	}); err != nil {
 		step("invite", "failed", err.Error())
-		if task.ReservationID != "" {
-			if profile, _, profileErr := s.store.FreeAccountCredential(task.AccountID); profileErr == nil && profile.AcceptStatus != "completed" {
-				_ = s.store.ReleaseSeatReservation(task.ReservationID)
-				s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "seat_released", Source: "auto_rotation", Operation: "invite", Stage: "invite", Message: "邀请失败且账号未进入空间，释放席位"})
-			}
-		}
+		s.cleanupFailedAutoTask(taskCtx, &task, "invite", err)
 		runMu.Lock()
 		run.Failed++
 		runMu.Unlock()
@@ -565,6 +601,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 	step("oauth", "running", "")
 	if err := attemptStep(func() error { return s.autoOAuth(taskCtx, task.AccountID) }); err != nil {
 		step("oauth", "failed", err.Error())
+		s.cleanupFailedAutoTask(taskCtx, &task, "oauth", err)
 		runMu.Lock()
 		run.Failed++
 		runMu.Unlock()
@@ -574,6 +611,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 	step("push", "running", "")
 	if err := attemptStep(func() error { return s.invokeFreeHandler(taskCtx, "push", task.AccountID, nil) }); err != nil {
 		step("push", "failed", err.Error())
+		s.cleanupFailedAutoTask(taskCtx, &task, "push", err)
 		runMu.Lock()
 		run.Failed++
 		runMu.Unlock()
@@ -583,6 +621,7 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 	step("quota", "running", "")
 	if err := attemptStep(func() error { return s.invokeFreeHandler(taskCtx, "quota", task.AccountID, nil) }); err != nil {
 		step("quota", "failed", err.Error())
+		s.cleanupFailedAutoTask(taskCtx, &task, "quota", err)
 		runMu.Lock()
 		run.Failed++
 		runMu.Unlock()
@@ -613,6 +652,80 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 	runMu.Lock()
 	run.Succeeded++
 	runMu.Unlock()
+}
+
+// cleanupFailedAutoTask runs only after all configured retries for a step have
+// been exhausted. Accounts that reached the Team space are removed immediately
+// so a broken OAuth/push/quota flow cannot continue consuming a 5x seat.
+func (s *Server) cleanupFailedAutoTask(ctx context.Context, task *model.AutoRotationTask, failedStage string, cause error) {
+	profile, _, err := s.store.FreeAccountCredential(task.AccountID)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	task.CompletedAt = &now
+	task.Status = "failed"
+	task.CurrentStep = failedStage
+	task.Error = cause.Error()
+	if profile.AcceptStatus != "completed" || profile.RemoveStatus == "completed" {
+		if task.ReservationID != "" && task.SeatReserved {
+			if releaseErr := s.store.ReleaseSeatReservation(task.ReservationID); releaseErr == nil {
+				task.SeatReserved = false
+				s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "seat_released", Source: "auto_rotation", Operation: failedStage, Stage: failedStage, Message: "自动轮转失败且账号未进入空间，释放席位预占"})
+			}
+		}
+		_ = s.store.UpdateAutoRotationTask(*task)
+		return
+	}
+
+	removeStep := -1
+	for i := range task.Steps {
+		if task.Steps[i].Key == "remove" {
+			removeStep = i
+			break
+		}
+	}
+	if removeStep < 0 {
+		task.Steps = append(task.Steps, model.AutoRotationStep{Key: "remove", Name: "失败后移出空间"})
+		removeStep = len(task.Steps) - 1
+	}
+	task.Steps[removeStep].Status = "running"
+	task.Steps[removeStep].Message = "自动轮转重试耗尽，正在移出空间"
+	task.Steps[removeStep].StartedAt = &now
+	task.CurrentStep = "remove"
+	_ = s.store.UpdateAutoRotationTask(*task)
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID,
+		Type: "auto_failure_remove_start", Source: "auto_rotation", Operation: "remove", Stage: "remove", Level: "error",
+		Message: "自动轮转重试耗尽，开始自动移出空间", Details: map[string]any{"failed_stage": failedStage, "error": cause.Error()},
+	})
+
+	_, removeErr := s.performFreeAccountRemove(ctx, task.AccountID)
+	completedAt := time.Now()
+	task.CompletedAt = &completedAt
+	task.Status = "failed"
+	if removeErr != nil {
+		task.Error = fmt.Sprintf("%s；自动移出空间失败：%v", cause.Error(), removeErr)
+		task.Steps[removeStep].Status = "failed"
+		task.Steps[removeStep].Message = removeErr.Error()
+		s.enqueueAuditEvent(model.AutoRotationEvent{
+			RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID,
+			Type: "auto_failure_remove_failed", Source: "auto_rotation", Operation: "remove", Stage: "remove", Level: "error",
+			Message: "自动轮转失败后自动移出空间失败", Details: map[string]any{"failed_stage": failedStage, "flow_error": cause.Error(), "remove_error": removeErr.Error()},
+		})
+	} else {
+		task.Error = cause.Error() + "；账号已自动移出空间"
+		task.SeatReserved = false
+		task.Steps[removeStep].Status = "completed"
+		task.Steps[removeStep].Message = "已自动移出空间"
+		s.enqueueAuditEvent(model.AutoRotationEvent{
+			RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID,
+			Type: "auto_failure_remove_success", Source: "auto_rotation", Operation: "remove", Stage: "remove", Level: "error",
+			Message: "自动轮转失败账号已自动移出空间", Details: map[string]any{"failed_stage": failedStage, "flow_error": cause.Error()},
+		})
+	}
+	task.Steps[removeStep].CompletedAt = &completedAt
+	_ = s.store.UpdateAutoRotationTask(*task)
 }
 
 func (s *Server) invokeFreeHandler(ctx context.Context, op, id string, body map[string]any) error {

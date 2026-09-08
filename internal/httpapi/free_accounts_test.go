@@ -26,9 +26,14 @@ func TestCPAAccountNameAndPayload(t *testing.T) {
 		t.Fatalf("unexpected CPA relogin account name: %q", reloginName)
 	}
 	payload := buildCPAAuthPayloadNamed(profile, store.FreeAccountCredentials{OAuthAccessToken: "at", OAuthRefreshToken: "rt"}, nil, name)
-	if payload["name"] != name || payload["plan_type"] != "team" {
+	if payload["name"] != name || payload["plan_type"] != downstreamProlitePlanType || payload["chatgpt_plan_type"] != downstreamProlitePlanType {
 		encoded, _ := json.Marshal(payload)
 		t.Fatalf("payload name/plan type mismatch: %s", encoded)
+	}
+	sub2Credentials := buildSub2OAuthCredentials(profile, store.FreeAccountCredentials{OAuthAccessToken: "at", OAuthRefreshToken: "rt"})
+	if sub2Credentials["plan_type"] != downstreamProlitePlanType || sub2Credentials["chatgpt_plan_type"] != downstreamProlitePlanType {
+		encoded, _ := json.Marshal(sub2Credentials)
+		t.Fatalf("Sub2 credentials plan type mismatch: %s", encoded)
 	}
 }
 
@@ -293,6 +298,39 @@ func TestOrdinaryOAuthFailureDoesNotRemoveAccount(t *testing.T) {
 	}
 	if got.Dead || got.RemoveStatus != "pending" || got.OAuthStatus != "failed" || got.Status != "oauth_failed" {
 		t.Fatalf("ordinary OAuth error must remain retryable: %+v", got)
+	}
+}
+
+func TestReloginOAuthCompletionWritesNewTokensToMailAccount(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	if _, err := dataStore.SaveMailAccount(model.MailAccountProfile{Email: "relogin-sync@example.com"}, model.MailAccountCredentials{
+		Email: "relogin-sync@example.com", AccessToken: "old-at", RefreshToken: "old-rt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	account, _, err := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "relogin-sync@example.com", UserID: "relogin-sync-user"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(dataStore, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	server.oauthJobs["job-relogin-sync"] = map[string]any{"trigger": "relogin", "status": "running"}
+	server.finishOAuthJob("job-relogin-sync", account.ID, map[string]any{
+		"success": true, "access_token": "new-at", "refresh_token": "new-rt", "account_id": "oauth-account",
+	}, nil)
+	_, credentials, err := dataStore.MailAccountCredential(account.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.AccessToken != "new-at" || credentials.RefreshToken != "new-rt" {
+		t.Fatalf("mail credentials were not replaced after relogin: at=%q rt=%q", credentials.AccessToken, credentials.RefreshToken)
 	}
 }
 

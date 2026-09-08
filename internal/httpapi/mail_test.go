@@ -1,10 +1,18 @@
 package httpapi
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/store"
 )
 
 func TestRedactMailPayloadRemovesSecretsRecursively(t *testing.T) {
@@ -169,6 +177,69 @@ func TestCodexOAuthLoginInputCanDisablePhoneFallback(t *testing.T) {
 	}
 }
 
+func TestMailOAuthCompletionSavesTokensWithoutTeamAccount(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	const email = "mail-only@example.com"
+	if _, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: email}, model.MailAccountCredentials{
+		Email: email, PickupURL: "https://mail.example/pickup", AccessToken: "old-at", RefreshToken: "old-rt",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: dataStore, oauthJobs: map[string]map[string]any{
+		"mail-job": {"job_id": "mail-job", "email": email, "status": "running"},
+	}}
+	server.finishMailAccountOAuthJob("mail-job", email, map[string]any{
+		"success": true, "access_token": "new-at", "refresh_token": "new-rt",
+	}, nil)
+	_, credentials, err := dataStore.MailAccountCredential(email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.AccessToken != "new-at" || credentials.RefreshToken != "new-rt" {
+		t.Fatalf("mail OAuth credentials were not saved: at=%q rt=%q", credentials.AccessToken, credentials.RefreshToken)
+	}
+	if accounts := dataStore.FreeAccounts(); len(accounts) != 0 {
+		t.Fatalf("mail OAuth must not create a Team account: %#v", accounts)
+	}
+	if status := server.oauthJobs["mail-job"]["status"]; status != "success" {
+		t.Fatalf("job status = %#v, want success", status)
+	}
+}
+
+func TestMailOAuthDeadResultMarksMailboxWithoutTeamRemoval(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	const email = "mail-dead@example.com"
+	if _, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: email}, model.MailAccountCredentials{
+		Email: email, PickupURL: "https://mail.example/pickup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: dataStore, oauthJobs: map[string]map[string]any{
+		"dead-job": {"job_id": "dead-job", "email": email, "status": "running"},
+	}}
+	server.finishMailAccountOAuthJob("dead-job", email, map[string]any{
+		"success": false, "dead": true, "error_code": "account_deactivated", "error": "account_deactivated",
+	}, nil)
+	profile, _, err := dataStore.MailAccountCredential(email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.ChatGPTStatus != "dead" || profile.RegistrationStatus != "dead" {
+		t.Fatalf("mail account was not marked dead: %+v", profile)
+	}
+	if accounts := dataStore.FreeAccounts(); len(accounts) != 0 {
+		t.Fatalf("mail-only dead handling must not create/remove Team accounts: %#v", accounts)
+	}
+}
+
 func TestBuildCPACredentialExportMatchesGPTAccountManagerShape(t *testing.T) {
 	expiresAt := time.Unix(1_800_000_000, 0).UTC()
 	exportedAt := time.Unix(1_700_000_000, 0).UTC()
@@ -209,5 +280,171 @@ func TestBuildSub2CredentialExportMatchesGPTAccountManagerShape(t *testing.T) {
 	credentials, ok := account["credentials"].(map[string]any)
 	if !ok || credentials["access_token"] != "at" || credentials["refresh_token"] != "rt" || credentials["chatgpt_account_id"] != "account-1" {
 		t.Fatalf("unexpected credentials: %#v", account["credentials"])
+	}
+}
+
+func TestBuildCPABatchCredentialArchiveContainsOneJSONPerAccount(t *testing.T) {
+	exportedAt := time.Unix(1_700_000_000, 0).UTC()
+	archiveBytes, err := buildCPABatchCredentialArchive([]preparedMailCredentialExport{
+		{Credentials: mailGPTCredentials{Email: "first@example.com", AccessToken: "at-1", RefreshToken: "rt-1"}},
+		{Credentials: mailGPTCredentials{Email: "second@example.com", AccessToken: "at-2", RefreshToken: "rt-2"}},
+	}, exportedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(archiveBytes), int64(len(archiveBytes)))
+	if err != nil {
+		t.Fatalf("open CPA ZIP: %v", err)
+	}
+	if len(reader.File) != 2 {
+		t.Fatalf("ZIP entries = %d, want 2", len(reader.File))
+	}
+	for index, entry := range reader.File {
+		if strings.ContainsAny(entry.Name, `/\\`) {
+			t.Fatalf("unsafe ZIP entry name %q", entry.Name)
+		}
+		stream, openErr := entry.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		var payload map[string]any
+		decodeErr := json.NewDecoder(stream).Decode(&payload)
+		_ = stream.Close()
+		if decodeErr != nil {
+			t.Fatalf("decode %s: %v", entry.Name, decodeErr)
+		}
+		wantRT := []string{"rt-1", "rt-2"}[index]
+		if payload["type"] != "codex" || payload["refresh_token"] != wantRT {
+			t.Fatalf("unexpected CPA payload in %s: %#v", entry.Name, payload)
+		}
+	}
+}
+
+func TestBuildSub2BatchCredentialExportCombinesAccounts(t *testing.T) {
+	payload := buildSub2BatchCredentialExport([]preparedMailCredentialExport{
+		{Credentials: mailGPTCredentials{Email: "first@example.com", AccessToken: "at-1", RefreshToken: "rt-1"}},
+		{Credentials: mailGPTCredentials{Email: "second@example.com", AccessToken: "at-2", RefreshToken: "rt-2"}},
+	}, time.Unix(1_700_000_000, 0).UTC())
+	accounts, ok := payload["accounts"].([]any)
+	if !ok || len(accounts) != 2 {
+		t.Fatalf("accounts = %#v, want two accounts", payload["accounts"])
+	}
+	for index, raw := range accounts {
+		account, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("account %d = %#v", index, raw)
+		}
+		wantEmail := []string{"first@example.com", "second@example.com"}[index]
+		if account["name"] != wantEmail {
+			t.Fatalf("account %d name = %#v, want %q", index, account["name"], wantEmail)
+		}
+	}
+}
+
+func TestBatchCredentialExportRejectsMissingRT(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	for _, item := range []struct {
+		email string
+		rt    string
+	}{
+		{email: "ready@example.com", rt: "ready-rt"},
+		{email: "missing@example.com"},
+	} {
+		_, err = dataStore.SaveMailAccount(
+			model.MailAccountProfile{Email: item.email},
+			model.MailAccountCredentials{Email: item.email, AccessToken: "access-token", RefreshToken: item.rt},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	server := &Server{store: dataStore}
+	req := httptest.NewRequest(http.MethodPost, "/api/mail/accounts/credentials/export-batch", strings.NewReader(`{"emails":["ready@example.com","missing@example.com"],"format":"cpa"}`))
+	rec := httptest.NewRecorder()
+	server.exportMailAccountCredentialsBatch(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "missing@example.com") || !strings.Contains(rec.Body.String(), "尚未获取 Codex RT") {
+		t.Fatalf("missing account is not explained: %s", rec.Body.String())
+	}
+}
+
+func TestBatchCredentialExportResponses(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	for _, email := range []string{"first@example.com", "second@example.com"} {
+		_, err = dataStore.SaveMailAccount(
+			model.MailAccountProfile{Email: email},
+			model.MailAccountCredentials{Email: email, AccessToken: "at-" + email, RefreshToken: "rt-" + email},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := &Server{store: dataStore}
+
+	t.Run("CPA ZIP", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/mail/accounts/credentials/export-batch", strings.NewReader(`{"emails":["first@example.com","second@example.com"],"format":"cpa"}`))
+		rec := httptest.NewRecorder()
+		server.exportMailAccountCredentialsBatch(rec, req)
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/zip" {
+			t.Fatalf("unexpected response: status=%d type=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+		}
+		reader, zipErr := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+		if zipErr != nil || len(reader.File) != 2 {
+			t.Fatalf("invalid CPA ZIP: entries=%d err=%v", len(reader.File), zipErr)
+		}
+	})
+
+	t.Run("Sub2 JSON", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/mail/accounts/credentials/export-batch", strings.NewReader(`{"emails":["first@example.com","second@example.com"],"format":"sub2"}`))
+		rec := httptest.NewRecorder()
+		server.exportMailAccountCredentialsBatch(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "application/json") {
+			t.Fatalf("unexpected response: status=%d type=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if accounts, ok := payload["accounts"].([]any); !ok || len(accounts) != 2 {
+			t.Fatalf("accounts = %#v, want two", payload["accounts"])
+		}
+	})
+}
+
+func TestNormalizeBatchCredentialEmailsValidatesAndDeduplicates(t *testing.T) {
+	emails, err := normalizeBatchCredentialEmails([]string{" First@Example.com ", "first@example.com", "second@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(emails, ",") != "first@example.com,second@example.com" {
+		t.Fatalf("emails = %#v", emails)
+	}
+	if _, err = normalizeBatchCredentialEmails([]string{"../bad@example.com"}); err == nil {
+		t.Fatal("invalid email should be rejected")
+	}
+	tooMany := make([]string, 501)
+	for index := range tooMany {
+		tooMany[index] = fmt.Sprintf("account-%d@example.com", index)
+	}
+	if _, err = normalizeBatchCredentialEmails(tooMany); err == nil {
+		t.Fatal("more than 500 emails should be rejected")
+	}
+}
+
+func TestSafeCredentialExportFilenamePreventsPathTraversal(t *testing.T) {
+	name := safeCredentialExportFilename(`../folder\\account@example.com`)
+	if strings.ContainsAny(name, `/\\`) || strings.HasPrefix(name, ".") {
+		t.Fatalf("unsafe filename %q", name)
 	}
 }

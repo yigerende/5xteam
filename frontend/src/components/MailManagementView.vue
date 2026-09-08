@@ -13,6 +13,7 @@ import {
   BadgeCheck,
   Check,
   CheckCircle2,
+  ChevronDown,
   Circle,
   Copy,
   Download,
@@ -32,7 +33,7 @@ import {
   X,
   XCircle,
 } from "lucide-vue-next";
-import { api } from "../api";
+import { api, downloadFile } from "../api";
 import { parseMailAccountText } from "../mailImport.js";
 import { formatTime } from "../utils";
 import IconButton from "./IconButton.vue";
@@ -82,6 +83,15 @@ const loginDialog = reactive({
   logs: [],
   error: "",
   errorHint: "",
+});
+const batchLoginDialog = reactive({
+  open: false,
+  mode: "oauth",
+  total: 0,
+  finished: 0,
+  succeeded: 0,
+  failed: 0,
+  items: [],
 });
 const credentialDialog = reactive({
   open: false,
@@ -167,6 +177,12 @@ const loginDialogLatest = computed(
     [...loginDialog.logs].reverse().find((item) => item?.message)?.message ||
     "正在创建登录任务",
 );
+const batchLoginTerminal = computed(
+  () => batchLoginDialog.total > 0 && batchLoginDialog.finished >= batchLoginDialog.total,
+);
+const batchLoginTitle = computed(() =>
+  batchLoginDialog.mode === "oauth" ? "批量登录并获取 RT / AT" : "批量获取临时 AT",
+);
 const pipelineByEmail = computed(
   () =>
     new Map(
@@ -187,6 +203,28 @@ const pipelineStages = [
 
 function setMessage(text = "", type = "") {
   Object.assign(message, { text, type });
+}
+function terminalTaskStatus(task) {
+  return ["success", "failed", "cancelled", "challenge"].includes(task?.status) ||
+    ["success", "failed", "cancelled", "challenge"].includes(task?.state);
+}
+function batchTaskTone(task) {
+  if (task.status === "success") return "success";
+  if (terminalTaskStatus(task)) return "danger";
+  if (task.status === "queued" || task.state === "queued") return "pending";
+  return "running";
+}
+function batchTaskStatus(task) {
+  if (task.status === "success") return "成功";
+  if (task.status === "failed") return "失败";
+  if (task.status === "cancelled") return "已取消";
+  if (task.status === "challenge") return "需要处理";
+  if (task.status === "queued" || task.state === "queued") return "等待中";
+  return "执行中";
+}
+function batchTaskLatest(task) {
+  return [...(task.logs || [])].reverse().find((item) => item?.message)?.message ||
+    task.error || "等待任务返回执行步骤";
 }
 function methodLabel(account) {
   if (account.mailcom_fetch) return "mail.com";
@@ -590,6 +628,28 @@ async function removeSelectedAccounts() {
   }
 }
 
+async function exportSelectedCredentials(format) {
+  const targets = [...selectedAccounts.value];
+  if (!targets.length) return setMessage("请先勾选要导出的邮件账号", "error");
+  const label = format === "cpa" ? "CPA" : "Sub2";
+  busy.value = `export-${format}`;
+  try {
+    await downloadFile(
+      "/api/mail/accounts/credentials/export-batch",
+      format === "cpa" ? "cpa-accounts.zip" : "sub2-accounts.json",
+      {
+        method: "POST",
+        body: { emails: targets.map((account) => account.email), format },
+      },
+    );
+    setMessage(`已导出 ${targets.length} 个账号的 ${label} 凭据`, "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    busy.value = "";
+  }
+}
+
 async function openCredentialDialog(account) {
   Object.assign(credentialDialog, {
     open: true,
@@ -859,16 +919,15 @@ async function startAccountOAuthTask(account) {
   try {
     const started = await api(`/api/mail/accounts/${encodeURIComponent(account.email)}/oauth`, { method: "POST", body: {} });
     const job = started.job || started;
-    const accountID = started.account_id || job.account_id;
-    if (!job.job_id || !accountID) throw new Error(`${taskName}任务没有返回任务 ID`);
-    loginJobs[account.email] = { ...job, taskMode: "oauth", accountID, startedAt: Date.now() };
+    if (!job.job_id) throw new Error(`${taskName}任务没有返回任务 ID`);
+    loginJobs[account.email] = { ...job, taskMode: "oauth", startedAt: Date.now() };
     updateLoginDialog(account.email, job);
     setMessage(`${account.email}：正在登录并获取 RT / AT`);
     const timer = startTimer(async () => {
       try {
-        const result = await api(`/api/free-accounts/${encodeURIComponent(accountID)}/oauth/status/${encodeURIComponent(job.job_id)}`);
+        const result = await api(`/api/mail/oauth/${encodeURIComponent(job.job_id)}`);
         const current = result.job || result;
-        loginJobs[account.email] = { ...current, taskMode: "oauth", accountID, startedAt: loginJobs[account.email]?.startedAt || Date.now() };
+        loginJobs[account.email] = { ...current, taskMode: "oauth", startedAt: loginJobs[account.email]?.startedAt || Date.now() };
         updateLoginDialog(account.email, current);
         if (["success", "failed", "cancelled", "challenge"].includes(current.status) || ["success", "failed", "cancelled", "challenge"].includes(current.state)) {
           stopTimer(timer);
@@ -896,22 +955,23 @@ async function startAccountOAuthTask(account) {
     setMessage(`${account.email}：${error.message}`, "error");
   }
 }
-async function runMailTaskSilently(account, mode) {
+async function runMailTaskSilently(account, mode, onUpdate = () => {}) {
   const endpoint = mode === 'oauth'
     ? `/api/mail/accounts/${encodeURIComponent(account.email)}/oauth`
     : `/api/mail/accounts/${encodeURIComponent(account.email)}/login`;
   const started = await api(endpoint, { method: 'POST', body: {} });
   const first = started.job || started;
   if (!first.job_id) throw new Error('任务没有返回任务 ID');
-  const accountID = started.account_id || first.account_id;
+  onUpdate(first);
   const statusURL = mode === 'oauth'
-    ? `/api/free-accounts/${encodeURIComponent(accountID)}/oauth/status/${encodeURIComponent(first.job_id)}`
+    ? `/api/mail/oauth/${encodeURIComponent(first.job_id)}`
     : `/api/mail/login/${encodeURIComponent(first.job_id)}`;
   let job = first;
   while (!["success", "failed", "cancelled", "challenge"].includes(job.status) && !["success", "failed", "cancelled", "challenge"].includes(job.state)) {
     await new Promise((resolve) => window.setTimeout(resolve, 1800));
     const result = await api(statusURL);
     job = result.job || result;
+    onUpdate(job);
   }
   if (job.status !== 'success') throw new Error(job.error || job.error_hint || '任务执行失败');
   return job;
@@ -921,17 +981,43 @@ async function runSelectedMailTask(mode) {
   if (!targets.length) return setMessage("请先勾选邮件账号", "error");
   clearSelection();
   busy.value = `batch:${mode}`;
+  Object.assign(batchLoginDialog, {
+    open: true,
+    mode,
+    total: targets.length,
+    finished: 0,
+    succeeded: 0,
+    failed: 0,
+    items: targets.map((account, index) => ({
+      email: account.email,
+      status: "queued",
+      state: "queued",
+      logs: [],
+      error: "",
+      expanded: targets.length <= 5 || index === 0,
+    })),
+  });
   setMessage(`正在批量${mode === 'oauth' ? '登录并获取 RT / AT' : '获取临时 AT'}：0/${targets.length}`);
-  let completed = 0;
   const results = await Promise.all(targets.map(async (account) => {
+    const task = batchLoginDialog.items.find((item) => item.email === account.email);
     try {
-      await runMailTaskSilently(account, mode);
-      completed += 1;
-      setMessage(`正在批量${mode === 'oauth' ? '登录并获取 RT / AT' : '获取临时 AT'}：${completed}/${targets.length}`);
+      await runMailTaskSilently(account, mode, (job) => {
+        Object.assign(task, {
+          ...job,
+          logs: Array.isArray(job.logs) ? job.logs : task.logs,
+          error: job.error || "",
+        });
+      });
+      batchLoginDialog.succeeded += 1;
       return true;
     } catch (error) {
+      Object.assign(task, { status: "failed", state: "failed", error: error.message });
+      batchLoginDialog.failed += 1;
       setMessage(`${account.email}：${error.message}`, 'error');
       return false;
+    } finally {
+      batchLoginDialog.finished += 1;
+      setMessage(`正在批量${mode === 'oauth' ? '登录并获取 RT / AT' : '获取临时 AT'}：${batchLoginDialog.finished}/${targets.length}`);
     }
   }));
   busy.value = '';
@@ -1095,6 +1181,12 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             </button>
             <button class="btn danger" type="button" :disabled="!!busy || !selectedAccounts.length" @click="removeSelectedAccounts">
               <Trash2 :size="15" />批量删除<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span>
+            </button>
+            <button class="btn ghost" type="button" :disabled="!!busy || !selectedAccounts.length" @click="exportSelectedCredentials('cpa')">
+              <Download :size="15" />批量导出 CPA<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span>
+            </button>
+            <button class="btn ghost" type="button" :disabled="!!busy || !selectedAccounts.length" @click="exportSelectedCredentials('sub2')">
+              <Download :size="15" />批量导出 Sub2<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span>
             </button>
             <button class="btn ghost" type="button" :disabled="!!busy || !selectedAccounts.length" @click="runSelectedMailTask('login')">
               <KeyRound :size="15" />临时获取 AT<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span>
@@ -1654,6 +1746,97 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
       </section>
     </div>
 
+    <div v-if="batchLoginDialog.open" class="modal-backdrop login-dialog-backdrop">
+      <section
+        class="modal batch-login-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="batch-login-dialog-title"
+      >
+        <header class="login-dialog-header">
+          <div class="login-dialog-mark" :class="batchLoginTerminal ? (batchLoginDialog.failed ? 'danger' : 'success') : 'running'">
+            <CheckCircle2 v-if="batchLoginTerminal && !batchLoginDialog.failed" :size="21" />
+            <XCircle v-else-if="batchLoginTerminal" :size="21" />
+            <LoaderCircle v-else class="spin" :size="21" />
+          </div>
+          <div>
+            <span class="overline">BATCH CHATGPT LOGIN</span>
+            <h2 id="batch-login-dialog-title">{{ batchLoginTitle }}</h2>
+            <p>{{ batchLoginDialog.finished }} / {{ batchLoginDialog.total }} 已完成</p>
+          </div>
+          <StatusPill :tone="batchLoginTerminal ? (batchLoginDialog.failed ? 'danger' : 'success') : 'running'">
+            {{ batchLoginTerminal ? '执行完成' : '并发执行中' }}
+          </StatusPill>
+          <IconButton
+            v-if="batchLoginTerminal"
+            label="关闭批量任务详情"
+            @click="batchLoginDialog.open = false"
+          ><X :size="16" /></IconButton>
+        </header>
+
+        <div class="batch-login-summary">
+          <span>总数 <strong>{{ batchLoginDialog.total }}</strong></span>
+          <span>已完成 <strong>{{ batchLoginDialog.finished }}</strong></span>
+          <span class="success">成功 <strong>{{ batchLoginDialog.succeeded }}</strong></span>
+          <span :class="{ danger: batchLoginDialog.failed }">失败 <strong>{{ batchLoginDialog.failed }}</strong></span>
+        </div>
+        <div class="batch-login-progress" aria-hidden="true">
+          <i :style="{ width: `${batchLoginDialog.total ? (batchLoginDialog.finished / batchLoginDialog.total) * 100 : 0}%` }"></i>
+        </div>
+
+        <div class="batch-login-list">
+          <article v-for="task in batchLoginDialog.items" :key="task.email" class="batch-login-task">
+            <button class="batch-task-summary" type="button" @click="task.expanded = !task.expanded">
+              <span class="batch-task-state" :class="batchTaskTone(task)">
+                <CheckCircle2 v-if="task.status === 'success'" :size="15" />
+                <XCircle v-else-if="terminalTaskStatus(task)" :size="15" />
+                <LoaderCircle v-else-if="batchTaskTone(task) === 'running'" class="spin" :size="15" />
+                <Circle v-else :size="15" />
+              </span>
+              <span class="batch-task-copy">
+                <strong>{{ task.email }}</strong>
+                <small>{{ batchTaskLatest(task) }}</small>
+              </span>
+              <StatusPill :tone="batchTaskTone(task)">{{ batchTaskStatus(task) }}</StatusPill>
+              <ChevronDown :class="{ expanded: task.expanded }" :size="16" />
+            </button>
+            <div v-if="task.expanded" class="batch-task-details">
+              <ol class="login-timeline">
+                <li
+                  v-for="(item, index) in task.logs || []"
+                  :key="`${task.email}-${item.time}-${index}`"
+                  :class="item.level"
+                >
+                  <span class="timeline-icon">
+                    <XCircle v-if="item.level === 'error'" :size="15" />
+                    <LoaderCircle
+                      v-else-if="index === task.logs.length - 1 && !terminalTaskStatus(task)"
+                      class="spin"
+                      :size="15"
+                    />
+                    <CheckCircle2 v-else :size="15" />
+                  </span>
+                  <div>
+                    <span><strong>{{ logStep(item.step) }}</strong><time>{{ logTime(item.time) }}</time></span>
+                    <p>{{ item.message }}</p>
+                  </div>
+                </li>
+                <li v-if="!task.logs?.length">
+                  <span class="timeline-icon"><Circle :size="15" /></span>
+                  <div><p>{{ task.error || '等待任务返回执行步骤' }}</p></div>
+                </li>
+              </ol>
+              <p v-if="task.error" class="batch-task-error">{{ task.error }}</p>
+            </div>
+          </article>
+        </div>
+
+        <footer v-if="batchLoginTerminal" class="panel-actions login-dialog-actions">
+          <button class="btn primary" type="button" @click="batchLoginDialog.open = false">关闭</button>
+        </footer>
+      </section>
+    </div>
+
     <div v-if="loginDialog.open" class="modal-backdrop login-dialog-backdrop">
       <section
         class="modal login-dialog"
@@ -1673,7 +1856,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           </div>
           <div>
             <span class="overline">CHATGPT LOGIN</span>
-            <h2 id="login-dialog-title">登录并获取临时 AT</h2>
+            <h2 id="login-dialog-title">{{ loginDialog.mode === 'oauth' ? '登录并获取 RT / AT' : '登录并获取临时 AT' }}</h2>
             <p>{{ loginDialog.email }}</p>
           </div>
           <StatusPill :tone="loginDialogTone">{{
@@ -2183,6 +2366,131 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
   padding: 0;
   overflow: hidden;
 }
+.batch-login-dialog {
+  display: flex;
+  width: min(920px, 100%);
+  max-height: min(820px, calc(100vh - 40px));
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.batch-login-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(90px, 1fr));
+  gap: 1px;
+  border-bottom: 1px solid var(--line);
+  background: var(--line);
+}
+.batch-login-summary span {
+  display: flex;
+  min-height: 46px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10px;
+}
+.batch-login-summary strong {
+  color: var(--text-2);
+  font-size: 13px;
+}
+.batch-login-summary .success strong {
+  color: var(--green-strong);
+}
+.batch-login-summary .danger strong {
+  color: var(--red);
+}
+.batch-login-progress {
+  flex: 0 0 3px;
+  overflow: hidden;
+  background: var(--surface-3);
+}
+.batch-login-progress i {
+  display: block;
+  height: 100%;
+  background: var(--green);
+  transition: width 0.25s ease;
+}
+.batch-login-list {
+  min-height: 280px;
+  overflow-y: auto;
+}
+.batch-login-task {
+  border-bottom: 1px solid var(--line-soft);
+}
+.batch-task-summary {
+  display: grid;
+  width: 100%;
+  min-height: 62px;
+  grid-template-columns: 22px minmax(0, 1fr) auto 20px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 20px;
+  border: 0;
+  background: var(--surface);
+  color: var(--text-2);
+  text-align: left;
+}
+.batch-task-summary:hover {
+  background: var(--surface-2);
+}
+.batch-task-summary > svg {
+  color: var(--muted);
+  transition: transform 0.18s ease;
+}
+.batch-task-summary > svg.expanded {
+  transform: rotate(180deg);
+}
+.batch-task-state {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+.batch-task-state.running,
+.batch-task-state.success {
+  color: var(--green-strong);
+}
+.batch-task-state.danger {
+  color: var(--red);
+}
+.batch-task-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.batch-task-copy strong,
+.batch-task-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-task-copy strong {
+  font-size: 11px;
+}
+.batch-task-copy small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.batch-task-details {
+  border-top: 1px solid var(--line-soft);
+  background: var(--surface-2);
+}
+.batch-task-details .login-timeline {
+  min-height: 0;
+  max-height: 300px;
+  padding: 8px 54px 12px;
+}
+.batch-task-details .timeline-icon {
+  background: var(--surface-2);
+}
+.batch-task-error {
+  margin: 0 54px 14px;
+  color: var(--red);
+  font-size: 10px;
+  line-height: 1.55;
+  word-break: break-word;
+}
 .login-dialog-header {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -2512,11 +2820,41 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
     width: 100%;
   }
   .login-dialog-header {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    position: relative;
+    grid-template-columns: auto minmax(0, 1fr);
+    padding-right: 52px;
   }
   .login-dialog-header > .status-pill {
-    grid-column: 1 / -1;
+    grid-column: 2;
     justify-self: start;
+  }
+  .login-dialog-header > .icon-button {
+    position: absolute;
+    top: 18px;
+    right: 14px;
+  }
+  .batch-login-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .batch-task-summary {
+    grid-template-columns: 20px minmax(0, 1fr) 18px;
+    padding: 9px 12px;
+  }
+  .batch-task-summary > .status-pill {
+    grid-column: 2;
+    justify-self: start;
+  }
+  .batch-task-summary > svg {
+    grid-column: 3;
+    grid-row: 1;
+  }
+  .batch-task-details .login-timeline {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+  .batch-task-error {
+    margin-right: 18px;
+    margin-left: 18px;
   }
 }
 </style>

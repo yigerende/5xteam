@@ -26,6 +26,8 @@ import (
 
 var errDeadAccountHandled = errors.New("dead account detected and removal handled")
 
+const downstreamProlitePlanType = "self_serve_business_prolite"
+
 func (s *Server) listFreeAccounts(w http.ResponseWriter, _ *http.Request) {
 	accounts := s.store.FreeAccounts()
 	for _, account := range accounts {
@@ -46,7 +48,25 @@ func (s *Server) listFreeAccountEvents(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusInternalServerError, nil, taskErr.Error())
 		return
 	}
-	writeAPI(w, http.StatusOK, map[string]any{"account": profile, "lifecycle_task": task, "events": s.store.AutoRotationEventsByAccount(id)}, "")
+	writeAPI(w, http.StatusOK, map[string]any{"account": profile, "lifecycle_task": task, "events": redactExecutionEvents(s.store.AutoRotationEventsByAccount(id))}, "")
+}
+
+func (s *Server) exportFreeAccountEvents(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	profile, _, err := s.store.FreeAccountCredential(id)
+	if err != nil {
+		writeAPI(w, http.StatusNotFound, nil, err.Error())
+		return
+	}
+	task, err := s.store.EnsureFreeAccountLifecycleTask(profile)
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	writeExecutionLogExport(w, "account-"+profile.Email+"-logs-"+time.Now().Format("20060102-150405"), executionLogExport{
+		ExportedAt: time.Now(), Retention: "48h", Account: &profile, LifecycleTask: &task,
+		Events: redactExecutionEvents(s.store.AutoRotationEventsByAccount(id)),
+	})
 }
 
 type freeAccountImportInput struct {
@@ -586,7 +606,6 @@ func (s *Server) runFreeAccountOAuth(jobID, accountID, email string) {
 // already holds the account mutex while deciding whether a Sub2 401 requires
 // reauthentication.
 func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
-
 	profile, creds, err := s.store.FreeAccountCredential(accountID)
 	if err != nil {
 		s.finishOAuthJob(jobID, accountID, nil, err)
@@ -596,11 +615,19 @@ func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
 		s.finishOAuthJob(jobID, accountID, nil, errors.New("账号缺少源 Access Token"))
 		return
 	}
-	mailProfile, mailCreds, err := s.store.MailAccountCredential(email)
-	_ = mailProfile
+	result, err := s.executeCodexOAuth(email, func(message string) {
+		s.updateOAuthJob(jobID, "running", message)
+	})
+	s.finishOAuthJob(jobID, accountID, result, err)
+	_ = profile
+}
+
+// executeCodexOAuth owns the protocol process only. Team OAuth and mailbox
+// OAuth share this exact implementation but persist their results separately.
+func (s *Server) executeCodexOAuth(email string, progress func(string)) (map[string]any, error) {
+	_, mailCreds, err := s.store.MailAccountCredential(email)
 	if err != nil || strings.TrimSpace(mailCreds.PickupURL) == "" {
-		s.finishOAuthJob(jobID, accountID, nil, errors.New("邮箱未配置取件链接"))
-		return
+		return nil, errors.New("邮箱未配置取件链接")
 	}
 	settings := s.store.Settings()
 	provider := strings.TrimSpace(settings.SMSProvider)
@@ -623,8 +650,7 @@ func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
 	payload, _ := json.Marshal(map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword, "proxy": settings.ProxyURL, "sms_provider": provider, "sms_config": smsCfg})
 	python := workflow.FindPython()
 	if python == "" {
-		s.finishOAuthJob(jobID, accountID, nil, errors.New("未找到 Python 运行环境"))
-		return
+		return nil, errors.New("未找到 Python 运行环境")
 	}
 	script := filepath.Join("internal", "protocol_codex_oauth.py")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
@@ -637,12 +663,10 @@ func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
 	cmd.Stdout = &out
 	errPipe, e := cmd.StderrPipe()
 	if e != nil {
-		s.finishOAuthJob(jobID, accountID, nil, e)
-		return
+		return nil, e
 	}
 	if e = cmd.Start(); e != nil {
-		s.finishOAuthJob(jobID, accountID, nil, e)
-		return
+		return nil, e
 	}
 	done := make(chan struct{})
 	go func() {
@@ -656,8 +680,8 @@ func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
 			if len([]rune(line)) > 300 {
 				line = string([]rune(line)[:300]) + "..."
 			}
-			if line != "" {
-				s.updateOAuthJob(jobID, "running", line)
+			if line != "" && progress != nil {
+				progress(line)
 			}
 		}
 	}()
@@ -667,16 +691,13 @@ func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
 		waitErr = ctx.Err()
 	}
 	if waitErr != nil {
-		s.finishOAuthJob(jobID, accountID, nil, fmt.Errorf("Codex OAuth 执行失败: %w", waitErr))
-		return
+		return nil, fmt.Errorf("Codex OAuth 执行失败: %w", waitErr)
 	}
 	var result map[string]any
 	if e := json.Unmarshal(out.Bytes(), &result); e != nil {
-		s.finishOAuthJob(jobID, accountID, nil, fmt.Errorf("解析 Codex OAuth 结果失败: %w", e))
-		return
+		return nil, fmt.Errorf("解析 Codex OAuth 结果失败: %w", e)
 	}
-	s.finishOAuthJob(jobID, accountID, result, nil)
-	_ = profile
+	return result, nil
 }
 
 func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
@@ -734,7 +755,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAPI(w, 200, profile, "")
-		s.auditAccountEventWithIO(r.Context(), profile.ID, "push", "push", "manual_single", "cpa", "CPA 推送成功", map[string]any{"auth_file": fileName}, map[string]any{"file_name": fileName, "group_ids": cpaSettings.GroupIDs, "plan_type": "team"}, map[string]any{"uploaded": true, "file_name": fileName})
+		s.auditAccountEventWithIO(r.Context(), profile.ID, "push", "push", "manual_single", "cpa", "CPA 推送成功", map[string]any{"auth_file": fileName}, map[string]any{"file_name": fileName, "group_ids": cpaSettings.GroupIDs, "plan_type": downstreamProlitePlanType}, map[string]any{"uploaded": true, "file_name": fileName})
 		return
 	}
 	if profile.Sub2AccountID > 0 {
@@ -758,12 +779,9 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	accountName += "--" + time.Now().Format("15:04")
 	createInput := sub2.CreateAccountInput{
-		Name: accountName,
-		Credentials: map[string]any{
-			"access_token": credentials.OAuthAccessToken, "refresh_token": credentials.OAuthRefreshToken,
-			"chatgpt_account_id": profile.OAuthAccountID, "email": profile.Email,
-		},
-		GroupIDs: settings.GroupIDs, Models: settings.Models, Concurrency: settings.AccountConcurrency,
+		Name:        accountName,
+		Credentials: buildSub2OAuthCredentials(profile, credentials),
+		GroupIDs:    settings.GroupIDs, Models: settings.Models, Concurrency: settings.AccountConcurrency,
 		Priority: settings.Priority, CpaWS: settings.CpaWS,
 	}
 	// Sub2 persists idempotency keys even after an account is deleted. Include
@@ -890,22 +908,25 @@ func buildCPAAuthPayload(profile model.FreeAccountProfile, credentials store.Fre
 }
 
 func buildCPAAuthPayloadNamed(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials, groupIDs []int64, accountName string) map[string]any {
-	planType := strings.TrimSpace(profile.PlanType)
-	// A Free credential becomes a Team credential after it has accepted the
-	// invitation. CPA selects its per-auth model catalog from plan_type; keeping
-	// the original "free" value would hide the Team/Codex models until CPA's
-	// own refresh job runs.
-	if profile.AcceptStatus == "completed" {
-		planType = "team"
-	}
 	if strings.TrimSpace(accountName) == "" {
 		accountName = profile.Email
 	}
-	payload := map[string]any{"type": "codex", "email": profile.Email, "name": accountName, "account_id": profile.OAuthAccountID, "chatgpt_account_id": profile.OAuthAccountID, "access_token": credentials.OAuthAccessToken, "refresh_token": credentials.OAuthRefreshToken, "plan_type": planType, "chatgpt_plan_type": planType}
+	payload := map[string]any{"type": "codex", "email": profile.Email, "name": accountName, "account_id": profile.OAuthAccountID, "chatgpt_account_id": profile.OAuthAccountID, "access_token": credentials.OAuthAccessToken, "refresh_token": credentials.OAuthRefreshToken, "plan_type": downstreamProlitePlanType, "chatgpt_plan_type": downstreamProlitePlanType}
 	if len(groupIDs) > 0 {
 		payload["group_ids"] = append([]int64(nil), groupIDs...)
 	}
 	return payload
+}
+
+func buildSub2OAuthCredentials(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials) map[string]any {
+	return map[string]any{
+		"access_token":       credentials.OAuthAccessToken,
+		"refresh_token":      credentials.OAuthRefreshToken,
+		"chatgpt_account_id": profile.OAuthAccountID,
+		"email":              profile.Email,
+		"plan_type":          downstreamProlitePlanType,
+		"chatgpt_plan_type":  downstreamProlitePlanType,
+	}
 }
 
 func (s *Server) checkFreeAccountQuota(w http.ResponseWriter, r *http.Request) {
@@ -1131,6 +1152,14 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	if err != nil {
 		return err
 	}
+	// The OAuth completion path already synchronizes both projections. Keep an
+	// explicit relogin checkpoint here as well so every successful relogin path
+	// guarantees that Mail Management contains the newest AT and RT before the
+	// refreshed credential is pushed downstream.
+	if err := s.store.SaveMailAccountOAuth(profile.Email, credentials.OAuthAccessToken, credentials.OAuthRefreshToken); err != nil {
+		return fmt.Errorf("重登凭据回写邮件管理失败: %w", err)
+	}
+	s.auditAccountEvent(ctx, accountID, "relogin", "oauth", "relogin", "", "重登 AT / RT 已回写邮件管理", nil)
 	settings, password, err := s.store.Sub2Settings()
 	if err != nil {
 		return err
@@ -1172,7 +1201,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	name += "--" + time.Now().Format("15:04") + "-重登"
 	input := sub2.CreateAccountInput{
 		Name:        name,
-		Credentials: map[string]any{"access_token": credentials.OAuthAccessToken, "refresh_token": credentials.OAuthRefreshToken, "chatgpt_account_id": profile.OAuthAccountID, "email": profile.Email},
+		Credentials: buildSub2OAuthCredentials(profile, credentials),
 		GroupIDs:    settings.GroupIDs, Models: settings.Models, Concurrency: settings.AccountConcurrency, Priority: settings.Priority, CpaWS: settings.CpaWS,
 	}
 	fingerprint := sha256.Sum256([]byte("relogin|" + profile.ID + "|" + fmt.Sprint(profile.ReloginCount+1) + "|" + credentials.OAuthAccessToken + "|" + credentials.OAuthRefreshToken + "|" + fmt.Sprint(settings.GroupIDs) + "|" + fmt.Sprint(settings.Models)))

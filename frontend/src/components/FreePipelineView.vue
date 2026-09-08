@@ -1,11 +1,11 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
-  BadgeCheck, Cable, DoorOpen, FileJson, FolderOpen, Gauge, KeyRound, Link2,
+  BadgeCheck, Cable, DoorOpen, Download, FileJson, FolderOpen, Gauge, KeyRound, Link2,
   History, LoaderCircle, MoreHorizontal, RefreshCw, Save, Send, Trash2, Unplug, Upload,
   Waypoints,
 } from 'lucide-vue-next'
-import { api } from '../api'
+import { api, downloadFile } from '../api'
 import { extractAccessTokens, extractTokensFromFiles, formatTime, shortID } from '../utils'
 import IconButton from './IconButton.vue'
 import MessageBar from './MessageBar.vue'
@@ -340,6 +340,15 @@ async function openLifecycle(account) {
     lifecycleView.error = error.message
   } finally {
     lifecycleView.loading = false
+  }
+}
+async function exportAccountLogs(account = lifecycleView.account) {
+  if (!account?.id) return
+  try {
+    await downloadFile(`/api/free-accounts/${encodeURIComponent(account.id)}/events/export`, `account-${account.email || account.id}-logs.json`)
+    setMessage(`${account.email}：账号日志已导出`, 'success')
+  } catch (error) {
+    setMessage(`${account.email}：日志导出失败：${error.message}`, 'error')
   }
 }
 async function runTracked(account, action, request) {
@@ -789,7 +798,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
 
     <div v-if="manualPushForm.account" class="modal-backdrop" @click.self="manualPushForm.account = null"><form class="modal" @submit.prevent="saveManualPushStage"><span class="overline">LINK SUB2 ACCOUNT</span><h2>标记推送成功</h2><p>{{ manualPushForm.account?.email }}</p><label class="field"><span>Sub2 账号 ID</span><input v-model="manualPushForm.sub2AccountID" type="number" min="1" step="1" required placeholder="例如 1024" /></label><div class="panel-actions"><button class="btn ghost" type="button" @click="manualPushForm.account = null">取消</button><button class="btn primary" type="submit"><Link2 :size="15" />关联并标记成功</button></div></form></div>
 
-    <div v-if="lifecycleView.account" class="modal-backdrop" @click.self="lifecycleView.account = null"><section class="modal lifecycle-modal"><div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>从进入 Team 轮转到最终移出的完整流程</p></div><button class="icon-button" type="button" title="关闭" @click="lifecycleView.account = null">×</button></div><div v-if="lifecycleView.loading" class="lifecycle-loading">正在加载执行记录…</div><div v-else-if="lifecycleView.error" class="danger-text">{{ lifecycleView.error }}</div><template v-else><div class="lifecycle-summary"><span>进入时间：{{ formatTime(lifecycleView.account.imported_at) }}</span><span>当前状态：{{ lifecycleView.account.status || '-' }}</span><span>当前线路：{{ lifecycleView.account.push_provider || activeProviderLabel }}</span><span>重登次数：{{ lifecycleView.account.relogin_count || 0 }}</span></div><div class="lifecycle-timeline"><div v-if="!lifecycleView.events.length" class="empty-cell">暂无详细事件</div><article v-for="event in lifecycleView.events" :key="event.id" class="lifecycle-event"><i></i><div><time>{{ formatTime(event.created_at) }}</time><strong>{{ event.stage || event.operation || event.type || '系统事件' }}</strong><span>{{ event.message || '-' }}</span><small v-if="event.attempt || event.duration_ms">{{ event.attempt ? `第 ${event.attempt} 次` : '' }} {{ event.duration_ms ? `· ${event.duration_ms} ms` : '' }}</small><details v-if="event.request || event.response || event.details"><summary>查看请求/返回参数</summary><pre v-if="event.request">请求：{{ JSON.stringify(event.request, null, 2) }}</pre><pre v-if="event.response">返回：{{ JSON.stringify(event.response, null, 2) }}</pre><pre v-if="event.details">详情：{{ JSON.stringify(event.details, null, 2) }}</pre></details></div></article></div></template></section></div>
+    <div v-if="lifecycleView.account" class="modal-backdrop" @click.self="lifecycleView.account = null"><section class="modal lifecycle-modal"><div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>从进入 Team 轮转到最终移出的完整流程</p></div><div class="heading-actions"><button class="btn ghost" type="button" @click="exportAccountLogs()"><Download :size="15" />导出账号日志</button><button class="icon-button" type="button" title="关闭" @click="lifecycleView.account = null">×</button></div></div><div v-if="lifecycleView.loading" class="lifecycle-loading">正在加载执行记录…</div><div v-else-if="lifecycleView.error" class="danger-text">{{ lifecycleView.error }}</div><template v-else><div class="lifecycle-summary"><span>进入时间：{{ formatTime(lifecycleView.account.imported_at) }}</span><span>当前状态：{{ lifecycleView.account.status || '-' }}</span><span>当前线路：{{ lifecycleView.account.push_provider || activeProviderLabel }}</span><span>重登次数：{{ lifecycleView.account.relogin_count || 0 }}</span></div><div class="lifecycle-timeline"><div v-if="!lifecycleView.events.length" class="empty-cell">暂无详细事件</div><article v-for="event in lifecycleView.events" :key="event.id" class="lifecycle-event"><i></i><div><time>{{ formatTime(event.created_at) }}</time><strong>{{ event.stage || event.operation || event.type || '系统事件' }}</strong><span>{{ event.message || '-' }}</span><small v-if="event.attempt || event.duration_ms">{{ event.attempt ? `第 ${event.attempt} 次` : '' }} {{ event.duration_ms ? `· ${event.duration_ms} ms` : '' }}</small><details v-if="event.request || event.response || event.details"><summary>查看请求/返回参数</summary><pre v-if="event.request">请求：{{ JSON.stringify(event.request, null, 2) }}</pre><pre v-if="event.response">返回：{{ JSON.stringify(event.response, null, 2) }}</pre><pre v-if="event.details">详情：{{ JSON.stringify(event.details, null, 2) }}</pre></details></div></article></div></template></section></div>
 
   </section>
 </template>

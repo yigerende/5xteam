@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -8,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -365,56 +368,85 @@ func (s *Server) startMailAccountLogin(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusAccepted, map[string]any{"success": true, "job": job}, "")
 }
 
-// startMailAccountOAuth starts the same Codex OAuth flow used by Team
-// rotation, addressed by the mailbox email for convenience in Mail
-// Management. The account must already have completed the Team-space step;
-// credentials are persisted to both projections by finishOAuthJob.
+// startMailAccountOAuth runs Codex OAuth directly from Mail Management. It
+// does not require or create a Team rotation record.
 func (s *Server) startMailAccountOAuth(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
 	if !strings.Contains(email, "@") {
 		writeAPI(w, http.StatusBadRequest, nil, "邮箱地址无效")
 		return
 	}
-	var account model.FreeAccountProfile
-	for _, item := range s.store.FreeAccounts() {
-		if strings.EqualFold(strings.TrimSpace(item.Email), email) {
-			account = item
-			break
-		}
-	}
-	if account.ID == "" {
-		writeAPI(w, http.StatusConflict, nil, "该邮箱尚未进入 Team 轮转")
+	if _, _, err := s.store.MailAccountCredential(email); err != nil {
+		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
-	if account.AcceptStatus != "completed" {
-		writeAPI(w, http.StatusConflict, nil, "请先完成邀请并进入空间")
+	if strings.TrimSpace(s.store.Settings().ProxyURL) == "" {
+		writeAPI(w, http.StatusBadRequest, nil, "请先在接口设置中配置全局代理；OpenAI OAuth 请求禁止直连")
 		return
 	}
-	unlock := s.lockFreeAccount(account.ID)
+	lockKey := "mail-oauth:" + email
+	unlock := s.lockFreeAccount(lockKey)
 	defer unlock()
-	s.oauthMu.RLock()
+	s.oauthMu.Lock()
 	duplicate := false
 	for _, existing := range s.oauthJobs {
-		if fmt.Sprint(existing["account_id"]) == account.ID && (fmt.Sprint(existing["status"]) == "queued" || fmt.Sprint(existing["status"]) == "running") {
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(existing["email"])), email) && (fmt.Sprint(existing["status"]) == "queued" || fmt.Sprint(existing["status"]) == "running") {
 			duplicate = true
 			break
 		}
 	}
-	s.oauthMu.RUnlock()
-	if account.OAuthStatus == "running" || duplicate {
+	if duplicate {
+		s.oauthMu.Unlock()
 		writeAPI(w, http.StatusConflict, nil, "该账号的 Codex OAuth 正在处理中")
 		return
 	}
 	jobID := randomRegistrationID()
-	job := map[string]any{"job_id": jobID, "account_id": account.ID, "email": email, "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
-	s.oauthMu.Lock()
+	job := map[string]any{"job_id": jobID, "email": email, "trigger": "mail_oauth", "mail_only": true, "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
 	s.oauthJobs[jobID] = job
 	s.oauthMu.Unlock()
-	_, _ = s.store.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
-		item.OAuthStatus, item.Status, item.LastError = "running", "oauthing", ""
+	go s.runMailAccountOAuth(jobID, email)
+	writeAPI(w, http.StatusAccepted, map[string]any{"success": true, "job": cloneRegistrationJob(job)}, "")
+}
+
+func (s *Server) runMailAccountOAuth(jobID, email string) {
+	unlock := s.lockFreeAccount("mail-oauth:" + email)
+	defer unlock()
+	result, err := s.executeCodexOAuth(email, func(message string) {
+		s.updateOAuthJob(jobID, "running", message)
 	})
-	go s.runFreeAccountOAuth(jobID, account.ID, email)
-	writeAPI(w, http.StatusAccepted, map[string]any{"success": true, "job": cloneRegistrationJob(job), "account_id": account.ID}, "")
+	s.finishMailAccountOAuthJob(jobID, email, result, err)
+}
+
+func (s *Server) finishMailAccountOAuthJob(jobID, email string, result map[string]any, runErr error) {
+	status, message := "success", ""
+	if runErr != nil || result == nil || result["success"] != true {
+		status = "failed"
+		if runErr != nil {
+			message = runErr.Error()
+		} else {
+			message, _ = result["error"].(string)
+		}
+	}
+	if status == "success" {
+		accessToken, _ := result["access_token"].(string)
+		refreshToken, _ := result["refresh_token"].(string)
+		if strings.TrimSpace(accessToken) == "" || strings.TrimSpace(refreshToken) == "" {
+			status, message = "failed", "OAuth 结果缺少 Access Token 或 Refresh Token"
+		} else if err := s.store.SaveMailAccountOAuth(email, accessToken, refreshToken); err != nil {
+			status, message = "failed", err.Error()
+		}
+	}
+	if status != "success" && isDeadOAuthResult(result, message) {
+		if strings.TrimSpace(message) == "" {
+			message = "OpenAI 返回账号已删除或停用"
+		}
+		_ = s.store.MarkMailAccountDead(email, message)
+	}
+	s.oauthMu.Lock()
+	if job := s.oauthJobs[jobID]; job != nil {
+		job["status"], job["state"], job["error"], job["result"] = status, status, message, result
+	}
+	s.oauthMu.Unlock()
 }
 
 func (s *Server) startMailAccountRegistration(w http.ResponseWriter, r *http.Request) {
@@ -450,10 +482,140 @@ func (s *Server) exportMailAccountCredentials(w http.ResponseWriter, r *http.Req
 		writeAPI(w, http.StatusBadRequest, nil, "邮箱地址无效")
 		return
 	}
-	credentials, err := s.loadMailGPTCredentials(r.Context(), email)
+	credentials, expiresAt, err := s.prepareMailGPTCredentials(r.Context(), email)
 	if err != nil {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
+	}
+	exportedAt := time.Now().UTC()
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	switch format {
+	case "", "raw":
+		writeAPI(w, http.StatusOK, map[string]any{
+			"email":              credentials.Email,
+			"gpt_password":       credentials.GPTPassword,
+			"access_token":       credentials.AccessToken,
+			"refresh_token":      credentials.RefreshToken,
+			"chatgpt_account_id": credentials.AccountID,
+		}, "")
+	case "cpa":
+		if credentials.RefreshToken == "" {
+			writeAPI(w, http.StatusConflict, nil, "该账号尚未获取 Codex RT，不能导出 CPA JSON")
+			return
+		}
+		writeAPI(w, http.StatusOK, buildCPACredentialExport(credentials, expiresAt, exportedAt), "")
+	case "sub2":
+		if credentials.RefreshToken == "" {
+			writeAPI(w, http.StatusConflict, nil, "该账号尚未获取 Codex RT，不能导出 Sub2 JSON")
+			return
+		}
+		writeAPI(w, http.StatusOK, buildSub2CredentialExport(credentials, expiresAt, exportedAt), "")
+	default:
+		writeAPI(w, http.StatusBadRequest, nil, "凭证格式只能是 raw、cpa 或 sub2")
+	}
+}
+
+type batchMailCredentialExportInput struct {
+	Emails []string `json:"emails"`
+	Format string   `json:"format"`
+}
+
+type preparedMailCredentialExport struct {
+	Credentials mailGPTCredentials
+	ExpiresAt   time.Time
+}
+
+func (s *Server) exportMailAccountCredentialsBatch(w http.ResponseWriter, r *http.Request) {
+	var input batchMailCredentialExportInput
+	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
+		return
+	}
+	emails, err := normalizeBatchCredentialEmails(input.Emails)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(input.Format))
+	if format != "cpa" && format != "sub2" {
+		writeAPI(w, http.StatusBadRequest, nil, "批量导出格式只能是 cpa 或 sub2")
+		return
+	}
+
+	items := make([]preparedMailCredentialExport, 0, len(emails))
+	failures := make([]string, 0)
+	for _, email := range emails {
+		credentials, expiresAt, loadErr := s.prepareMailGPTCredentials(r.Context(), email)
+		if loadErr != nil {
+			failures = append(failures, fmt.Sprintf("%s：%s", email, loadErr.Error()))
+			continue
+		}
+		if strings.TrimSpace(credentials.RefreshToken) == "" {
+			failures = append(failures, email+"：尚未获取 Codex RT")
+			continue
+		}
+		items = append(items, preparedMailCredentialExport{Credentials: credentials, ExpiresAt: expiresAt})
+	}
+	if len(failures) > 0 {
+		writeAPI(w, http.StatusConflict, map[string]any{"failures": failures}, "批量导出失败："+strings.Join(failures, "；"))
+		return
+	}
+
+	exportedAt := time.Now().UTC()
+	timestamp := exportedAt.In(time.Local).Format("20060102-150405")
+	if format == "cpa" {
+		archive, archiveErr := buildCPABatchCredentialArchive(items, exportedAt)
+		if archiveErr != nil {
+			writeAPI(w, http.StatusInternalServerError, nil, archiveErr.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="cpa-accounts-%s.zip"`, timestamp))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(archive)
+		return
+	}
+
+	payload := buildSub2BatchCredentialExport(items, exportedAt)
+	encoded, encodeErr := json.MarshalIndent(payload, "", "  ")
+	if encodeErr != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, encodeErr.Error())
+		return
+	}
+	encoded = append(encoded, '\n')
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="sub2-accounts-%s.json"`, timestamp))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(encoded)
+}
+
+func normalizeBatchCredentialEmails(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, errors.New("请先勾选要导出的邮件账号")
+	}
+	if len(values) > 500 {
+		return nil, errors.New("每次最多批量导出 500 个邮件账号")
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		email := strings.ToLower(strings.TrimSpace(value))
+		parsed, err := mail.ParseAddress(email)
+		if err != nil || !strings.EqualFold(parsed.Address, email) || !strings.Contains(email, "@") {
+			return nil, fmt.Errorf("邮箱地址无效：%s", value)
+		}
+		if _, exists := seen[email]; exists {
+			continue
+		}
+		seen[email] = struct{}{}
+		result = append(result, email)
+	}
+	return result, nil
+}
+
+func (s *Server) prepareMailGPTCredentials(ctx context.Context, email string) (mailGPTCredentials, time.Time, error) {
+	credentials, err := s.loadMailGPTCredentials(ctx, email)
+	if err != nil {
+		return mailGPTCredentials{}, time.Time{}, err
 	}
 	if credentials.Email == "" {
 		credentials.Email = email
@@ -482,33 +644,66 @@ func (s *Server) exportMailAccountCredentials(w http.ResponseWriter, r *http.Req
 	if credentials.PlanType == "" {
 		credentials.PlanType = tokenInfo.PlanType
 	}
-	exportedAt := time.Now().UTC()
 	expiresAt, _ := workflow.AccessTokenExpiry(credentials.AccessToken)
-	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
-	switch format {
-	case "", "raw":
-		writeAPI(w, http.StatusOK, map[string]any{
-			"email":              credentials.Email,
-			"gpt_password":       credentials.GPTPassword,
-			"access_token":       credentials.AccessToken,
-			"refresh_token":      credentials.RefreshToken,
-			"chatgpt_account_id": credentials.AccountID,
-		}, "")
-	case "cpa":
-		if credentials.RefreshToken == "" {
-			writeAPI(w, http.StatusConflict, nil, "该账号尚未获取 Codex RT，不能导出 CPA JSON")
-			return
+	return credentials, expiresAt, nil
+}
+
+func buildCPABatchCredentialArchive(items []preparedMailCredentialExport, exportedAt time.Time) ([]byte, error) {
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
+	for _, item := range items {
+		payload := buildCPACredentialExport(item.Credentials, item.ExpiresAt, exportedAt)
+		encoded, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			_ = archive.Close()
+			return nil, fmt.Errorf("生成 %s 的 CPA JSON 失败：%w", item.Credentials.Email, err)
 		}
-		writeAPI(w, http.StatusOK, buildCPACredentialExport(credentials, expiresAt, exportedAt), "")
-	case "sub2":
-		if credentials.RefreshToken == "" {
-			writeAPI(w, http.StatusConflict, nil, "该账号尚未获取 Codex RT，不能导出 Sub2 JSON")
-			return
+		entry, err := archive.Create(safeCredentialExportFilename(item.Credentials.Email) + "-cpa-auth.json")
+		if err != nil {
+			_ = archive.Close()
+			return nil, fmt.Errorf("创建 CPA 压缩包失败：%w", err)
 		}
-		writeAPI(w, http.StatusOK, buildSub2CredentialExport(credentials, expiresAt, exportedAt), "")
-	default:
-		writeAPI(w, http.StatusBadRequest, nil, "凭证格式只能是 raw、cpa 或 sub2")
+		if _, err = entry.Write(append(encoded, '\n')); err != nil {
+			_ = archive.Close()
+			return nil, fmt.Errorf("写入 CPA 压缩包失败：%w", err)
+		}
 	}
+	if err := archive.Close(); err != nil {
+		return nil, fmt.Errorf("完成 CPA 压缩包失败：%w", err)
+	}
+	return buffer.Bytes(), nil
+}
+
+func buildSub2BatchCredentialExport(items []preparedMailCredentialExport, exportedAt time.Time) map[string]any {
+	accounts := make([]any, 0, len(items))
+	for _, item := range items {
+		payload := buildSub2CredentialExport(item.Credentials, item.ExpiresAt, exportedAt)
+		if exported, ok := payload["accounts"].([]any); ok {
+			accounts = append(accounts, exported...)
+		}
+	}
+	return map[string]any{
+		"exported_at": exportedAt.Format(time.RFC3339),
+		"proxies":     []any{},
+		"accounts":    accounts,
+	}
+}
+
+func safeCredentialExportFilename(email string) string {
+	var builder strings.Builder
+	for _, char := range strings.TrimSpace(email) {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9', strings.ContainsRune("@._-", char):
+			builder.WriteRune(char)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	name := strings.Trim(builder.String(), ".")
+	if name == "" {
+		return "account"
+	}
+	return name
 }
 
 func buildCPACredentialExport(credentials mailGPTCredentials, expiresAt, exportedAt time.Time) map[string]any {

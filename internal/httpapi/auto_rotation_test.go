@@ -2,7 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"chatgpt-space-merge/internal/model"
 	"chatgpt-space-merge/internal/store"
@@ -151,5 +158,212 @@ func TestAutoRotationNeverSelectsDeadAccounts(t *testing.T) {
 	}
 	if !eligibleAutoRotationMail(model.MailAccountProfile{RegistrationStatus: "success"}) {
 		t.Fatal("normal registered mailbox should remain eligible")
+	}
+}
+
+func TestAutoRotationRetryExhaustionRemovesJoinedAccount(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var kickCount int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/accounts/team-cleanup/users/user-cleanup") {
+			kickCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"message":"removed"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = upstream.URL
+	if err := st.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := st.SaveAdminAccount(model.AdminAccountProfile{Label: "cleanup-admin", TeamAccountID: "team-cleanup"}, "admin-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "cleanup@example.com", UserID: "user-cleanup"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err = st.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+		item.AdminAccountID, item.TeamAccountID = admin.ID, "team-cleanup"
+		item.InviteStatus, item.AcceptStatus, item.RemoveStatus = "completed", "completed", "pending"
+		item.SeatType = "prolite"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := model.AutoRotationTask{
+		ID: "cleanup-task", RunID: "cleanup-run", AccountID: account.ID, Email: account.Email,
+		AdminAccountID: admin.ID, SeatType: "prolite", Status: "queued", StartedAt: time.Now(), Steps: autoSteps(),
+	}
+	if err := st.SaveAutoRotationTask(task); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	run := model.AutoRotationRun{ID: task.RunID, Status: "running", StartedAt: time.Now(), Planned: 1}
+	var runMu sync.Mutex
+	server.executeAutoTask(context.Background(), task, &run, &runMu, model.AutoRotationSettings{RetryCount: 1})
+	updated, _, err := st.FreeAccountCredential(account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kickCount != 1 || updated.RemoveStatus != "completed" || updated.Status != "removed" {
+		t.Fatalf("joined failed account was not removed: kicks=%d account=%+v", kickCount, updated)
+	}
+	storedTasks := st.AutoRotationTasks(task.RunID)
+	if len(storedTasks) != 1 {
+		t.Fatalf("stored tasks=%d, want 1", len(storedTasks))
+	}
+	stored := storedTasks[0]
+	if stored.Status != "failed" || stored.CompletedAt == nil || stored.RetryCount != 1 || !strings.Contains(stored.Error, "已自动移出空间") {
+		t.Fatalf("failed task did not retain retry and cleanup result: %+v", stored)
+	}
+	removeCompleted := false
+	for _, step := range stored.Steps {
+		removeCompleted = removeCompleted || step.Key == "remove" && step.Status == "completed"
+	}
+	if !removeCompleted || run.Failed != 1 || run.Succeeded != 0 {
+		t.Fatalf("remove cleanup step/run counts incorrect: steps=%+v run=%+v", stored.Steps, run)
+	}
+}
+
+func TestAccountExecutionLogExportIsDownloadableAndRedacted(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	account, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "logs@example.com", UserID: "logs-user"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddAutoRotationEvent(model.AutoRotationEvent{
+		ID: "logs-event", AccountID: account.ID, Type: "request", CreatedAt: time.Now(),
+		Request: map[string]any{"access_token": "must-not-export", "operation": "oauth"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	req := httptest.NewRequest(http.MethodGet, "/api/free-accounts/"+account.ID+"/events/export", nil)
+	req.SetPathValue("id", account.ID)
+	rec := httptest.NewRecorder()
+	server.exportFreeAccountEvents(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("unexpected export response: status=%d headers=%v", rec.Code, rec.Header())
+	}
+	var payload executionLogExport
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Account == nil || payload.Account.ID != account.ID || len(payload.Events) != 1 {
+		t.Fatalf("unexpected export payload: %+v", payload)
+	}
+	if got := payload.Events[0].Request["access_token"]; got != "***" {
+		t.Fatalf("secret was not redacted: %v", got)
+	}
+}
+
+func TestAutoRotationFailureDoesNotRemoveAccountThatNeverEnteredSpace(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	account, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "outside@example.com", UserID: "outside-user"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := model.AutoRotationTask{ID: "outside-task", RunID: "outside-run", AccountID: account.ID, Email: account.Email, Status: "failed", StartedAt: time.Now(), Steps: autoSteps()}
+	if err := st.SaveAutoRotationTask(task); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	server.cleanupFailedAutoTask(context.Background(), &task, "invite", errors.New("invite retries exhausted"))
+	updated, _, err := st.FreeAccountCredential(account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RemoveStatus == "completed" {
+		t.Fatalf("account outside Team space must not be marked removed: %+v", updated)
+	}
+	for _, step := range task.Steps {
+		if step.Key == "remove" {
+			t.Fatalf("outside account must not receive a remove step: %+v", task.Steps)
+		}
+	}
+}
+
+func TestAutoRotationFailureRecordsAutomaticRemovalFailure(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"team unavailable"}`, http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = upstream.URL
+	if err := st.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := st.SaveAdminAccount(model.AdminAccountProfile{Label: "failed-cleanup-admin", TeamAccountID: "team-failed-cleanup"}, "admin-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "failed-cleanup@example.com", UserID: "failed-cleanup-user"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err = st.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+		item.AdminAccountID, item.TeamAccountID = admin.ID, "team-failed-cleanup"
+		item.InviteStatus, item.AcceptStatus, item.RemoveStatus = "completed", "completed", "pending"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := model.AutoRotationTask{ID: "failed-cleanup-task", RunID: "failed-cleanup-run", AccountID: account.ID, Email: account.Email, AdminAccountID: admin.ID, Status: "failed", StartedAt: time.Now(), Steps: autoSteps()}
+	if err := st.SaveAutoRotationTask(task); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	server.cleanupFailedAutoTask(context.Background(), &task, "push", errors.New("push retries exhausted"))
+	updated, _, err := st.FreeAccountCredential(account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.RemoveStatus != "failed" || task.Status != "failed" || !strings.Contains(task.Error, "自动移出空间失败") {
+		t.Fatalf("automatic cleanup failure was not retained: account=%+v task=%+v", updated, task)
+	}
+	removeFailed := false
+	for _, step := range task.Steps {
+		removeFailed = removeFailed || step.Key == "remove" && step.Status == "failed"
+	}
+	if !removeFailed {
+		t.Fatalf("failed remove step missing: %+v", task.Steps)
 	}
 }
