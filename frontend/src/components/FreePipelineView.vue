@@ -604,16 +604,18 @@ async function runSelectedPipelineTask(action) {
     relogin: (account) => account.accept_status === 'completed' && account.remove_status !== 'completed' && hasDownstream(account) && !account.dead,
     push: (account) => account.oauth_status === 'completed' && !hasDownstream(account),
     quota: (account) => hasDownstream(account),
+    remove: (account) => account.accept_status === 'completed' && account.remove_status !== 'completed' && !!account.admin_account_id,
   }
   const eligible = selected.filter(requirements[action])
   const skipped = selected.length - eligible.length
   if (!eligible.length) return setMessage(`没有符合条件的账号（已跳过 ${skipped} 个）`, 'error')
+  if (action === 'remove' && !window.confirm(`确认将已勾选的 ${eligible.length} 个账号移出空间？同一母号下的账号将依次执行。`)) return
   selectedAccountIDs.value = new Set()
   busy.value = `batch:${action}`
-  const labels = { oauth: '授权', relogin: '重登', push: `推送${activeProviderLabel.value}`, quota: '查额度' }
+  const labels = { oauth: '授权', relogin: '重登', push: `推送${activeProviderLabel.value}`, quota: '查额度', remove: '移出空间' }
   setMessage(`正在批量${labels[action]}：0/${eligible.length}`)
   let completed = 0
-  const results = await Promise.all(eligible.map(async (account) => {
+  const execute = async (account) => {
     try {
       if (action === 'oauth') await runOAuthSilently(account)
       else if (action === 'relogin') await runTracked(account, action, () => api(`/api/free-accounts/${encodeURIComponent(account.id)}/relogin`, { method: 'POST', body: {} }))
@@ -625,7 +627,24 @@ async function runSelectedPipelineTask(action) {
       setMessage(`${account.email}：${error.message}`, 'error')
       return false
     }
-  }))
+  }
+  let results
+  if (action === 'remove') {
+    const groups = new Map()
+    eligible.forEach((account) => {
+      const key = String(account.team_account_id || account.admin_account_id || account.id)
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(account)
+    })
+    const groupedResults = await Promise.all([...groups.values()].map(async (accounts) => {
+      const values = []
+      for (const account of accounts) values.push(await execute(account))
+      return values
+    }))
+    results = groupedResults.flat()
+  } else {
+    results = await Promise.all(eligible.map(execute))
+  }
   busy.value = ''
   await refreshLiveAccounts().catch(() => {})
   emit('reload')
@@ -765,7 +784,7 @@ onBeforeUnmount(stopCapacityRefreshTimer)
     <MessageBar :message="message" />
 
     <section v-if="teamMenu === 'accounts'" class="panel list-panel free-list">
-      <div class="panel-title responsive"><div><span>PIPELINE</span><h2>账号流程状态</h2></div><div class="heading-actions"><StatusPill v-if="activeActivities.length" tone="running"><LoaderCircle class="spin" :size="12" />执行中 {{ activeActivities.length }}</StatusPill><div class="monitor-countdowns" title="后台监控任务倒计时"><span class="countdown-pill status-countdown">401 检测 <strong>{{ countdownText(statusCountdown, pushProvider === 'cpa' ? !cpaForm.enable401Check : !sub2Form.enable401Check) }}</strong></span><span class="countdown-pill quota-countdown">额度 / 移出 <strong>{{ countdownText(quotaCountdown) }}</strong></span></div><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('relogin')"><RefreshCw :size="15" />批量重登<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('oauth')"><KeyRound :size="15" />批量授权<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('push')"><Send :size="15" />批量推送 {{ activeProviderLabel }}<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('quota')"><Gauge :size="15" />批量查额度<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="removeSelectedRecords"><Trash2 :size="15" />批量删除<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button></div></div>
+      <div class="panel-title responsive"><div><span>PIPELINE</span><h2>账号流程状态</h2></div><div class="heading-actions"><StatusPill v-if="activeActivities.length" tone="running"><LoaderCircle class="spin" :size="12" />执行中 {{ activeActivities.length }}</StatusPill><div class="monitor-countdowns" title="后台监控任务倒计时"><span class="countdown-pill status-countdown">401 检测 <strong>{{ countdownText(statusCountdown, pushProvider === 'cpa' ? !cpaForm.enable401Check : !sub2Form.enable401Check) }}</strong></span><span class="countdown-pill quota-countdown">额度 / 移出 <strong>{{ countdownText(quotaCountdown) }}</strong></span></div><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('relogin')"><RefreshCw :size="15" />批量重登<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('oauth')"><KeyRound :size="15" />批量授权<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('push')"><Send :size="15" />批量推送 {{ activeProviderLabel }}<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('quota')"><Gauge :size="15" />批量查额度<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('remove')"><Unplug :size="15" />批量移出<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="removeSelectedRecords"><Trash2 :size="15" />批量删除<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button></div></div>
       <div v-if="activeActivities.length" class="execution-list" aria-live="polite">
         <div v-for="activity in activeActivities" :key="activity.id" class="execution-item">
           <LoaderCircle class="spin" :size="18" />

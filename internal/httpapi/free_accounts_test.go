@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -395,5 +396,171 @@ func TestConcurrentRemovalOnlyKicksTeamMemberOnce(t *testing.T) {
 	}
 	if kicks.Load() != 1 {
 		t.Fatalf("concurrent removal sent %d upstream DELETE requests, want 1", kicks.Load())
+	}
+}
+
+func TestConcurrentRemovalSerializesDifferentAccountsForSameTeam(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	var active, maxActive, kicks atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.NotFound(w, r)
+			return
+		}
+		kicks.Add(1)
+		current := active.Add(1)
+		for current > maxActive.Load() && !maxActive.CompareAndSwap(maxActive.Load(), current) {
+		}
+		time.Sleep(100 * time.Millisecond)
+		active.Add(-1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"removed"}`))
+	}))
+	defer upstream.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = upstream.URL
+	if err := dataStore.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	accounts := make([]model.FreeAccountProfile, 0, 2)
+	for index := range 2 {
+		admin, saveErr := dataStore.SaveAdminAccount(model.AdminAccountProfile{
+			Label:         fmt.Sprintf("admin-serial-%d", index),
+			TeamAccountID: "team-serial",
+		}, "admin-token")
+		if saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		account, _, saveErr := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{
+			Email:  fmt.Sprintf("serial-%d@example.com", index),
+			UserID: fmt.Sprintf("serial-user-%d", index),
+		}, "source-token")
+		if saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		account, saveErr = dataStore.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+			item.AdminAccountID, item.TeamAccountID = admin.ID, admin.TeamAccountID
+			item.InviteStatus, item.AcceptStatus, item.RemoveStatus = "completed", "completed", "pending"
+		})
+		if saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		accounts = append(accounts, account)
+	}
+	server, err := New(dataStore, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	start := make(chan struct{})
+	results := make(chan error, len(accounts))
+	var wg sync.WaitGroup
+	for _, account := range accounts {
+		wg.Add(1)
+		go func(accountID string) {
+			defer wg.Done()
+			<-start
+			_, removeErr := server.performFreeAccountRemove(t.Context(), accountID)
+			results <- removeErr
+		}(account.ID)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for removeErr := range results {
+		if removeErr != nil {
+			t.Fatal(removeErr)
+		}
+	}
+	if kicks.Load() != 2 {
+		t.Fatalf("same-Team removal sent %d upstream DELETE requests, want 2", kicks.Load())
+	}
+	if maxActive.Load() != 1 {
+		t.Fatalf("same-Team removal reached %d concurrent upstream requests, want 1", maxActive.Load())
+	}
+}
+
+func TestConcurrentRemovalAllowsDifferentTeamsInParallel(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	var active, maxActive atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.NotFound(w, r)
+			return
+		}
+		current := active.Add(1)
+		for current > maxActive.Load() && !maxActive.CompareAndSwap(maxActive.Load(), current) {
+		}
+		time.Sleep(150 * time.Millisecond)
+		active.Add(-1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"removed"}`))
+	}))
+	defer upstream.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = upstream.URL
+	if err := dataStore.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	accounts := make([]model.FreeAccountProfile, 0, 2)
+	for index := range 2 {
+		admin, saveErr := dataStore.SaveAdminAccount(model.AdminAccountProfile{
+			Label:         fmt.Sprintf("admin-parallel-%d", index),
+			TeamAccountID: fmt.Sprintf("team-parallel-%d", index),
+		}, "admin-token")
+		if saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		account, _, saveErr := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{
+			Email:  fmt.Sprintf("parallel-%d@example.com", index),
+			UserID: fmt.Sprintf("parallel-user-%d", index),
+		}, "source-token")
+		if saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		account, saveErr = dataStore.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+			item.AdminAccountID, item.TeamAccountID = admin.ID, admin.TeamAccountID
+			item.InviteStatus, item.AcceptStatus, item.RemoveStatus = "completed", "completed", "pending"
+		})
+		if saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		accounts = append(accounts, account)
+	}
+	server, err := New(dataStore, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	start := make(chan struct{})
+	results := make(chan error, len(accounts))
+	var wg sync.WaitGroup
+	for _, account := range accounts {
+		wg.Add(1)
+		go func(accountID string) {
+			defer wg.Done()
+			<-start
+			_, removeErr := server.performFreeAccountRemove(t.Context(), accountID)
+			results <- removeErr
+		}(account.ID)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for removeErr := range results {
+		if removeErr != nil {
+			t.Fatal(removeErr)
+		}
+	}
+	if maxActive.Load() < 2 {
+		t.Fatalf("different-Team removals reached only %d concurrent upstream request, want at least 2", maxActive.Load())
 	}
 }

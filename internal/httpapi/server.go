@@ -29,6 +29,7 @@ type Server struct {
 	refreshMu        sync.Mutex
 	freeLocks        sync.Map
 	freeRemoveLocks  sync.Map
+	teamRemoveLocks  sync.Map
 	sub2             *sub2.Client
 	cpa              *cpa.Client
 	registrationMu   sync.RWMutex

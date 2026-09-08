@@ -1269,6 +1269,11 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	if profile.AcceptStatus != "completed" || profile.AdminAccountID == "" || profile.TeamAccountID == "" {
 		return profile, errors.New("账号没有可移出的团队空间记录")
 	}
+	// OpenAI rate-limits concurrent membership mutations within one Team.
+	// Serialize removals per Team while allowing different Teams to proceed
+	// concurrently. This also protects manual, automatic and dead-account paths.
+	unlockTeam := s.lockTeamAccountRemove(profile.TeamAccountID)
+	defer unlockTeam()
 	_, adminCredentials, err := s.currentAdminCredential(ctx, profile.AdminAccountID)
 	if err != nil {
 		s.failFreeAccount(profile.ID, "remove", err)
@@ -2045,6 +2050,13 @@ func (s *Server) lockFreeAccount(id string) func() {
 
 func (s *Server) lockFreeAccountRemove(id string) func() {
 	value, _ := s.freeRemoveLocks.LoadOrStore(id, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+func (s *Server) lockTeamAccountRemove(teamID string) func() {
+	value, _ := s.teamRemoveLocks.LoadOrStore(teamID, &sync.Mutex{})
 	mutex := value.(*sync.Mutex)
 	mutex.Lock()
 	return mutex.Unlock
