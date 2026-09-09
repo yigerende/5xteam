@@ -574,7 +574,7 @@ func (s *Server) exportMailAccountCredentialsBatch(w http.ResponseWriter, r *htt
 	}
 
 	exportedAt := time.Now().UTC()
-	timestamp := exportedAt.In(time.Local).Format("20060102-150405")
+	timestamp := beijingNow().Format("20060102-150405")
 	if format == "cpa" {
 		archive, archiveErr := buildCPABatchCredentialArchive(items, exportedAt)
 		if archiveErr != nil {

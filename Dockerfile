@@ -30,6 +30,6 @@ RUN test -f /app/internal/codex_runtime/sentinel/sentinel-runner.js \
     && PYTHONPATH=/app/internal/codex_runtime python3 -c "import config, config.codex, core.session, core.codex_oauth; print('codex protocol runtime ok')"
 RUN mkdir -p /data && chown app:app /data
 USER app
-ENV APP_ADDR=0.0.0.0:18120 APP_DATA_DIR=/data
+ENV TZ=Asia/Shanghai APP_ADDR=0.0.0.0:18120 APP_DATA_DIR=/data
 EXPOSE 18120
 ENTRYPOINT ["/app/chatgpt-space-merge"]

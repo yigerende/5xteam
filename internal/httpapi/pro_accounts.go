@@ -616,7 +616,7 @@ func (s *Server) getProCPAGroups(w http.ResponseWriter, r *http.Request) {
 
 func proCPAFileName(profile model.MailAccountProfile) string {
 	name := strings.NewReplacer("@", "-at-", "/", "-", "\\", "-", " ", "-").Replace(profile.Email)
-	return "codex-pro-" + name + "--" + time.Now().Format("150405") + ".json"
+	return "codex-pro-" + name + "--" + beijingNow().Format("150405") + ".json"
 }
 
 func proAccountName(profile model.MailAccountProfile) string {
@@ -624,7 +624,7 @@ func proAccountName(profile model.MailAccountProfile) string {
 	if name == "" {
 		name = profile.Email
 	}
-	return name + "--" + time.Now().Format("15:04")
+	return name + "--" + beijingNow().Format("15:04")
 }
 
 func buildProCredentials(profile model.MailAccountProfile, credentials model.MailAccountCredentials) map[string]any {

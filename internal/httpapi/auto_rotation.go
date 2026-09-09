@@ -82,7 +82,7 @@ func redactExecutionEvents(events []model.AutoRotationEvent) []model.AutoRotatio
 
 func (s *Server) exportAutoRotationEvents(w http.ResponseWriter, r *http.Request) {
 	events := redactExecutionEvents(s.store.AutoRotationEvents(r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id")))
-	writeExecutionLogExport(w, "team-execution-logs-"+time.Now().Format("20060102-150405"), executionLogExport{
+	writeExecutionLogExport(w, "team-execution-logs-"+beijingNow().Format("20060102-150405"), executionLogExport{
 		ExportedAt: time.Now(), Retention: "48h", Events: events,
 	})
 }

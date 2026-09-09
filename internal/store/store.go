@@ -869,7 +869,45 @@ func (s *Store) AdminAccounts() []model.AdminAccountProfile {
 			result = append(result, profile)
 		}
 	}
+	s.reconcileAdminTeamRotationChildCounts(result)
 	return result
+}
+
+// reconcileAdminTeamRotationChildCounts backfills counters for older data that
+// predates the persisted counter. It only raises a counter, so repeated reads
+// cannot erase additional re-entry counts recorded by the workflow.
+func (s *Store) reconcileAdminTeamRotationChildCounts(accounts []model.AdminAccountProfile) {
+	if len(accounts) == 0 {
+		return
+	}
+	counts := make(map[string]int, len(accounts))
+	rows, err := s.db.Query("SELECT profile FROM free_accounts")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		var profile model.FreeAccountProfile
+		if rows.Scan(&raw) != nil || json.Unmarshal([]byte(raw), &profile) != nil {
+			continue
+		}
+		if profile.AdminAccountID != "" && profile.AcceptStatus == "completed" {
+			counts[profile.AdminAccountID]++
+		}
+	}
+	for i := range accounts {
+		count := counts[accounts[i].ID]
+		if count <= accounts[i].TeamRotationChildCount {
+			continue
+		}
+		accounts[i].TeamRotationChildCount = count
+		accounts[i].UpdatedAt = time.Now()
+		encoded, marshalErr := json.Marshal(accounts[i])
+		if marshalErr == nil {
+			_, _ = s.db.Exec("UPDATE admin_accounts SET profile=? WHERE id=?", string(encoded), accounts[i].ID)
+		}
+	}
 }
 
 func (s *Store) SaveAdminAccount(profile model.AdminAccountProfile, token string) (model.AdminAccountProfile, error) {
@@ -918,6 +956,7 @@ func (s *Store) SaveAdminAccountCredentials(profile model.AdminAccountProfile, a
 			return model.AdminAccountProfile{}, err
 		}
 		profile.CreatedAt, profile.UpdatedAt = existing.CreatedAt, now
+		profile.TeamRotationChildCount = existing.TeamRotationChildCount
 		if accessToken != "" {
 			var err error
 			encrypted, err = s.encrypt(accessToken)
@@ -947,6 +986,39 @@ func (s *Store) SaveAdminAccountCredentials(profile model.AdminAccountProfile, a
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return model.AdminAccountProfile{}, errors.New("母号名称已存在")
 		}
+		return model.AdminAccountProfile{}, err
+	}
+	return profile, nil
+}
+
+// IncrementAdminTeamRotationChildCount records one successful child-account
+// entry into a Team rotation. The update is serialized with all other store
+// writes so retries cannot corrupt the cumulative counter.
+func (s *Store) IncrementAdminTeamRotationChildCount(id string) (model.AdminAccountProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.AdminAccountProfile{}, errors.New("母号 ID 不能为空")
+	}
+	var raw string
+	if err := s.db.QueryRow("SELECT profile FROM admin_accounts WHERE id = ?", id).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.AdminAccountProfile{}, errors.New("母号配置不存在")
+		}
+		return model.AdminAccountProfile{}, err
+	}
+	var profile model.AdminAccountProfile
+	if err := json.Unmarshal([]byte(raw), &profile); err != nil {
+		return model.AdminAccountProfile{}, err
+	}
+	profile.TeamRotationChildCount++
+	profile.UpdatedAt = time.Now()
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		return model.AdminAccountProfile{}, err
+	}
+	if _, err = s.db.Exec("UPDATE admin_accounts SET profile=? WHERE id=?", string(encoded), id); err != nil {
 		return model.AdminAccountProfile{}, err
 	}
 	return profile, nil

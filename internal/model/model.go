@@ -157,20 +157,21 @@ type ProxyTestResult struct {
 }
 
 type AdminAccountProfile struct {
-	ID                   string     `json:"id"`
-	Label                string     `json:"label"`
-	Email                string     `json:"email"`
-	Name                 string     `json:"name"`
-	UserID               string     `json:"user_id"`
-	AccountID            string     `json:"account_id"`
-	TeamAccountID        string     `json:"team_account_id"`
-	PlanType             string     `json:"plan_type"`
-	TokenPresent         bool       `json:"token_present"`
-	RefreshTokenPresent  bool       `json:"refresh_token_present"`
-	AccessTokenExpiresAt *time.Time `json:"access_token_expires_at,omitempty"`
-	LastRefreshedAt      *time.Time `json:"last_refreshed_at,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+	ID                     string     `json:"id"`
+	Label                  string     `json:"label"`
+	Email                  string     `json:"email"`
+	Name                   string     `json:"name"`
+	UserID                 string     `json:"user_id"`
+	AccountID              string     `json:"account_id"`
+	TeamAccountID          string     `json:"team_account_id"`
+	PlanType               string     `json:"plan_type"`
+	TokenPresent           bool       `json:"token_present"`
+	RefreshTokenPresent    bool       `json:"refresh_token_present"`
+	AccessTokenExpiresAt   *time.Time `json:"access_token_expires_at,omitempty"`
+	LastRefreshedAt        *time.Time `json:"last_refreshed_at,omitempty"`
+	TeamRotationChildCount int        `json:"team_rotation_child_count"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 // AdminSeatCapacity is the live seat snapshot for a Team workspace. The

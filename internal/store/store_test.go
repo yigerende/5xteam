@@ -341,6 +341,35 @@ func TestAdminAccountTokenIsEncryptedAtRest(t *testing.T) {
 	}
 }
 
+func TestAdminTeamRotationChildCountPersistsAndIncrements(t *testing.T) {
+	directory := t.TempDir()
+	dataStore, err := Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	profile, err := dataStore.SaveAdminAccountCredentials(model.AdminAccountProfile{Label: "count-admin", TeamAccountID: "team-count"}, "access-token", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := dataStore.IncrementAdminTeamRotationChildCount(profile.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := dataStore.AdminAccounts()
+	if len(got) != 1 || got[0].TeamRotationChildCount != 2 {
+		t.Fatalf("unexpected cumulative count: %+v", got)
+	}
+	updated, err := dataStore.SaveAdminAccountCredentials(model.AdminAccountProfile{ID: profile.ID, Label: "count-admin-renamed", TeamAccountID: "team-count"}, "access-token-2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.TeamRotationChildCount != 2 {
+		t.Fatalf("credential update reset cumulative count: %+v", updated)
+	}
+}
+
 func TestOpenAIAccountTokenIsEncryptedAndStatusPersists(t *testing.T) {
 	directory := t.TempDir()
 	dataStore, err := Open(directory)

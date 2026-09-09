@@ -431,7 +431,7 @@ function logTime(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? value
-    : date.toLocaleTimeString("zh-CN", { hour12: false });
+    : date.toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" });
 }
 function logStep(value) {
   return (

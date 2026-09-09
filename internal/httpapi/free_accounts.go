@@ -63,7 +63,7 @@ func (s *Server) exportFreeAccountEvents(w http.ResponseWriter, r *http.Request)
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	writeExecutionLogExport(w, "account-"+profile.Email+"-logs-"+time.Now().Format("20060102-150405"), executionLogExport{
+	writeExecutionLogExport(w, "account-"+profile.Email+"-logs-"+beijingNow().Format("20060102-150405"), executionLogExport{
 		ExportedAt: time.Now(), Retention: "48h", Account: &profile, LifecycleTask: &task,
 		Events: redactExecutionEvents(s.store.AutoRotationEventsByAccount(id)),
 	})
@@ -249,6 +249,11 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
+	}
+	if profile.AdminAccountID != "" {
+		if _, countErr := s.store.IncrementAdminTeamRotationChildCount(profile.AdminAccountID); countErr != nil {
+			s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "counter_update_failed", Source: "join", Operation: "accept", Stage: "accept", Level: "warning", Message: "进入空间成功但母号累计次数更新失败", Details: map[string]any{"error": countErr.Error()}})
+		}
 	}
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "joined", map[string]any{"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus})
 	s.auditAccountEvent(r.Context(), profile.ID, "join", "accept", "manual_single", "", "邀请并进入空间成功", map[string]any{"admin_account_id": admin.ID, "team_account_id": admin.TeamAccountID})
@@ -852,7 +857,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(profile.Label) != "" {
 		accountName = profile.Label
 	}
-	accountName += "--" + time.Now().Format("15:04")
+	accountName += "--" + beijingNow().Format("15:04")
 	createInput := sub2.CreateAccountInput{
 		Name:        accountName,
 		Credentials: buildSub2OAuthCredentials(profile, credentials),
@@ -951,7 +956,7 @@ func cpaFileName(profile model.FreeAccountProfile) string {
 		name = profile.ID
 	}
 	name = strings.NewReplacer("@", "-at-", "/", "-", "\\", "-", " ", "-").Replace(name)
-	return "codex-" + name + "--" + time.Now().Format("15:04") + ".json"
+	return "codex-" + name + "--" + beijingNow().Format("15:04") + ".json"
 }
 
 func cpaReloginFileName(profile model.FreeAccountProfile) string {
@@ -960,7 +965,7 @@ func cpaReloginFileName(profile model.FreeAccountProfile) string {
 		name = profile.ID
 	}
 	name = strings.NewReplacer("@", "-at-", "/", "-", "\\", "-", " ", "-").Replace(name)
-	return "codex-" + name + "--" + time.Now().Format("15:04") + "-重登.json"
+	return "codex-" + name + "--" + beijingNow().Format("15:04") + "-重登.json"
 }
 
 func cpaAccountName(profile model.FreeAccountProfile, relogin bool) string {
@@ -971,7 +976,7 @@ func cpaAccountName(profile model.FreeAccountProfile, relogin bool) string {
 	if name == "" {
 		name = profile.ID
 	}
-	name += "--" + time.Now().Format("15:04")
+	name += "--" + beijingNow().Format("15:04")
 	if relogin {
 		name += "-重登"
 	}
@@ -1377,7 +1382,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	if strings.TrimSpace(profile.Label) != "" {
 		name = profile.Label
 	}
-	name += "--" + time.Now().Format("15:04") + "-重登"
+	name += "--" + beijingNow().Format("15:04") + "-重登"
 	input := sub2.CreateAccountInput{
 		Name:        name,
 		Credentials: buildSub2OAuthCredentials(profile, credentials),
@@ -1550,6 +1555,7 @@ func (s *Server) updateFreeAccountStage(w http.ResponseWriter, r *http.Request) 
 	// make that recovery impossible.
 	now := time.Now()
 	before, _, beforeErr := s.store.FreeAccountCredential(id)
+	wasAccepted := beforeErr == nil && before.AcceptStatus == "completed"
 	profile, err := s.store.UpdateFreeAccount(id, func(item *model.FreeAccountProfile) {
 		applyManualFreeAccountStage(item, input.Stage, input.Status, input.Message, now)
 		if input.Stage == "push" && input.Status == "completed" {
@@ -1571,6 +1577,11 @@ func (s *Server) updateFreeAccountStage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if beforeErr == nil {
+		if input.Stage == "accept" && input.Status == "completed" && !wasAccepted && profile.AdminAccountID != "" {
+			if _, countErr := s.store.IncrementAdminTeamRotationChildCount(profile.AdminAccountID); countErr != nil {
+				s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "counter_update_failed", Source: "manual_single", Operation: "accept", Stage: "accept", Level: "warning", Message: "手动确认进入成功但母号累计次数更新失败", Details: map[string]any{"error": countErr.Error()}})
+			}
+		}
 		s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "manual_stage", Source: "manual_single", Operation: "stage", Stage: input.Stage, FromStatus: stageStatus(before, input.Stage), ToStatus: input.Status, Message: "手动修正流程状态", Details: map[string]any{"message": input.Message}})
 	}
 	writeAPI(w, http.StatusOK, profile, "")

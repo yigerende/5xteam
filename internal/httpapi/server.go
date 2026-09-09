@@ -758,6 +758,7 @@ func (s *Server) saveAdminAccount(id string, input adminAccountInput) (model.Adm
 	profile := model.AdminAccountProfile{
 		ID: id, Label: input.Label, Email: info.Email, Name: info.Name, UserID: info.UserID,
 		AccountID: info.AccountID, TeamAccountID: teamID, PlanType: info.PlanType, LastRefreshedAt: existing.LastRefreshedAt,
+		TeamRotationChildCount: existing.TeamRotationChildCount,
 	}
 	if expiresAt, ok := workflow.AccessTokenExpiry(token); ok {
 		profile.AccessTokenExpiresAt = &expiresAt

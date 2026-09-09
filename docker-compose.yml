@@ -7,6 +7,7 @@ services:
     volumes:
       - chatgpt_space_merge_data:/data
     environment:
+      TZ: Asia/Shanghai
       APP_ADDR: 0.0.0.0:18120
       APP_DATA_DIR: /data
 
