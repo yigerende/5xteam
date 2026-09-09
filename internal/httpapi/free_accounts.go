@@ -959,15 +959,6 @@ func cpaFileName(profile model.FreeAccountProfile) string {
 	return "codex-" + name + "--" + beijingNow().Format("15:04") + ".json"
 }
 
-func cpaReloginFileName(profile model.FreeAccountProfile) string {
-	name := strings.TrimSpace(profile.Email)
-	if name == "" {
-		name = profile.ID
-	}
-	name = strings.NewReplacer("@", "-at-", "/", "-", "\\", "-", " ", "-").Replace(name)
-	return "codex-" + name + "--" + beijingNow().Format("15:04") + "-重登.json"
-}
-
 func cpaAccountName(profile model.FreeAccountProfile, relogin bool) string {
 	name := strings.TrimSpace(profile.Email)
 	if strings.TrimSpace(profile.Label) != "" {
@@ -1350,20 +1341,19 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 			return cpaErr
 		}
 		oldFileName := strings.TrimSpace(profile.CPAAuthFileName)
-		fileName := cpaReloginFileName(profile)
+		if oldFileName == "" {
+			return errors.New("账号尚未绑定 CPA auth 文件")
+		}
+		// CPA has no separate credential-update endpoint. Uploading with the
+		// existing filename overwrites the same auth file and updates the same
+		// in-memory record, so a 401 reauthorization must not create a second
+		// file and then delete the old one.
+		fileName := oldFileName
 		accountName := cpaAccountName(profile, true)
 		payload := buildCPAAuthPayloadNamed(profile, credentials, cpaSettings.GroupIDs, accountName)
 		encoded, _ := json.Marshal(payload)
 		if cpaErr = s.cpa.Upload(ctx, cpaSettings, cpaKey, fileName, encoded); cpaErr != nil {
 			return cpaErr
-		}
-		// CPA uses the deterministic email-based filename. Uploading the
-		// refreshed credential replaces the first file in place; only remove a
-		// legacy filename when it differs, so the new credential is never deleted.
-		if oldFileName != "" && !strings.EqualFold(oldFileName, fileName) {
-			if cpaErr = s.cpa.Delete(ctx, cpaSettings, cpaKey, oldFileName); cpaErr != nil {
-				return cpaErr
-			}
 		}
 		now := time.Now()
 		_, cpaErr = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
@@ -1378,39 +1368,40 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 		}
 		return cpaErr
 	}
+	oldAccountID := profile.Sub2AccountID
+	if oldAccountID < 1 {
+		return errors.New("账号尚未绑定 Sub2 账号")
+	}
 	name := profile.Email
 	if strings.TrimSpace(profile.Label) != "" {
 		name = profile.Label
 	}
 	name += "--" + beijingNow().Format("15:04") + "-重登"
-	input := sub2.CreateAccountInput{
-		Name:        name,
-		Credentials: buildSub2OAuthCredentials(profile, credentials),
-		GroupIDs:    settings.GroupIDs, Models: settings.Models, Concurrency: settings.AccountConcurrency, Priority: settings.Priority, CpaWS: settings.CpaWS,
-	}
-	fingerprint := sha256.Sum256([]byte("relogin|" + profile.ID + "|" + fmt.Sprint(profile.ReloginCount+1) + "|" + credentials.OAuthAccessToken + "|" + credentials.OAuthRefreshToken + "|" + fmt.Sprint(settings.GroupIDs) + "|" + fmt.Sprint(settings.Models)))
-	key := "free-pipeline-relogin-" + profile.ID + "-" + fmt.Sprintf("%x", fingerprint[:8])
-	created, err := s.sub2.CreateAccount(ctx, settings, password, input, key)
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "idempotency") {
-		created, err = s.sub2.CreateAccount(ctx, settings, password, input, key+"-"+randomRegistrationID())
-	}
-	if err != nil {
+	// Sub2 supports in-place OAuth reauthorization. Keep the original account
+	// ID and let Sub2 clear its error state/invalidate its token cache.
+	if _, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentials(profile, credentials)); err != nil {
 		return err
 	}
-	oldAccountID := profile.Sub2AccountID
-	if oldAccountID > 0 && oldAccountID != created.ID {
-		if deleteErr := s.sub2.DeleteAccount(ctx, settings, password, oldAccountID); deleteErr != nil {
-			// Avoid leaving two active downstream accounts if cleanup fails.
-			_ = s.sub2.DeleteAccount(ctx, settings, password, created.ID)
-			return fmt.Errorf("重登成功但删除旧 Sub2 账号失败: %w", deleteErr)
+	updatedName := profile.Sub2AccountName
+	// Preserve the existing display convention (time + -重登) without changing
+	// the account identity. A name update is cosmetic; if this optional request
+	// fails, the successfully reauthorized account remains usable under its old
+	// name and the failure is recorded for diagnosis.
+	if renamed, renameErr := s.sub2.RenameAccount(ctx, settings, password, oldAccountID, name); renameErr == nil {
+		if strings.TrimSpace(renamed.Name) != "" {
+			updatedName = renamed.Name
+		} else {
+			updatedName = name
 		}
+	} else {
+		s.auditAccountEvent(ctx, accountID, "relogin", "push", "relogin", "sub2", "Sub2 原账号已重新授权，但更新显示名称失败", map[string]any{"account_id": oldAccountID, "name": name, "error": renameErr.Error()})
 	}
 	now := time.Now()
 	_, err = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
 		item.Status, item.OAuthStatus, item.PushStatus, item.QuotaStatus, item.LastError = "monitoring", "completed", "completed", "pending", ""
 		item.PushProvider = "sub2"
 		item.CPAAuthFileName = ""
-		item.Sub2AccountID, item.Sub2AccountName = created.ID, created.Name
+		item.Sub2AccountID, item.Sub2AccountName = oldAccountID, updatedName
 		item.StatusCheckedAt = nil
 		clearReloginFailures(item)
 		item.Sub2GroupIDs, item.Sub2GroupNames = append([]int64(nil), settings.GroupIDs...), append([]string(nil), settings.GroupNames...)

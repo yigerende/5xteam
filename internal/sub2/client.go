@@ -160,6 +160,68 @@ func (c *Client) CreateAccount(ctx context.Context, settings model.Sub2Settings,
 	return account, nil
 }
 
+// ApplyOAuthCredentials replaces the OAuth credentials on an existing Sub2
+// account. Sub2 keeps the account ID, groups and other account settings; this
+// is the in-place reauthorization path used after a downstream 401.
+func (c *Client) ApplyOAuthCredentials(ctx context.Context, settings model.Sub2Settings, password string, accountID int64, credentials map[string]any) (Account, error) {
+	if accountID < 1 {
+		return Account{}, errors.New("Sub2 账号 ID 无效")
+	}
+	if len(credentials) == 0 {
+		return Account{}, errors.New("Sub2 OAuth 凭据不能为空")
+	}
+	body := map[string]any{
+		"type":        "oauth",
+		"credentials": credentials,
+	}
+	path := "/api/v1/admin/accounts/" + strconv.FormatInt(accountID, 10) + "/apply-oauth-credentials"
+	data, err := c.doJSON(ctx, settings, password, http.MethodPost, path, body, nil)
+	if err != nil {
+		return Account{}, err
+	}
+	var account Account
+	if len(data) > 0 && string(data) != "null" {
+		if err := json.Unmarshal(data, &account); err != nil {
+			return account, fmt.Errorf("解析 Sub2 原账号重新授权响应失败: %w", err)
+		}
+	}
+	if account.ID < 1 {
+		account.ID = accountID
+	}
+	return account, nil
+}
+
+// RenameAccount updates only the display name of an existing Sub2 account.
+// It is intentionally separate from ApplyOAuthCredentials because Sub2's
+// dedicated reauthorization endpoint does not accept a name field.
+func (c *Client) RenameAccount(ctx context.Context, settings model.Sub2Settings, password string, accountID int64, name string) (Account, error) {
+	if accountID < 1 {
+		return Account{}, errors.New("Sub2 账号 ID 无效")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Account{}, errors.New("Sub2 账号名称不能为空")
+	}
+	path := "/api/v1/admin/accounts/" + strconv.FormatInt(accountID, 10)
+	data, err := c.doJSON(ctx, settings, password, http.MethodPut, path, map[string]any{"name": name}, nil)
+	if err != nil {
+		return Account{}, err
+	}
+	var account Account
+	if len(data) > 0 && string(data) != "null" {
+		if err := json.Unmarshal(data, &account); err != nil {
+			return account, fmt.Errorf("解析 Sub2 原账号改名响应失败: %w", err)
+		}
+	}
+	if account.ID < 1 {
+		account.ID = accountID
+	}
+	if account.Name == "" {
+		account.Name = name
+	}
+	return account, nil
+}
+
 // DeleteAccount removes a downstream Sub2 account by its admin ID.
 func (c *Client) DeleteAccount(ctx context.Context, settings model.Sub2Settings, password string, accountID int64) error {
 	if accountID < 1 {

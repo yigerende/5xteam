@@ -52,7 +52,7 @@ func TestClientLoginGroupsCreateAndQuota(t *testing.T) {
 	}
 	account, err := client.CreateAccount(context.Background(), settings, "secret", CreateAccountInput{
 		Name: "free@example.com", GroupIDs: settings.GroupIDs, Models: settings.Models, Concurrency: 12,
-		CpaWS: true,
+		CpaWS:       true,
 		Credentials: map[string]any{"access_token": "oauth-access", "refresh_token": "oauth-refresh", "chatgpt_account_id": "account-1"},
 	}, "free-pipeline-account-1")
 	if err != nil || account.ID != 101 {
@@ -89,5 +89,64 @@ func TestClientLoginGroupsCreateAndQuota(t *testing.T) {
 	}
 	if loginCalls.Load() != 1 {
 		t.Fatalf("login calls = %d, want 1", loginCalls.Load())
+	}
+}
+
+func TestApplyOAuthCredentialsKeepsExistingAccountID(t *testing.T) {
+	var requestBody map[string]any
+	var gotMethod string
+	var gotPath string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/login" {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"access_token":"admin-token"}}`))
+			return
+		}
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&requestBody)
+		_, _ = w.Write([]byte(`{"code":0,"data":{"id":42,"name":"existing"}}`))
+	}))
+	defer ts.Close()
+
+	account, err := New().ApplyOAuthCredentials(context.Background(), model.Sub2Settings{URL: ts.URL, Email: "admin@example.com"}, "secret", 42, map[string]any{
+		"access_token": "new-at", "refresh_token": "new-rt", "chatgpt_account_id": "acct-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/api/v1/admin/accounts/42/apply-oauth-credentials" {
+		t.Fatalf("unexpected reauthorization request: %s %s", gotMethod, gotPath)
+	}
+	if account.ID != 42 || account.Name != "existing" {
+		t.Fatalf("unexpected account response: %+v", account)
+	}
+	if requestBody["type"] != "oauth" {
+		t.Fatalf("unexpected request type: %#v", requestBody["type"])
+	}
+	credentials, ok := requestBody["credentials"].(map[string]any)
+	if !ok || credentials["access_token"] != "new-at" || credentials["refresh_token"] != "new-rt" {
+		t.Fatalf("unexpected credentials payload: %#v", requestBody["credentials"])
+	}
+}
+
+func TestRenameAccountUsesExistingAccountID(t *testing.T) {
+	var gotPath string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/login" {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"access_token":"admin-token"}}`))
+			return
+		}
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"code":0,"data":{"id":42,"name":"renamed"}}`))
+	}))
+	defer ts.Close()
+
+	account, err := New().RenameAccount(context.Background(), model.Sub2Settings{URL: ts.URL, Email: "admin@example.com"}, "secret", 42, "renamed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api/v1/admin/accounts/42" || account.ID != 42 || account.Name != "renamed" {
+		t.Fatalf("unexpected rename result: path=%q account=%+v", gotPath, account)
 	}
 }
