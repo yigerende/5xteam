@@ -249,37 +249,39 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
+	inviteProxy := s.adminProxyLogDetails(adminSettings, admin)
+	acceptProxy := s.proxyLogDetails(s.store.Settings(), "global")
 	if runInvite {
 		inviteStarted := time.Now()
-		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_start", map[string]any{"seat_type": input.SeatType})
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_start", map[string]any{"seat_type": input.SeatType, "proxy": inviteProxy})
 		var inviteResponse workflow.Response
 		inviteResponse, err = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
 			return adminClient.Invite(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, profile.Email, input.SeatType)
 		})
 		if err != nil {
-			s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_error", map[string]any{"duration_ms": time.Since(inviteStarted).Milliseconds(), "http_status": inviteResponse.StatusCode, "error": err.Error()})
+			s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_error", map[string]any{"duration_ms": time.Since(inviteStarted).Milliseconds(), "http_status": inviteResponse.StatusCode, "error": err.Error(), "proxy": inviteProxy})
 			s.failFreeAccount(profile.ID, "invite", err)
 			writeAPI(w, http.StatusBadRequest, nil, err.Error())
 			return
 		}
-		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_success", map[string]any{"duration_ms": time.Since(inviteStarted).Milliseconds(), "http_status": inviteResponse.StatusCode})
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_success", map[string]any{"duration_ms": time.Since(inviteStarted).Milliseconds(), "http_status": inviteResponse.StatusCode, "proxy": inviteProxy})
 		_, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 			item.InviteStatus, item.AcceptStatus = "completed", "running"
 		})
 	}
 	acceptStarted := time.Now()
-	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_start", map[string]any{"user_id": profile.UserID, "team_account_id": admin.TeamAccountID})
+	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_start", map[string]any{"user_id": profile.UserID, "team_account_id": admin.TeamAccountID, "proxy": acceptProxy})
 	var acceptResponse workflow.Response
 	acceptResponse, err = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
 		return userClient.Accept(r.Context(), sourceCredentials.SourceAccessToken, admin.TeamAccountID, profile.UserID)
 	})
 	if err != nil {
-		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_error", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "error": err.Error()})
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_error", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "error": err.Error(), "proxy": acceptProxy})
 		s.failFreeAccount(profile.ID, "accept", err)
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
-	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_success", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode})
+	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_success", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "proxy": acceptProxy})
 	now := time.Now()
 	profile, err = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.InviteStatus, item.AcceptStatus = "joined", "completed", "completed"
@@ -768,9 +770,9 @@ func (s *Server) executeCodexOAuth(email string, progress func(string), diagnost
 					SchemaVersion: 1, Stage: "proxy_check", Event: "quality_result",
 					Message: "OAuth 代理出口质检结果", HTTPStatus: probe.HTTPStatus,
 					Attempt: quality, Level: map[bool]string{true: "info", false: "warning"}[probe.OK],
-					Request:  map[string]any{"proxy": map[string]any{"configured": true, "endpoint": oauthProxyEndpoint(proxyURL)}, "round": round, "quality_attempt": quality},
+					Request:  map[string]any{"proxy": map[string]any{"configured": true, "name": lease.label, "endpoint": oauthProxyEndpoint(proxyURL)}, "round": round, "quality_attempt": quality},
 					Response: map[string]any{"ok": probe.OK, "auth_status": probe.AuthStatus, "exit_ip": probe.ExitIP, "loc": probe.Location, "colo": probe.Colo, "error_code": probe.ErrorCode},
-					Details:  map[string]any{"error": probe.Error},
+					Details:  map[string]any{"error": probe.Error, "proxy_name": lease.label, "proxy_endpoint": oauthProxyEndpoint(proxyURL)},
 				})
 			}
 			if probeErr != nil || !probe.OK {
@@ -803,8 +805,8 @@ func (s *Server) executeCodexOAuth(email string, progress func(string), diagnost
 					SchemaVersion: 1, Stage: "oauth", Event: "round_retry",
 					Message: "OAuth 代理/网络瞬时错误，释放出口并重新开始完整 OAuth",
 					Attempt: round, Level: "warning",
-					Response: map[string]any{"error": oauthErrorText(result, runErr), "proxy_endpoint": oauthProxyEndpoint(proxyURL)},
-					Details:  map[string]any{"round": round, "quality_attempt": quality},
+					Response: map[string]any{"error": oauthErrorText(result, runErr), "proxy_name": lease.label, "proxy_endpoint": oauthProxyEndpoint(proxyURL)},
+					Details:  map[string]any{"round": round, "quality_attempt": quality, "proxy_name": lease.label, "proxy_endpoint": oauthProxyEndpoint(proxyURL)},
 				})
 			}
 			if progress != nil {
@@ -866,6 +868,42 @@ func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, 
 	if progress != nil {
 		progress(fmt.Sprintf("已分配 OAuth 代理：%s（当前任务 %d）", proxyLabel, activeCount))
 	}
+	emitDiagnostic := func(event protocolOAuthDiagnostic) {
+		// Every protocol event belongs to this one complete OAuth attempt.
+		// Attach the selected proxy to each event so step 3 diagnostics remain
+		// actionable even when the Python protocol emits only endpoint data.
+		proxy := map[string]any{
+			"configured": true,
+			"name":       proxyLabel,
+			"endpoint":   oauthProxyEndpoint(proxyURL),
+		}
+		if event.Request == nil {
+			event.Request = map[string]any{}
+		}
+		if _, exists := event.Request["proxy"]; !exists {
+			event.Request["proxy"] = proxy
+		}
+		if event.Details == nil {
+			event.Details = map[string]any{}
+		}
+		event.Details["proxy_name"] = proxyLabel
+		event.Details["proxy_endpoint"] = oauthProxyEndpoint(proxyURL)
+		if diagnostic != nil {
+			diagnostic(event)
+		}
+	}
+	emitDiagnostic(protocolOAuthDiagnostic{
+		SchemaVersion: 1,
+		Stage:         "oauth",
+		Event:         "proxy_selected",
+		Message:       "Codex OAuth 使用代理",
+		Level:         "info",
+		Request: map[string]any{
+			"proxy":       map[string]any{"configured": true, "name": proxyLabel, "endpoint": oauthProxyEndpoint(proxyURL)},
+			"active_jobs": activeCount,
+		},
+		Details: map[string]any{"proxy_name": proxyLabel, "proxy_endpoint": oauthProxyEndpoint(proxyURL), "active_jobs": activeCount},
+	})
 	settings := s.store.Settings()
 	provider := strings.TrimSpace(settings.SMSProvider)
 	smsCfg := map[string]any{}
@@ -912,9 +950,7 @@ func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, 
 		for sc.Scan() {
 			rawLine := strings.TrimSpace(sc.Text())
 			if event, ok := parseProtocolOAuthDiagnostic(rawLine); ok {
-				if diagnostic != nil {
-					diagnostic(event)
-				}
+				emitDiagnostic(event)
 				continue
 			}
 			line := strings.TrimSpace(strings.TrimPrefix(rawLine, "[protocol]"))
@@ -1708,15 +1744,38 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	if err != nil {
 		return profile, err
 	}
+	removeProxy := s.adminProxyLogDetails(adminSettings, adminProfile)
 	_, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.RemoveStatus, item.LastError = "removing", "running", ""
 	})
-	if _, err = retryTeamRequest(ctx, s.store.Settings(), func() (workflow.Response, error) {
+	removeStarted := time.Now()
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
+		Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "remove_request_start",
+		Message: "Team 移出诊断", Request: map[string]any{"team_account_id": profile.TeamAccountID, "user_id": profile.UserID, "proxy": removeProxy},
+		Details: map[string]any{"team_account_id": profile.TeamAccountID, "user_id": profile.UserID, "proxy": removeProxy},
+	})
+	var removeResponse workflow.Response
+	if removeResponse, err = retryTeamRequest(ctx, s.store.Settings(), func() (workflow.Response, error) {
 		return client.Kick(ctx, adminCredentials.AccessToken, profile.TeamAccountID, profile.UserID)
 	}); err != nil {
+		s.enqueueAuditEvent(model.AutoRotationEvent{
+			AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
+			Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "remove_request_error", Level: "error",
+			Message: "Team 移出请求失败", HTTPStatus: removeResponse.StatusCode, DurationMS: time.Since(removeStarted).Milliseconds(),
+			Response: map[string]any{"duration_ms": time.Since(removeStarted).Milliseconds(), "http_status": removeResponse.StatusCode, "error": err.Error(), "proxy": removeProxy},
+			Details:  map[string]any{"duration_ms": time.Since(removeStarted).Milliseconds(), "http_status": removeResponse.StatusCode, "error": err.Error(), "proxy": removeProxy},
+		})
 		s.failFreeAccount(profile.ID, "remove", err)
 		return profile, err
 	}
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
+		Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "remove_request_success",
+		Message: "Team 移出请求成功", HTTPStatus: removeResponse.StatusCode, DurationMS: time.Since(removeStarted).Milliseconds(),
+		Response: map[string]any{"duration_ms": time.Since(removeStarted).Milliseconds(), "http_status": removeResponse.StatusCode, "proxy": removeProxy},
+		Details:  map[string]any{"duration_ms": time.Since(removeStarted).Milliseconds(), "http_status": removeResponse.StatusCode, "proxy": removeProxy},
+	})
 	// Removing a Team member also removes the corresponding downstream
 	// credential from the currently enabled provider. This prevents the old
 	// CPA/Sub2 account from continuing to receive traffic after rotation.

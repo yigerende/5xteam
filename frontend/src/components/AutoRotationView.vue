@@ -65,7 +65,7 @@ async function viewRun(run) {
   try { await Promise.all([loadTasks(), loadEvents()]) } catch (e) { setMessage(e.message, 'error') }
 }
 function runStatus(value) { return value === 'completed' ? 'success' : value === 'failed' ? 'danger' : value === 'running' ? 'running' : 'pending' }
-const eventTypes = { decision: '自动补充判定', seat_snapshot: '席位决策快照', seat_query: '查询母号席位', seat_check: '实时席位规则检查', seat_reserved: '预占 5x 席位', seat_released: '释放席位', join_trace: '邀请确认诊断', manual_stage: '手动修正阶段', step: '流程步骤', request: '流程请求', retry: '步骤重试', dead_detected: '识别死号', dead_remove_start: '开始移出死号', dead_remove_success: '死号移出成功', dead_remove_failed: '死号移出失败', auto_failure_remove_start: '重试耗尽开始移出', auto_failure_remove_success: '失败账号移出成功', auto_failure_remove_failed: '失败账号移出失败' }
+const eventTypes = { decision: '自动补充判定', seat_snapshot: '席位决策快照', seat_query: '查询母号席位', seat_check: '实时席位规则检查', seat_reserved: '预占 5x 席位', seat_released: '释放席位', join_trace: '邀请确认诊断', remove_trace: '移出空间诊断', oauth_protocol: 'OAuth 协议诊断', manual_stage: '手动修正阶段', step: '流程步骤', request: '流程请求', retry: '步骤重试', dead_detected: '识别死号', dead_remove_start: '开始移出死号', dead_remove_success: '死号移出成功', dead_remove_failed: '死号移出失败', auto_failure_remove_start: '重试耗尽开始移出', auto_failure_remove_success: '失败账号移出成功', auto_failure_remove_failed: '失败账号移出失败' }
 const stageNames = { invite: '邀请并进入空间', oauth: '获取 Codex OAuth', push: '推送当前下游', quota: '查询额度', status: '401 检测', relogin: '重登', remove: '移出空间', rotation: '进入轮转' }
 function eventType(value) { return eventTypes[value] || value || '系统事件' }
 function eventStage(value) { return stageNames[value] || value || '-' }
@@ -74,10 +74,12 @@ function adminName(adminID) { const item = props.adminAccounts.find((value) => S
 function eventSubject(event) { return event.account_id ? (taskEmail(event.task_id) !== '-' ? taskEmail(event.task_id) : event.account_id) : (event.admin_account_id ? adminName(event.admin_account_id) : '-') }
 function eventMessage(event) {
   const details = event.details || {}
+  const proxyName = details.proxy_name || details.proxy?.name
   if (event.type === 'seat_query') return `远端剩余 ${details.remote_remaining ?? '-'}，本地在途 ${details.local_reserved ?? 0}，实际可分配 ${details.available ?? 0}`
   if (event.type === 'seat_check') return `远端总数 ${details.remote_total ?? '-'}，空间内 ${details.inside_premium ?? 0}，邀请在途 ${details.in_flight_invites ?? 0}，可分配 ${details.available ?? 0}`
   if (event.type === 'join_trace') {
     const parts = []
+    if (proxyName) parts.push(`代理：${proxyName}`)
     if (details.http_status) parts.push(`HTTP ${details.http_status}`)
     if (details.duration_ms != null) parts.push(`耗时 ${details.duration_ms} ms`)
     if (details.error) parts.push(`错误：${details.error}`)
@@ -85,6 +87,8 @@ function eventMessage(event) {
     if (details.user_id) parts.push(`用户 ${details.user_id}`)
     return parts.join('，') || event.message || '-'
   }
+  if (event.type === 'remove_trace') return `${event.message || '-'}${proxyName ? `，代理：${proxyName}` : ''}`
+  if (event.type === 'oauth_protocol' && proxyName) return `${event.message || '-'}，代理：${proxyName}`
   if (event.type === 'manual_stage') return `状态：${details.message || event.from_status || '-'}${event.from_status ? ` → ${event.to_status}` : ''}`
   if (event.type === 'dead_detected') return `来源 ${details.source === 'relogin' ? '401 重登' : 'Codex OAuth'}，原因 ${details.error_code || details.reason || '-'}`
   if (event.type === 'dead_remove_failed') return details.error || event.message || '自动移出失败'

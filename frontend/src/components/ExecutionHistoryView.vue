@@ -16,7 +16,7 @@ const total = ref(0)
 const busy = ref(false)
 const exportBusy = ref(false)
 const error = ref('')
-const eventTypes = { audit: '业务审计', exchange: '请求/返回', request: '流程请求', response: '流程响应', retry: '步骤重试', step: '流程步骤', join_trace: '邀请确认诊断', seat_snapshot: '席位快照', seat_query: '席位查询', seat_check: '席位检查', dead_detected: '识别死号', dead_remove_start: '开始移出死号', dead_remove_success: '死号移出成功', dead_remove_failed: '死号移出失败', auto_failure_remove_start: '失败后开始移出', auto_failure_remove_success: '失败后移出成功', auto_failure_remove_failed: '失败后移出失败', final: '最终结果' }
+const eventTypes = { audit: '业务审计', exchange: '请求/返回', request: '流程请求', response: '流程响应', retry: '步骤重试', step: '流程步骤', join_trace: '邀请确认诊断', remove_trace: '移出空间诊断', oauth_protocol: 'OAuth 协议诊断', seat_snapshot: '席位快照', seat_query: '席位查询', seat_check: '席位检查', dead_detected: '识别死号', dead_remove_start: '开始移出死号', dead_remove_success: '死号移出成功', dead_remove_failed: '死号移出失败', auto_failure_remove_start: '失败后开始移出', auto_failure_remove_success: '失败后移出成功', auto_failure_remove_failed: '失败后移出失败', final: '最终结果' }
 const stages = { rotation: '进入轮转', invite: '邀请', accept: '进入空间', oauth: 'OAuth', push: '推送', quota: '额度', status: '401 检测', relogin: '重登', remove: '移出空间' }
 function typeName(value) { return eventTypes[value] || value || '系统事件' }
 function stageName(value) { return stages[value] || value || '-' }
