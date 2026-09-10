@@ -720,20 +720,137 @@ func (s *Server) auditOAuthProtocolDiagnostic(accountID, jobID, trigger string, 
 	})
 }
 
-// executeCodexOAuth owns the protocol process only. Team OAuth and mailbox
-// OAuth share this exact implementation but persist their results separately.
+// executeCodexOAuth owns proxy quality selection and complete-round retries.
+// Every Team, mailbox, automatic-rotation, and 401 relogin OAuth entry point
+// reaches this function, so they all share the same gpt-account-manager style
+// proxy behavior.
 func (s *Server) executeCodexOAuth(email string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
+	const (
+		qualityAttempts = 4
+		roundAttempts   = 3
+	)
+	var lastErr error
+	var lastResult map[string]any
+	excluded := make(map[string]struct{})
+	for round := 1; round <= roundAttempts; round++ {
+		for quality := 1; quality <= qualityAttempts; quality++ {
+			lease, err := s.acquireOAuthProxyExcluding(excluded)
+			if err != nil {
+				return nil, err
+			}
+			baseURL := lease.url
+			proxyURL := baseURL
+			if quality > 1 || round > 1 {
+				proxyURL = rotateOAuthProxySession(baseURL, round, quality)
+			}
+			if progress != nil {
+				progress(fmt.Sprintf("OAuth 代理质检（第 %d/%d 轮，第 %d/%d 个出口）", round, roundAttempts, quality, qualityAttempts))
+			}
+			probeCtx, cancelProbe := context.WithTimeout(context.Background(), 45*time.Second)
+			probe, probeErr := s.probeOAuthProxy(probeCtx, proxyURL)
+			cancelProbe()
+			if diagnostic != nil {
+				diagnostic(protocolOAuthDiagnostic{
+					SchemaVersion: 1, Stage: "proxy_check", Event: "quality_result",
+					Message: "OAuth 代理出口质检结果", HTTPStatus: probe.HTTPStatus,
+					Attempt: quality, Level: map[bool]string{true: "info", false: "warning"}[probe.OK],
+					Request:  map[string]any{"proxy": map[string]any{"configured": true, "endpoint": oauthProxyEndpoint(proxyURL)}, "round": round, "quality_attempt": quality},
+					Response: map[string]any{"ok": probe.OK, "auth_status": probe.AuthStatus, "exit_ip": probe.ExitIP, "loc": probe.Location, "colo": probe.Colo, "error_code": probe.ErrorCode},
+					Details:  map[string]any{"error": probe.Error},
+				})
+			}
+			if probeErr != nil || !probe.OK {
+				lease.Release()
+				excluded[baseURL] = struct{}{}
+				lastErr = probeErr
+				if lastErr == nil {
+					lastErr = errors.New(probe.Error)
+				}
+				if progress != nil {
+					progress(fmt.Sprintf("OAuth 代理质检未通过：%s", strings.TrimSpace(lastErr.Error())))
+				}
+				continue
+			}
+			if progress != nil {
+				progress(fmt.Sprintf("OAuth 出口质检通过：%s（HTTP %d，IP %s）", proxyURL, probe.AuthStatus, probe.ExitIP))
+			}
+			result, runErr := s.executeCodexOAuthWithProxy(email, proxyURL, lease.label, lease.activeCount, progress, diagnostic)
+			lease.Release()
+			lastResult, lastErr = result, runErr
+			if runErr == nil && result != nil && result["success"] == true {
+				return result, nil
+			}
+			if !isRetryableOAuthNetworkResult(result, runErr) {
+				return result, runErr
+			}
+			excluded[baseURL] = struct{}{}
+			if diagnostic != nil {
+				diagnostic(protocolOAuthDiagnostic{
+					SchemaVersion: 1, Stage: "oauth", Event: "round_retry",
+					Message: "OAuth 代理/网络瞬时错误，释放出口并重新开始完整 OAuth",
+					Attempt: round, Level: "warning",
+					Response: map[string]any{"error": oauthErrorText(result, runErr), "proxy_endpoint": oauthProxyEndpoint(proxyURL)},
+					Details:  map[string]any{"round": round, "quality_attempt": quality},
+				})
+			}
+			if progress != nil {
+				progress(fmt.Sprintf("OAuth 网络/代理瞬时失败，释放当前出口并重试完整流程（第 %d/%d 轮）", round, roundAttempts))
+			}
+			break
+		}
+	}
+	if lastResult != nil {
+		return lastResult, lastErr
+	}
+	if lastErr == nil {
+		lastErr = errors.New("没有可用的 OAuth 代理出口")
+	}
+	return nil, fmt.Errorf("OAuth 代理质检失败：%w", lastErr)
+}
+
+func oauthErrorText(result map[string]any, runErr error) string {
+	if runErr != nil {
+		return runErr.Error()
+	}
+	if result != nil {
+		if value, ok := result["error"].(string); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+func isRetryableOAuthNetworkResult(result map[string]any, runErr error) bool {
+	text := strings.ToLower(oauthErrorText(result, runErr))
+	if text == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"could not resolve proxy", "resolve proxy", "proxy connect", "proxy connection",
+		"curl: (7)", "curl: (16)", "curl: (28)", "curl: (35)", "curl: (52)",
+		"curl: (55)", "curl: (56)", "curl: (95)", "curl: (97)",
+		"connection reset", "connection aborted", "connection refused", "connection closed",
+		"timed out", "timeout", "empty reply", "recv failure", "send failure",
+		"network error", "temporarily unavailable", "http 429", "http 500", "http 502",
+		"http 503", "http 504", "代理出口不稳定", "代理质检",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// executeCodexOAuthWithProxy owns the protocol process only. The proxy is
+// selected and quality-checked by executeCodexOAuth and remains unchanged for
+// this complete OAuth attempt.
+func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, activeCount int, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
 	_, mailCreds, err := s.store.MailAccountCredential(email)
 	if err != nil || strings.TrimSpace(mailCreds.PickupURL) == "" {
 		return nil, errors.New("邮箱未配置取件链接")
 	}
-	proxyLease, err := s.acquireOAuthProxy()
-	if err != nil {
-		return nil, err
-	}
-	defer proxyLease.Release()
 	if progress != nil {
-		progress(fmt.Sprintf("已分配 OAuth 代理：%s（当前任务 %d）", proxyLease.label, proxyLease.activeCount))
+		progress(fmt.Sprintf("已分配 OAuth 代理：%s（当前任务 %d）", proxyLabel, activeCount))
 	}
 	settings := s.store.Settings()
 	provider := strings.TrimSpace(settings.SMSProvider)
@@ -753,7 +870,7 @@ func (s *Server) executeCodexOAuth(email string, progress func(string), diagnost
 			}
 		}
 	}
-	payload, _ := json.Marshal(map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword, "proxy": proxyLease.url, "sms_provider": provider, "sms_config": smsCfg})
+	payload, _ := json.Marshal(map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword, "proxy": proxyURL, "sms_provider": provider, "sms_config": smsCfg})
 	python := workflow.FindPython()
 	if python == "" {
 		return nil, errors.New("未找到 Python 运行环境")

@@ -21,6 +21,8 @@ COPY --from=builder /out/chatgpt-space-merge /app/chatgpt-space-merge
 # These scripts are invoked using paths relative to /app by the Go backend.
 COPY --from=builder /src/internal/protocol_login.py /app/internal/protocol_login.py
 COPY --from=builder /src/internal/protocol_codex_oauth.py /app/internal/protocol_codex_oauth.py
+COPY --from=builder /src/internal/protocol_proxy_probe.py /app/internal/protocol_proxy_probe.py
+COPY --from=builder /src/internal/protocol_oauth_token.py /app/internal/protocol_oauth_token.py
 # protocol_codex_oauth.py imports config/core as top-level modules and invokes
 # sentinel-runner.js from this runtime tree. Keep the complete package.
 COPY --from=builder /src/internal/codex_runtime /app/internal/codex_runtime

@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -59,5 +60,20 @@ func TestExchangeOpenAIOAuthCodeRequiresGlobalProxy(t *testing.T) {
 	_, err := ExchangeOpenAIOAuthCode(context.Background(), "code", strings.Repeat("v", 43), model.Settings{})
 	if err == nil || !strings.Contains(err.Error(), "全局代理") {
 		t.Fatalf("expected global proxy error, got %v", err)
+	}
+}
+
+func TestOAuthTokenRetryClassification(t *testing.T) {
+	for _, err := range []error{
+		errors.New("curl: (5) Could not resolve proxy"),
+		errors.New("OAuth 刷新失败（HTTP 503）: unavailable"),
+		errors.New("proxy connect aborted"),
+	} {
+		if !isRetryableOAuthTokenError(err) {
+			t.Fatalf("expected retryable token error: %v", err)
+		}
+	}
+	if isRetryableOAuthTokenError(nonRetryableOAuthError{errors.New("OAuth 授权码交换失败（HTTP 400）: invalid_grant")}) {
+		t.Fatal("business token error must not be retryable")
 	}
 }

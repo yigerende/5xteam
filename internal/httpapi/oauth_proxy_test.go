@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -95,6 +96,30 @@ func TestOAuthProxyGlobalModePinsGlobalProxy(t *testing.T) {
 	defer lease.Release()
 	if lease.url != settings.ProxyURL {
 		t.Fatalf("lease proxy = %q, want %q", lease.url, settings.ProxyURL)
+	}
+}
+
+func TestRotateOAuthProxySessionReplacesOnlyStickySession(t *testing.T) {
+	proxyURL := "http://USER-zone-custom-region-DE-session-15918100-sessTime-20:f84325@global.rotgb.711proxy.com:10000"
+	got := rotateOAuthProxySession(proxyURL, 1, 1)
+	if got == proxyURL || !strings.Contains(got, "session-") || !strings.Contains(got, "@global.rotgb.711proxy.com:10000") || strings.Contains(got, "15918100") {
+		t.Fatalf("rotated proxy did not replace only sticky session: %q", got)
+	}
+}
+
+func TestRetryableOAuthNetworkResultClassification(t *testing.T) {
+	for _, message := range []string{
+		"curl: (5) Could not resolve proxy: global.rotgb.711proxy.com",
+		"curl: (56) Connection closed abruptly",
+		"OAuth 刷新失败（HTTP 429）: rate limited",
+		"代理出口不稳定",
+	} {
+		if !isRetryableOAuthNetworkResult(map[string]any{"error": message}, nil) {
+			t.Fatalf("message should be retryable: %s", message)
+		}
+	}
+	if isRetryableOAuthNetworkResult(map[string]any{"error": "email-otp/validate HTTP 400: invalid_auth_step"}, nil) {
+		t.Fatal("business auth step error must not retry as proxy network failure")
 	}
 }
 
