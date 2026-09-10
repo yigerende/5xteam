@@ -922,9 +922,6 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if v.TargetAdminID == "" {
 		return profile, errors.New("未配置目标母号")
 	}
-	if strings.TrimSpace(s.store.Settings().ProxyURL) == "" {
-		return profile, errors.New("请先配置全局代理；OpenAI 空间操作禁止直连")
-	}
 	admin, adminCreds, err := s.currentAdminCredential(ctx, v.TargetAdminID)
 	if err != nil {
 		return profile, err
@@ -932,9 +929,20 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if admin.TeamAccountID == "" {
 		return profile, errors.New("目标母号缺少 Team ID")
 	}
+	if strings.TrimSpace(s.store.Settings().ProxyURL) == "" {
+		return profile, errors.New("请先配置全局代理；子号空间操作禁止直连")
+	}
 	unlockAdmin := s.lockProTeam(admin.TeamAccountID)
 	defer unlockAdmin()
-	client, err := workflow.NewClient(s.store.Settings())
+	adminSettings, err := s.settingsForAdmin(s.store.Settings(), admin)
+	if err != nil {
+		return profile, err
+	}
+	adminClient, err := workflow.NewClient(adminSettings)
+	if err != nil {
+		return profile, err
+	}
+	userClient, err := workflow.NewClient(s.store.Settings())
 	if err != nil {
 		return profile, err
 	}
@@ -966,7 +974,7 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if profile.InviteStatus != "completed" {
 		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.InviteStatus = "running" })
 		err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error {
-			_, e := client.Invite(ctx, adminCreds.AccessToken, admin.TeamAccountID, profile.Email, v.TargetSeatType)
+			_, e := adminClient.Invite(ctx, adminCreds.AccessToken, admin.TeamAccountID, profile.Email, v.TargetSeatType)
 			return e
 		})
 		if err != nil {
@@ -977,7 +985,7 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if profile.AcceptStatus != "completed" {
 		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.AcceptStatus = "running" })
 		err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error {
-			_, e := client.Accept(ctx, credentials.AccessToken, admin.TeamAccountID, profile.OAuthUserID)
+			_, e := userClient.Accept(ctx, credentials.AccessToken, admin.TeamAccountID, profile.OAuthUserID)
 			return e
 		})
 		if err != nil {
@@ -987,7 +995,7 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	}
 	if profile.TransferStatus != "completed" {
 		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.TransferStatus = "running" })
-		err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error { _, e := client.Transfer(ctx, credentials.AccessToken, admin.TeamAccountID); return e })
+		err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error { _, e := userClient.Transfer(ctx, credentials.AccessToken, admin.TeamAccountID); return e })
 		if err != nil {
 			return fail("transfer", err)
 		}
@@ -1003,7 +1011,7 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 			_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "running" })
 			unlockRemove := s.lockTeamAccountRemove(admin.TeamAccountID)
 			err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error {
-				_, e := client.Kick(ctx, adminCreds.AccessToken, admin.TeamAccountID, profile.OAuthUserID)
+				_, e := adminClient.Kick(ctx, adminCreds.AccessToken, admin.TeamAccountID, profile.OAuthUserID)
 				return e
 			})
 			unlockRemove()

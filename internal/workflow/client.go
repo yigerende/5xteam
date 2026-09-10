@@ -747,10 +747,40 @@ func friendlyNetworkError(err error) error {
 	return fmt.Errorf("网络请求失败: %w", err)
 }
 
-func isRetryableConnectionError(err error) bool {
+// IsRetryableConnectionError identifies transport/proxy failures that are
+// safe to retry without treating an upstream business response (400/401/403)
+// as a transient network problem.
+func IsRetryableConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "curl: (56)") || strings.Contains(message, "connection closed abruptly")
+	for _, marker := range []string{
+		"浏览器请求失败",
+		"网络请求失败",
+		"could not resolve proxy",
+		"resolve proxy",
+		"proxy connection",
+		"proxy connect",
+		"proxy error",
+		"temporary failure in name resolution",
+		"name or service not known",
+		"curl: (5)", "curl: (6)", "curl: (7)", "curl: (16)",
+		"curl: (28)", "curl: (35)", "curl: (52)", "curl: (55)",
+		"curl: (56)", "curl: (95)", "curl: (97)",
+		"connection closed abruptly",
+		"connection reset", "connection aborted", "connection refused",
+		"connection closed", "empty reply", "recv failure", "send failure",
+		"tls handshake", "eof", "timeout", "timed out",
+		"http 502", "http 503", "http 504",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRetryableConnectionError(err error) bool {
+	return IsRetryableConnectionError(err)
 }

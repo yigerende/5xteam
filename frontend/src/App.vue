@@ -92,6 +92,7 @@ async function syncProAccounts() { if (referenceLoaded.pro) await reloadProAccou
 async function ensureTabData(id) {
   const requests = []
   if ((spaceMergeIDs.has(id) || ['free', 'admins', 'pro'].includes(id)) && !referenceLoaded.admins) requests.push(reloadAdmins())
+  if (id === 'admins' && !referenceLoaded.proxies) requests.push(reloadProxies())
   if (spaceMergeIDs.has(id) && !referenceLoaded.pro) requests.push(reloadProAccounts())
   if (['proxies', 'settings'].includes(id) && !referenceLoaded.proxies) requests.push(reloadProxies())
   await Promise.all(requests)
@@ -156,7 +157,7 @@ onMounted(checkAuth)
       <MailManagementView v-if="current === 'mail'" @open-team="openTeamFromMail" @pro-changed="syncProAccounts" />
       <SmsManagementView v-if="current === 'sms'" />
       <HistoryView v-if="current === 'history'" :history="history" @reload="reloadHistory" />
-      <AdminAccountsView v-if="current === 'admins'" :accounts="adminAccounts" @reload="reloadAdmins" />
+      <AdminAccountsView v-if="current === 'admins'" :accounts="adminAccounts" :proxies="proxies" @reload="reloadAdmins" />
       <OpenAIAccountsView v-if="current === 'openai'" :accounts="openAIAccounts" @reload="reloadOpenAI" />
       <ProxiesView v-if="current === 'proxies'" :proxies="proxies" :selected-u-r-l="settings?.proxy_url || ''" @reload="reloadProxies" @select="selectProxy" />
       <SettingsView v-if="current === 'settings'" :settings="settings" :proxies="proxies" @saved="settings = $event" />

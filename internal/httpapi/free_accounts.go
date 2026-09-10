@@ -234,7 +234,17 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusOK, profile, "")
 		return
 	}
-	client, err := workflow.NewClient(s.store.Settings())
+	adminSettings, err := s.settingsForAdmin(s.store.Settings(), admin)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	adminClient, err := workflow.NewClient(adminSettings)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	userClient, err := workflow.NewClient(s.store.Settings())
 	if err != nil {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
@@ -243,7 +253,9 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		inviteStarted := time.Now()
 		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_start", map[string]any{"seat_type": input.SeatType})
 		var inviteResponse workflow.Response
-		inviteResponse, err = client.Invite(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, profile.Email, input.SeatType)
+		inviteResponse, err = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
+			return adminClient.Invite(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, profile.Email, input.SeatType)
+		})
 		if err != nil {
 			s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_error", map[string]any{"duration_ms": time.Since(inviteStarted).Milliseconds(), "http_status": inviteResponse.StatusCode, "error": err.Error()})
 			s.failFreeAccount(profile.ID, "invite", err)
@@ -258,7 +270,9 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 	acceptStarted := time.Now()
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_start", map[string]any{"user_id": profile.UserID, "team_account_id": admin.TeamAccountID})
 	var acceptResponse workflow.Response
-	acceptResponse, err = client.Accept(r.Context(), sourceCredentials.SourceAccessToken, admin.TeamAccountID, profile.UserID)
+	acceptResponse, err = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
+		return userClient.Accept(r.Context(), sourceCredentials.SourceAccessToken, admin.TeamAccountID, profile.UserID)
+	})
 	if err != nil {
 		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_error", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "error": err.Error()})
 		s.failFreeAccount(profile.ID, "accept", err)
@@ -1681,19 +1695,25 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	unlockTeam := s.lockTeamAccountRemove(profile.TeamAccountID)
 	defer unlockTeam()
 	profile = s.refreshSub2CostBeforeRemoval(ctx, profile)
-	_, adminCredentials, err := s.currentAdminCredential(ctx, profile.AdminAccountID)
+	adminProfile, adminCredentials, err := s.currentAdminCredential(ctx, profile.AdminAccountID)
 	if err != nil {
 		s.failFreeAccount(profile.ID, "remove", err)
 		return profile, err
 	}
-	client, err := workflow.NewClient(s.store.Settings())
+	adminSettings, err := s.settingsForAdmin(s.store.Settings(), adminProfile)
+	if err != nil {
+		return profile, err
+	}
+	client, err := workflow.NewClient(adminSettings)
 	if err != nil {
 		return profile, err
 	}
 	_, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.RemoveStatus, item.LastError = "removing", "running", ""
 	})
-	if _, err = client.Kick(ctx, adminCredentials.AccessToken, profile.TeamAccountID, profile.UserID); err != nil {
+	if _, err = retryTeamRequest(ctx, s.store.Settings(), func() (workflow.Response, error) {
+		return client.Kick(ctx, adminCredentials.AccessToken, profile.TeamAccountID, profile.UserID)
+	}); err != nil {
 		s.failFreeAccount(profile.ID, "remove", err)
 		return profile, err
 	}
@@ -1712,6 +1732,36 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	_ = s.store.ReleaseSeatReservationByAccount(id)
 	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "seat_released", Source: "remove", Operation: "remove", Stage: "remove", Message: "账号移出空间，释放席位预占"})
 	return updated, updateErr
+}
+
+// retryTeamRequest retries only transport/proxy failures. HTTP business
+// responses such as 400/401/403 are returned immediately so a real upstream
+// rejection is not turned into duplicate Team mutations.
+func retryTeamRequest(ctx context.Context, settings model.Settings, call func() (workflow.Response, error)) (workflow.Response, error) {
+	attempts := settings.NetworkRetryCount
+	if attempts < 0 {
+		attempts = 0
+	}
+	var response workflow.Response
+	var err error
+	for attempt := 0; attempt <= attempts; attempt++ {
+		if attempt > 0 && settings.NetworkRetryInterval > 0 {
+			timer := time.NewTimer(time.Duration(settings.NetworkRetryInterval) * time.Second)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return response, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		response, err = call()
+		if err == nil || !workflow.IsRetryableConnectionError(err) || attempt >= attempts {
+			return response, err
+		}
+	}
+	return response, err
 }
 
 func (s *Server) refreshSub2CostBeforeRemoval(ctx context.Context, profile model.FreeAccountProfile) model.FreeAccountProfile {

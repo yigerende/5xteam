@@ -43,6 +43,7 @@ type StartInput struct {
 	TeamOverride      string
 	SeatType          string
 	Settings          model.Settings
+	AdminSettings     model.Settings
 	RefreshAdminToken func(context.Context) (string, error)
 }
 
@@ -79,6 +80,14 @@ func (m *Manager) StartOperation(input StartInput, operation string) (model.Job,
 	if err != nil {
 		return model.Job{}, err
 	}
+	adminSettings := input.AdminSettings
+	if strings.TrimSpace(adminSettings.BaseURL) == "" {
+		adminSettings = input.Settings
+	}
+	adminClient, err := NewClient(adminSettings)
+	if err != nil {
+		return model.Job{}, err
+	}
 	if len(input.UserTokens) == 0 {
 		return model.Job{}, errors.New("至少需要一个子号 AT")
 	}
@@ -111,7 +120,7 @@ func (m *Manager) StartOperation(input StartInput, operation string) (model.Job,
 	m.jobs[id] = record
 	m.pruneLocked()
 	m.mu.Unlock()
-	go m.run(ctx, record, client, input, users)
+	go m.run(ctx, record, client, adminClient, input, users)
 	return cloneJob(job), nil
 }
 
@@ -139,7 +148,7 @@ func newSteps(keys []string) []model.Step {
 	return steps
 }
 
-func (m *Manager) run(ctx context.Context, record *jobRecord, client *Client, input StartInput, users []tokenUser) {
+func (m *Manager) run(ctx context.Context, record *jobRecord, client, adminClient *Client, input StartInput, users []tokenUser) {
 	now := time.Now()
 	m.update(record, func(job *model.Job) { job.Status, job.StartedAt = "running", &now })
 	// The upstream account workflow is stateful per user. Keep the entire
@@ -155,7 +164,7 @@ func (m *Manager) run(ctx context.Context, record *jobRecord, client *Client, in
 			m.markCancelled(record, index)
 			continue
 		}
-		failed := m.runUser(ctx, record, client, input, index, user, &adminToken)
+		failed := m.runUser(ctx, record, client, adminClient, input, index, user, &adminToken)
 		if failed && input.Settings.StopOnFirstFailure {
 			record.cancel()
 		}
@@ -200,12 +209,12 @@ func (m *Manager) finishInvalid(record *jobRecord, index int) {
 	})
 }
 
-func (m *Manager) runUser(ctx context.Context, record *jobRecord, client *Client, input StartInput, index int, user tokenUser, adminToken *string) bool {
+func (m *Manager) runUser(ctx context.Context, record *jobRecord, client, adminClient *Client, input StartInput, index int, user tokenUser, adminToken *string) bool {
 	started := time.Now()
 	m.update(record, func(job *model.Job) { job.Results[index].Status, job.Results[index].StartedAt = "running", &started })
 	invited := false
 	for stepIndex, step := range record.job.Results[index].Steps {
-		item := m.stepCall(step.Key, record, client, input, user, adminToken)
+		item := m.stepCall(step.Key, record, client, adminClient, input, user, adminToken)
 		if ctx.Err() != nil {
 			m.markCancelled(record, index)
 			return true
@@ -221,7 +230,7 @@ func (m *Manager) runUser(ctx context.Context, record *jobRecord, client *Client
 			}
 			m.failStep(record, index, stepIndex, response.StatusCode, err.Error())
 			if record.job.Operation == "full" && invited && input.Settings.AutoCleanup && item.key != "kick" && ctx.Err() == nil {
-				m.cleanupAfterFailure(ctx, record, client, input, adminToken, index, user.info.UserID)
+				m.cleanupAfterFailure(ctx, record, adminClient, input, adminToken, index, user.info.UserID)
 			}
 			m.finishUser(record, index, false, err.Error())
 			return true
@@ -245,12 +254,12 @@ type workflowStepCall struct {
 	call  func(context.Context) (Response, error)
 }
 
-func (m *Manager) stepCall(key string, record *jobRecord, client *Client, input StartInput, user tokenUser, adminToken *string) workflowStepCall {
+func (m *Manager) stepCall(key string, record *jobRecord, client, adminClient *Client, input StartInput, user tokenUser, adminToken *string) workflowStepCall {
 	switch key {
 	case "invite":
 		return workflowStepCall{key: key, delay: input.Settings.InviteDelaySeconds, call: func(c context.Context) (Response, error) {
 			return m.callAdmin(c, input, adminToken, func(token string) (Response, error) {
-				return client.Invite(c, token, record.job.TeamAccountID, user.info.Email, input.SeatType)
+				return adminClient.Invite(c, token, record.job.TeamAccountID, user.info.Email, input.SeatType)
 			})
 		}}
 	case "accept":
@@ -264,7 +273,7 @@ func (m *Manager) stepCall(key string, record *jobRecord, client *Client, input 
 	default:
 		return workflowStepCall{key: "kick", call: func(c context.Context) (Response, error) {
 			return m.callAdmin(c, input, adminToken, func(token string) (Response, error) {
-				return client.Kick(c, token, record.job.TeamAccountID, user.info.UserID)
+				return adminClient.Kick(c, token, record.job.TeamAccountID, user.info.UserID)
 			})
 		}}
 	}
@@ -288,8 +297,8 @@ func (m *Manager) callStepWithRetry(ctx context.Context, settings model.Settings
 	var err error
 	for attempt := 0; ; attempt++ {
 		response, err = call(ctx)
-		if err == nil || !isRetryableConnectionError(err) || attempt >= settings.NetworkRetryCount {
-			if err != nil && isRetryableConnectionError(err) && attempt > 0 {
+		if err == nil || !IsRetryableConnectionError(err) || attempt >= settings.NetworkRetryCount {
+			if err != nil && IsRetryableConnectionError(err) && attempt > 0 {
 				err = fmt.Errorf("连接中断，自动重试 %d 次后仍失败: %w", attempt, err)
 			}
 			return response, err
@@ -304,12 +313,12 @@ func (m *Manager) callStepWithRetry(ctx context.Context, settings model.Settings
 	}
 }
 
-func (m *Manager) cleanupAfterFailure(ctx context.Context, record *jobRecord, client *Client, input StartInput, adminToken *string, index int, userID string) {
+func (m *Manager) cleanupAfterFailure(ctx context.Context, record *jobRecord, adminClient *Client, input StartInput, adminToken *string, index int, userID string) {
 	stepIndex := 3
 	m.startStep(record, index, stepIndex)
 	response, err := m.callStepWithRetry(ctx, input.Settings, func(callCtx context.Context) (Response, error) {
 		return m.callAdmin(callCtx, input, adminToken, func(token string) (Response, error) {
-			return client.Kick(callCtx, token, record.job.TeamAccountID, userID)
+			return adminClient.Kick(callCtx, token, record.job.TeamAccountID, userID)
 		})
 	}, func(retry, total, interval int) {
 		m.markStepRetry(record, index, stepIndex, retry, total, interval)

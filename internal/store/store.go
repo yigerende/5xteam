@@ -876,7 +876,55 @@ func (s *Store) AdminAccounts() []model.AdminAccountProfile {
 	}
 	_ = rows.Close()
 	s.reconcileAdminTeamRotationChildCounts(result)
+	s.populateAdminCurrentSpace(result)
 	return result
+}
+
+// populateAdminCurrentSpace enriches mother-account rows with the current
+// Team members represented by the local Free-account lifecycle records. It is
+// intentionally calculated across the whole database, not just the current
+// page, so pagination never changes the displayed count.
+// The caller must hold s.mu.
+func (s *Store) populateAdminCurrentSpace(accounts []model.AdminAccountProfile) {
+	if len(accounts) == 0 {
+		return
+	}
+	adminTeams := make(map[string]string, len(accounts))
+	for _, account := range accounts {
+		adminTeams[account.ID] = strings.TrimSpace(account.TeamAccountID)
+	}
+	byAdmin := make(map[string][]string, len(accounts))
+	rows, err := s.db.Query("SELECT profile FROM free_accounts")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		var profile model.FreeAccountProfile
+		if rows.Scan(&raw) != nil || json.Unmarshal([]byte(raw), &profile) != nil {
+			continue
+		}
+		if profile.AdminAccountID == "" || profile.AcceptStatus != "completed" || profile.RemoveStatus == "completed" {
+			continue
+		}
+		if teamID := adminTeams[profile.AdminAccountID]; teamID != "" && strings.TrimSpace(profile.TeamAccountID) != "" && teamID != strings.TrimSpace(profile.TeamAccountID) {
+			continue
+		}
+		email := strings.TrimSpace(profile.Email)
+		if email == "" {
+			email = strings.TrimSpace(profile.Label)
+		}
+		if email != "" {
+			byAdmin[profile.AdminAccountID] = append(byAdmin[profile.AdminAccountID], email)
+		}
+	}
+	for i := range accounts {
+		emails := byAdmin[accounts[i].ID]
+		sort.Strings(emails)
+		accounts[i].CurrentSpaceEmails = emails
+		accounts[i].CurrentSpaceCount = len(emails)
+	}
 }
 
 // reconcileAdminTeamRotationChildCounts backfills counters for older data that
@@ -976,6 +1024,9 @@ func (s *Store) SaveAdminAccountCredentials(profile model.AdminAccountProfile, a
 		}
 		profile.CreatedAt, profile.UpdatedAt = existing.CreatedAt, now
 		profile.TeamRotationChildCount = existing.TeamRotationChildCount
+		if profile.ProxyID == "" {
+			profile.ProxyID = existing.ProxyID
+		}
 		if accessToken != "" {
 			var err error
 			encrypted, err = s.encrypt(accessToken)
@@ -1005,6 +1056,35 @@ func (s *Store) SaveAdminAccountCredentials(profile model.AdminAccountProfile, a
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return model.AdminAccountProfile{}, errors.New("母号名称已存在")
 		}
+		return model.AdminAccountProfile{}, err
+	}
+	return profile, nil
+}
+
+// UpdateAdminAccountProxy changes only the proxy binding and preserves the
+// encrypted credentials and all other profile fields.
+func (s *Store) UpdateAdminAccountProxy(id, proxyID string) (model.AdminAccountProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, proxyID = strings.TrimSpace(id), strings.TrimSpace(proxyID)
+	var raw string
+	if err := s.db.QueryRow("SELECT profile FROM admin_accounts WHERE id=?", id).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.AdminAccountProfile{}, errors.New("母号配置不存在")
+		}
+		return model.AdminAccountProfile{}, err
+	}
+	var profile model.AdminAccountProfile
+	if err := json.Unmarshal([]byte(raw), &profile); err != nil {
+		return model.AdminAccountProfile{}, err
+	}
+	profile.ProxyID = proxyID
+	profile.UpdatedAt = time.Now()
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		return model.AdminAccountProfile{}, err
+	}
+	if _, err = s.db.Exec("UPDATE admin_accounts SET profile=? WHERE id=?", string(encoded), id); err != nil {
 		return model.AdminAccountProfile{}, err
 	}
 	return profile, nil

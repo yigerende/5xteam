@@ -65,7 +65,7 @@ const joinCapacityRefreshing = ref(false)
 const page = ref(1)
 const pageSize = ref(10)
 const accountTotal = ref(0)
-const accountSummary = reactive({ all: 0, outside: 0, inside: 0, removed: 0, oauth_ready: 0, monitoring: 0, inside_premium: 0, quota_7d_remaining_total: 0, quota_7d_count: 0, oldest_status_checked_at: '', oldest_quota_checked_at: '', pending_seats_by_admin: {} })
+const accountSummary = reactive({ all: 0, outside: 0, inside: 0, removed: 0, oauth_ready: 0, invite_pending: 0, monitoring: 0, inside_premium: 0, quota_7d_remaining_total: 0, quota_7d_count: 0, oldest_status_checked_at: '', oldest_quota_checked_at: '', pending_seats_by_admin: {} })
 const teamSpaceFilter = ref('')
 const selectedAccountIDs = ref(new Set())
 const lifecycleView = reactive({ account: null, events: [], task: null, loading: false, error: '', page: 1, pageSize: 10, total: 0 })
@@ -88,7 +88,7 @@ watch(() => liveAccounts.value.map((item) => String(item.id)).join(','), () => {
 })
 const activeActivities = computed(() => Object.values(activities))
 const joinedCount = computed(() => Number(accountSummary.inside || 0))
-const oauthCount = computed(() => Number(accountSummary.oauth_ready || 0))
+const invitePendingCount = computed(() => Number(accountSummary.invite_pending || 0))
 const monitoringCount = computed(() => Number(accountSummary.monitoring || 0))
 const removedCount = computed(() => Number(accountSummary.removed || 0))
 const premiumSeatSummary = computed(() => {
@@ -759,12 +759,12 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
     </nav>
 
     <div v-if="teamMenu === 'accounts'" class="metric-grid team-metrics">
-      <article class="metric-card blue"><Upload :size="17" /><div><span>已导入</span><strong>{{ accountSummary.all }}</strong><small>持久化 Free 账号</small></div></article>
       <article class="metric-card green"><DoorOpen :size="17" /><div><span>空间内</span><strong>{{ joinedCount }}</strong><small>已接受团队邀请</small></div></article>
-      <article class="metric-card amber"><KeyRound :size="17" /><div><span>OAuth 就绪</span><strong>{{ oauthCount }}</strong><small>Codex 凭据已绑定</small></div></article>
       <article class="metric-card slate"><Gauge :size="17" /><div><span>监控 / 已移出</span><strong>{{ monitoringCount }} / {{ removedCount }}</strong><small>Sub2 额度状态</small></div></article>
       <article class="metric-card blue"><Gauge :size="17" /><div><span>7天平均剩余额度</span><strong>{{ average7DRemaining }}</strong><small>按 5x 席位总数归一化 · 已查询 {{ accountSummary.quota_7d_count }} 个账号</small></div></article>
-      <article class="metric-card amber capacity-metric-card"><Gauge :size="17" /><div><span>5x 席位总数 / 剩余</span><strong>{{ premiumSeatSummary.total }} / {{ premiumSeatSummary.remaining }}</strong><small>{{ lastCapacityFetchAt ? `更新于 ${formatTime(lastCapacityFetchAt)}` : '尚未读取席位' }}</small></div><button class="metric-refresh-button" type="button" title="刷新 5x 席位" :disabled="capacityRefreshing" @click="loadAdminCapacities({ force: true })"><RefreshCw :class="{ spin: capacityRefreshing }" :size="14" /></button></article>
+      <article class="metric-card blue"><DoorOpen :size="17" /><div><span>邀请在途</span><strong>{{ invitePendingCount }}</strong><small>已发邀请但尚未进入空间</small></div></article>
+      <article class="metric-card amber"><Gauge :size="17" /><div><span>母号 5x 席位快照</span><strong>{{ premiumSeatSummary.total }}</strong><small>30 分钟缓存 · {{ lastCapacityFetchAt ? `更新于 ${formatTime(lastCapacityFetchAt)}` : '尚未读取' }}</small></div></article>
+      <article class="metric-card amber capacity-metric-card"><Gauge :size="17" /><div><span>5x 席位总数 / 剩余</span><strong>{{ premiumSeatSummary.total }} / {{ premiumSeatSummary.remaining }}</strong><small>剩余按当前空间账号实时计算</small></div><button class="metric-refresh-button" type="button" title="刷新 5x 席位" :disabled="capacityRefreshing" @click="loadAdminCapacities({ force: true })"><RefreshCw :class="{ spin: capacityRefreshing }" :size="14" /></button></article>
     </div>
 
     <div v-if="teamMenu === 'import'" class="free-config-grid account-management-panel">

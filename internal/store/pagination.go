@@ -30,6 +30,7 @@ type FreeAccountsPageSummary struct {
 	OldestStatusCheckedAt string                    `json:"oldest_status_checked_at,omitempty"`
 	OldestQuotaCheckedAt  string                    `json:"oldest_quota_checked_at,omitempty"`
 	PendingSeatsByAdmin   map[string]map[string]int `json:"pending_seats_by_admin"`
+	InvitePending         int                       `json:"invite_pending"`
 }
 
 type ProAccountsPageSummary struct {
@@ -202,9 +203,12 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 		COALESCE(SUM(CASE WHEN space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL THEN MAX(0,100-CAST(json_extract(profile,'$.quota_7d.used_percent') AS REAL)) ELSE 0 END),0),
 		COALESCE(SUM(space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL),0),
 		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' THEN json_extract(profile,'$.status_checked_at') END),''),
-		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' THEN json_extract(profile,'$.quota_checked_at') END),'')
+		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' THEN json_extract(profile,'$.quota_checked_at') END),''),
+		COALESCE(SUM(space_state!='removed' AND json_extract(profile,'$.accept_status')!='completed'
+			AND json_extract(profile,'$.invite_status') IN ('pending','running','completed')
+			AND COALESCE(json_extract(profile,'$.admin_account_id'),'')!=''),0)
 		FROM accounts`).Scan(&summary.All, &summary.Outside, &summary.Inside, &summary.Removed, &summary.OAuthReady, &summary.Monitoring,
-		&summary.InsidePremium, &summary.Quota7DRemainingTotal, &summary.Quota7DCount, &summary.OldestStatusCheckedAt, &summary.OldestQuotaCheckedAt)
+		&summary.InsidePremium, &summary.Quota7DRemainingTotal, &summary.Quota7DCount, &summary.OldestStatusCheckedAt, &summary.OldestQuotaCheckedAt, &summary.InvitePending)
 	if err != nil {
 		return nil, 0, summary, err
 	}
@@ -326,6 +330,7 @@ func (s *Store) AdminAccountsPage(limit, offset int) ([]model.AdminAccountProfil
 	}
 	rows.Close()
 	s.reconcileAdminTeamRotationChildCounts(items)
+	s.populateAdminCurrentSpace(items)
 	summary := AdminAccountsPageSummary{All: total}
 	allRows, err := s.db.Query("SELECT profile FROM admin_accounts")
 	if err != nil {

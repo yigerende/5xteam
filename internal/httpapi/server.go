@@ -122,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin-accounts", s.createAdminAccount)
 	mux.HandleFunc("PUT /api/admin-accounts/{id}", s.updateAdminAccount)
 	mux.HandleFunc("DELETE /api/admin-accounts/{id}", s.deleteAdminAccount)
+	mux.HandleFunc("PUT /api/admin-accounts/{id}/proxy", s.updateAdminAccountProxy)
 	mux.HandleFunc("POST /api/admin-accounts/{id}/refresh", s.refreshAdminAccount)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/credentials", s.adminAccountCredentials)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/capacity", s.adminAccountCapacity)
@@ -435,7 +436,11 @@ func (s *Server) adminAccountCapacity(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
-	settings := s.store.Settings()
+	settings, err := s.settingsForAdmin(s.store.Settings(), profile)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
 	client, err := workflow.NewClient(settings)
 	if err != nil {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
@@ -749,6 +754,7 @@ type adminAccountInput struct {
 	AccessToken   string `json:"access_token"`
 	RefreshToken  string `json:"refresh_token"`
 	TeamAccountID string `json:"team_account_id"`
+	ProxyID       string `json:"proxy_id"`
 }
 
 func (s *Server) createAdminAccount(w http.ResponseWriter, r *http.Request) {
@@ -780,8 +786,21 @@ func (s *Server) updateAdminAccount(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveAdminAccount(id string, input adminAccountInput) (model.AdminAccountProfile, error) {
 	input.Label, input.AccessToken = strings.TrimSpace(input.Label), strings.TrimSpace(input.AccessToken)
 	input.RefreshToken, input.TeamAccountID = strings.TrimSpace(input.RefreshToken), strings.TrimSpace(input.TeamAccountID)
+	input.ProxyID = strings.TrimSpace(input.ProxyID)
 	if input.Label == "" || len([]rune(input.Label)) > 40 {
 		return model.AdminAccountProfile{}, errors.New("母号名称不能为空且不能超过 40 个字符")
+	}
+	if input.ProxyID != "" {
+		found := false
+		for _, proxy := range s.store.Proxies() {
+			if proxy.ID == input.ProxyID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return model.AdminAccountProfile{}, errors.New("所选母号代理不存在")
+		}
 	}
 	token := input.AccessToken
 	var existing model.AdminAccountProfile
@@ -809,15 +828,64 @@ func (s *Server) saveAdminAccount(id string, input adminAccountInput) (model.Adm
 	if teamID == "" {
 		return model.AdminAccountProfile{}, errors.New("无法读取团队 ID，请手动填写")
 	}
+	if input.ProxyID == "" {
+		input.ProxyID = existing.ProxyID
+	}
 	profile := model.AdminAccountProfile{
 		ID: id, Label: input.Label, Email: info.Email, Name: info.Name, UserID: info.UserID,
 		AccountID: info.AccountID, TeamAccountID: teamID, PlanType: info.PlanType, LastRefreshedAt: existing.LastRefreshedAt,
 		TeamRotationChildCount: existing.TeamRotationChildCount,
+		ProxyID:                input.ProxyID,
 	}
 	if expiresAt, ok := workflow.AccessTokenExpiry(token); ok {
 		profile.AccessTokenExpiresAt = &expiresAt
 	}
 	return s.store.SaveAdminAccountCredentials(profile, input.AccessToken, input.RefreshToken)
+}
+
+func (s *Server) updateAdminAccountProxy(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ProxyID string `json:"proxy_id"`
+	}
+	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
+		return
+	}
+	input.ProxyID = strings.TrimSpace(input.ProxyID)
+	if input.ProxyID != "" {
+		found := false
+		for _, proxy := range s.store.Proxies() {
+			if proxy.ID == input.ProxyID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeAPI(w, http.StatusBadRequest, nil, "所选母号代理不存在")
+			return
+		}
+	}
+	profile, err := s.store.UpdateAdminAccountProxy(r.PathValue("id"), input.ProxyID)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, profile, "")
+}
+
+// settingsForAdmin applies a mother account's dedicated proxy to requests
+// made with that mother's credentials. Child-account and OAuth callers keep
+// using the original global settings.
+func (s *Server) settingsForAdmin(settings model.Settings, admin model.AdminAccountProfile) (model.Settings, error) {
+	if strings.TrimSpace(admin.ProxyID) == "" {
+		return settings, nil
+	}
+	for _, proxy := range s.store.Proxies() {
+		if proxy.ID == admin.ProxyID {
+			settings.ProxyURL = proxy.URL
+			return settings, nil
+		}
+	}
+	return settings, errors.New("母号绑定的专属代理不存在，请重新配置")
 }
 
 func (s *Server) deleteAdminAccount(w http.ResponseWriter, r *http.Request) {
@@ -880,7 +948,11 @@ func (s *Server) refreshStoredAdmin(ctx context.Context, id string, force bool) 
 	if credentials.RefreshToken == "" {
 		return model.AdminAccountProfile{}, store.AdminAccountCredentials{}, false, errors.New("母号未保存 RT，无法自动续期")
 	}
-	tokens, err := workflow.RefreshOAuthTokens(ctx, credentials.RefreshToken, s.store.Settings())
+	settings, err := s.settingsForAdmin(s.store.Settings(), profile)
+	if err != nil {
+		return model.AdminAccountProfile{}, store.AdminAccountCredentials{}, false, err
+	}
+	tokens, err := workflow.RefreshOAuthTokens(ctx, credentials.RefreshToken, settings)
 	if err != nil {
 		return model.AdminAccountProfile{}, store.AdminAccountCredentials{}, false, err
 	}
@@ -952,11 +1024,20 @@ func (s *Server) testAdminAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 400, nil, "Access Token 不能为空")
 		return
 	}
-	result := workflow.TestAdminAccount(r.Context(), token, teamID, s.store.Settings())
+	settings := s.store.Settings()
+	if savedID != "" {
+		if profile, _, profileErr := s.store.AdminAccountCredential(savedID); profileErr == nil {
+			if settings, profileErr = s.settingsForAdmin(settings, profile); profileErr != nil {
+				writeAPI(w, http.StatusBadRequest, nil, profileErr.Error())
+				return
+			}
+		}
+	}
+	result := workflow.TestAdminAccount(r.Context(), token, teamID, settings)
 	if savedID != "" && !result.Valid && result.HTTPStatus == http.StatusUnauthorized {
 		_, credentials, refreshed, refreshErr := s.refreshStoredAdmin(r.Context(), savedID, true)
 		if refreshErr == nil && refreshed {
-			result = workflow.TestAdminAccount(r.Context(), credentials.AccessToken, teamID, s.store.Settings())
+			result = workflow.TestAdminAccount(r.Context(), credentials.AccessToken, teamID, settings)
 		}
 	}
 	writeAPI(w, 200, result, "")
@@ -1078,6 +1159,7 @@ func (s *Server) startJobWithOperation(w http.ResponseWriter, r *http.Request, o
 	settings := s.store.Settings()
 	adminToken, teamID := strings.TrimSpace(input.AdminToken), strings.TrimSpace(input.TeamAccountID)
 	adminAccountID := strings.TrimSpace(input.AdminAccountID)
+	var adminSettings model.Settings
 	if adminAccountID != "" {
 		profile, credentials, err := s.currentAdminCredential(r.Context(), adminAccountID)
 		if err != nil {
@@ -1088,8 +1170,13 @@ func (s *Server) startJobWithOperation(w http.ResponseWriter, r *http.Request, o
 		if teamID == "" {
 			teamID = profile.TeamAccountID
 		}
+		adminSettings, err = s.settingsForAdmin(settings, profile)
+		if err != nil {
+			writeAPI(w, 400, nil, err.Error())
+			return
+		}
 	}
-	startInput := workflow.StartInput{AdminToken: adminToken, UserTokens: cleanTokens(input.UserTokens), TeamOverride: teamID, SeatType: seatType, Settings: settings}
+	startInput := workflow.StartInput{AdminToken: adminToken, UserTokens: cleanTokens(input.UserTokens), TeamOverride: teamID, SeatType: seatType, Settings: settings, AdminSettings: adminSettings}
 	if adminAccountID != "" {
 		startInput.RefreshAdminToken = func(ctx context.Context) (string, error) {
 			_, credentials, _, err := s.refreshStoredAdmin(ctx, adminAccountID, true)

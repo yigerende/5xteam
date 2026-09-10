@@ -1,6 +1,5 @@
 import json
 import sys
-import time
 from urllib.parse import urlparse
 
 from curl_cffi import requests
@@ -92,6 +91,10 @@ def main() -> None:
         return
 
     try:
+        # A rotating proxy may legitimately return a different exit IP on
+        # separate requests. OAuth itself keeps one configured proxy/session
+        # for the protocol attempt, but a second Cloudflare trace must not
+        # reject that attempt as "IP unstable".
         first = trace_ip(
             requests.Session(impersonate=IMPERSONATE),
             proxy,
@@ -101,23 +104,6 @@ def main() -> None:
         if not first_ip:
             result["error_code"] = "proxy_ip_missing"
             result["error"] = "代理出口检测没有返回 IP"
-            print(json.dumps(result, ensure_ascii=False))
-            return
-        time.sleep(0.8)
-        second = trace_ip(
-            requests.Session(impersonate=IMPERSONATE),
-            proxy,
-        )
-        second_ip = second["ip"]
-        result["egress_confirm"] = second
-        if not second_ip:
-            result["error_code"] = "proxy_ip_missing"
-            result["error"] = "代理出口复检没有返回 IP"
-            print(json.dumps(result, ensure_ascii=False))
-            return
-        if first_ip != second_ip:
-            result["error_code"] = "proxy_ip_unstable"
-            result["error"] = f"同一 OAuth 会话出口 IP 不稳定：{first_ip} -> {second_ip}"
             print(json.dumps(result, ensure_ascii=False))
             return
         result.update({

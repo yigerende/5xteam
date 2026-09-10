@@ -281,7 +281,11 @@ func autoRotationDecision(avg, threshold float64, availableSeats int) (bool, str
 }
 
 func (s *Server) capacityForAdmin(ctx context.Context, admin model.AdminAccountProfile, token string) (model.AdminSeatCapacity, error) {
-	client, err := workflow.NewClient(s.store.Settings())
+	settings, err := s.settingsForAdmin(s.store.Settings(), admin)
+	if err != nil {
+		return model.AdminSeatCapacity{}, err
+	}
+	client, err := workflow.NewClient(settings)
 	if err != nil {
 		return model.AdminSeatCapacity{}, err
 	}
