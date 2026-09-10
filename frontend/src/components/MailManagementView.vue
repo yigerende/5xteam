@@ -110,13 +110,9 @@ const credentialDialog = reactive({
 const timers = new Set();
 const accountPage = ref(1);
 const accountPageSize = ref(10);
+const accountTotal = ref(0);
 const selectedEmails = ref(new Set());
-const pagedFilteredAccounts = computed(() =>
-  filteredAccounts.value.slice(
-    (accountPage.value - 1) * accountPageSize.value,
-    accountPage.value * accountPageSize.value,
-  ),
-);
+const pagedFilteredAccounts = computed(() => accounts.value);
 const selectedAccounts = computed(() =>
   accounts.value.filter((item) => selectedEmails.value.has(String(item.email || '').toLowerCase())),
 );
@@ -125,34 +121,7 @@ const allVisibleSelected = computed(() =>
 );
 const messagePage = ref(1);
 const messagePageSize = ref(10);
-const pagedMessages = computed(() =>
-  messages.value.slice(
-    (messagePage.value - 1) * messagePageSize.value,
-    messagePage.value * messagePageSize.value,
-  ),
-);
-
-const filteredAccounts = computed(() => {
-  const query = accountQuery.value.trim().toLowerCase();
-  const matched = query
-    ? accounts.value.filter((item) =>
-        `${item.email} ${item.label} ${item.login_method}`
-          .toLowerCase()
-          .includes(query),
-      )
-    : accounts.value;
-  const visible = spaceFilter.value === "all"
-    ? matched
-    : matched.filter((item) => mailSpaceStatus(item) === spaceFilter.value);
-  const order = { outside: 0, inside: 1, removed: 2 };
-  return [...visible].sort((left, right) => {
-    const stateDiff = (order[mailSpaceStatus(left)] ?? 9) - (order[mailSpaceStatus(right)] ?? 9);
-    if (stateDiff !== 0) return stateDiff;
-    const leftTime = Date.parse(left.created_at || left.updated_at || '') || 0;
-    const rightTime = Date.parse(right.created_at || right.updated_at || '') || 0;
-    return rightTime - leftTime;
-  });
-});
+const messageTotal = ref(0);
 const loginDialogTerminal = computed(
   () =>
     ["success", "failed", "cancelled", "challenge"].includes(
@@ -316,23 +285,8 @@ function mailSpaceStatus(account) {
   if (pipeline?.accept_status === "completed") return "inside";
   return "outside";
 }
-const spaceFilterCounts = computed(() => ({
-  outside: accounts.value.filter((item) => mailSpaceStatus(item) === "outside").length,
-  inside: accounts.value.filter((item) => mailSpaceStatus(item) === "inside").length,
-  removed: accounts.value.filter((item) => mailSpaceStatus(item) === "removed").length,
-}));
-watch(spaceFilter, () => {
-  accountPage.value = 1;
-});
-watch(accountQuery, () => {
-  accountPage.value = 1;
-});
-watch(() => filteredAccounts.value.length, () => {
-  accountPage.value = Math.min(accountPage.value, Math.max(1, Math.ceil(filteredAccounts.value.length / accountPageSize.value)));
-});
-watch(accountPageSize, () => {
-  accountPage.value = 1;
-});
+const spaceFilterCounts = reactive({ outside: 0, inside: 0, removed: 0 });
+let accountSearchTimer;
 function isInTeamPipeline(account) {
   return !!pipelineFor(account);
 }
@@ -508,12 +462,52 @@ async function loadStatus() {
   }
 }
 async function loadAccounts() {
-  const data = await api("/api/mail/accounts?method=all&limit=500&offset=0");
+  const query = new URLSearchParams({
+    page: String(accountPage.value),
+    page_size: String(accountPageSize.value),
+    query: accountQuery.value.trim(),
+    space_state: spaceFilter.value === "all" ? "" : spaceFilter.value,
+  });
+  const data = await api(`/api/mail/accounts?${query}`);
   accounts.value = data.items || [];
+  pipelineAccounts.value = data.pipelines || [];
+  accountTotal.value = Number(data.total || 0);
+  const lastPage = Math.max(1, Math.ceil(accountTotal.value / accountPageSize.value));
+  if (accountPage.value > lastPage) {
+    accountPage.value = lastPage;
+    return loadAccounts();
+  }
   const available = new Set(accounts.value.map((item) => String(item.email || '').toLowerCase()));
   selectedEmails.value = new Set([...selectedEmails.value].filter((email) => available.has(email)));
   counts.value = { ...counts.value, ...(data.counts || {}) };
+  Object.assign(spaceFilterCounts, data.space_counts || {});
 }
+function loadAccountsHandled() {
+  loadAccounts().catch((error) => setMessage(error.message, "error"));
+}
+function setAccountPage(value) {
+  accountPage.value = value;
+  clearSelection();
+  loadAccountsHandled();
+}
+function setAccountPageSize(value) {
+  accountPageSize.value = value;
+  accountPage.value = 1;
+  clearSelection();
+  loadAccountsHandled();
+}
+function setSpaceFilter(value) {
+  spaceFilter.value = spaceFilter.value === value ? "all" : value;
+  accountPage.value = 1;
+  clearSelection();
+  loadAccountsHandled();
+}
+watch(accountQuery, () => {
+  window.clearTimeout(accountSearchTimer);
+  accountPage.value = 1;
+  clearSelection();
+  accountSearchTimer = window.setTimeout(loadAccountsHandled, 250);
+});
 async function checkAT(emails = []) {
   busy.value = "check-at";
   try {
@@ -535,33 +529,40 @@ async function checkAT(emails = []) {
     busy.value = "";
   }
 }
-async function loadPipelineAccounts() {
-  pipelineAccounts.value = await api("/api/free-accounts");
-}
 async function loadMessages() {
   const query = new URLSearchParams({
-    limit: "200",
-    offset: "0",
+    page: String(messagePage.value),
+    page_size: String(messagePageSize.value),
     query: messageQuery.value.trim(),
     mail_type: mailType.value,
   });
   const data = await api(`/api/mail/messages?${query}`);
   messages.value = data.messages || [];
+  messageTotal.value = Number(data.total || 0);
+  const lastPage = Math.max(1, Math.ceil(messageTotal.value / messagePageSize.value));
+  if (messagePage.value > lastPage) {
+    messagePage.value = lastPage;
+    return loadMessages();
+  }
   if (activeMessage.value)
     activeMessage.value =
       messages.value.find(
         (item) => mailKey(item) === mailKey(activeMessage.value),
       ) || null;
 }
+function setMessagePage(value) {
+  messagePage.value = value;
+  loadMessages().catch((error) => setMessage(error.message, "error"));
+}
+function setMessagePageSize(value) {
+  messagePageSize.value = value;
+  messagePage.value = 1;
+  loadMessages().catch((error) => setMessage(error.message, "error"));
+}
 async function refreshAll() {
   busy.value = "refresh";
   try {
-    await Promise.all([
-      loadStatus(),
-      loadAccounts(),
-      loadPipelineAccounts(),
-      loadMessages(),
-    ]);
+    await Promise.all([loadStatus(), activeTab.value === "inbox" ? loadMessages() : loadAccounts()]);
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -601,7 +602,7 @@ async function removeAccount(account) {
       `/api/mail/accounts/${encodeURIComponent(account.email)}`,
       { method: "DELETE" },
     );
-    await Promise.all([loadAccounts(), loadPipelineAccounts()]);
+    await loadAccounts();
     setMessage(
       `邮件账号已删除${result.pipeline_deleted ? `，同时删除 ${result.pipeline_deleted} 条 Team 轮转记录` : ""}`,
       "success",
@@ -621,7 +622,7 @@ async function removeSelectedAccounts() {
     const results = await Promise.allSettled(targets.map((account) => api(`/api/mail/accounts/${encodeURIComponent(account.email)}`, { method: "DELETE" })));
     const failed = results.filter((item) => item.status === "rejected").length;
     clearSelection();
-    await Promise.all([loadAccounts(), loadPipelineAccounts()]);
+    await loadAccounts();
     setMessage(`批量删除完成：成功 ${targets.length - failed}，失败 ${failed}`, failed ? "error" : "success");
   } catch (error) {
     setMessage(error.message, "error");
@@ -953,7 +954,6 @@ async function startAccountOAuthTask(account) {
           delete loginJobs[account.email];
           if (current.status === "success") {
             await loadAccounts();
-            await loadPipelineAccounts();
             setMessage(`${account.email}：RT / AT 已获取并保存`, "success");
           } else {
             setMessage(`${account.email}：${current.error || current.error_hint || `${taskName}失败`}`, "error");
@@ -1039,7 +1039,7 @@ async function runSelectedMailTask(mode) {
     }
   }));
   busy.value = '';
-  await Promise.all([loadAccounts(), loadPipelineAccounts()]);
+  await loadAccounts();
   const succeeded = results.filter(Boolean).length;
   setMessage(`批量${mode === 'oauth' ? '登录并获取 RT / AT' : '获取临时 AT'}完成：成功 ${succeeded}，失败 ${targets.length - succeeded}`, succeeded === targets.length ? 'success' : 'error');
 }
@@ -1093,7 +1093,7 @@ async function openTeam(account) {
     setMessage(`${account.email} 已加入 Team 轮转`, "success");
     // Keep the user on Mail Management. Refresh the local pipeline projection
     // so this button immediately becomes disabled and shows 已进轮转.
-    await Promise.all([loadAccounts(), loadPipelineAccounts()]);
+    await loadAccounts();
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -1141,6 +1141,7 @@ onMounted(() => {
   document.addEventListener("click", closeActionMenu);
 });
 onBeforeUnmount(() => [...timers].forEach(stopTimer));
+onBeforeUnmount(() => window.clearTimeout(accountSearchTimer));
 onBeforeUnmount(() => window.clearTimeout(actionMenuCloseTimer));
 onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 </script>
@@ -1185,7 +1186,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           loadMessages();
         "
       >
-        <Inbox :size="15" />收件箱 <span>{{ messages.length }}</span>
+        <Inbox :size="15" />收件箱 <span>{{ messageTotal }}</span>
       </button>
     </div>
 
@@ -1240,9 +1241,9 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           </div>
         </div>
         <div class="space-filter-tabs" role="tablist" aria-label="空间状态筛选">
-          <button type="button" :class="{ active: spaceFilter === 'outside' }" @click="spaceFilter = spaceFilter === 'outside' ? 'all' : 'outside'">未进入空间 <span>{{ spaceFilterCounts.outside }}</span></button>
-          <button type="button" :class="{ active: spaceFilter === 'inside' }" @click="spaceFilter = spaceFilter === 'inside' ? 'all' : 'inside'">在空间里面 <span>{{ spaceFilterCounts.inside }}</span></button>
-          <button type="button" :class="{ active: spaceFilter === 'removed' }" @click="spaceFilter = spaceFilter === 'removed' ? 'all' : 'removed'">已移出空间 <span>{{ spaceFilterCounts.removed }}</span></button>
+          <button type="button" :class="{ active: spaceFilter === 'outside' }" @click="setSpaceFilter('outside')">未进入空间 <span>{{ spaceFilterCounts.outside }}</span></button>
+          <button type="button" :class="{ active: spaceFilter === 'inside' }" @click="setSpaceFilter('inside')">在空间里面 <span>{{ spaceFilterCounts.inside }}</span></button>
+          <button type="button" :class="{ active: spaceFilter === 'removed' }" @click="setSpaceFilter('removed')">已移出空间 <span>{{ spaceFilterCounts.removed }}</span></button>
         </div>
         <div class="mail-method-summary">
           <span>Outlook {{ counts.outlook || 0 }}</span
@@ -1479,7 +1480,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             </tbody>
           </table>
         </div>
-        <Pagination :page="accountPage" :page-size="accountPageSize" :total="filteredAccounts.length" @update:page="accountPage = $event" @update:page-size="accountPageSize = $event" />
+        <Pagination :page="accountPage" :page-size="accountPageSize" :total="accountTotal" @update:page="setAccountPage" @update:page-size="setAccountPageSize" />
       </section>
     </template>
 
@@ -1491,7 +1492,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
               v-model="messageQuery"
               placeholder="搜索主题、正文、验证码或邮箱"
               @keyup.enter="loadMessages" /></label
-          ><select v-model="mailType" @change="loadMessages">
+          ><select v-model="mailType" @change="messagePage = 1; loadMessages()">
             <option value="all">全部类型</option>
             <option value="verification">验证码</option>
             <option value="invite">邀请</option>
@@ -1535,7 +1536,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           <div class="panel-title">
             <div>
               <span>INBOX</span>
-              <h2>{{ messages.length }} 封邮件</h2>
+              <h2>{{ messageTotal }} 封邮件</h2>
             </div>
           </div>
           <div class="message-list">
@@ -1557,6 +1558,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             </button>
             <div v-if="!messages.length" class="empty-cell">暂无邮件</div>
           </div>
+          <Pagination :page="messagePage" :page-size="messagePageSize" :total="messageTotal" @update:page="setMessagePage" @update:page-size="setMessagePageSize" />
         </section>
         <section class="panel message-detail">
           <template v-if="activeMessage"

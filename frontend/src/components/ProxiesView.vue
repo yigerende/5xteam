@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { CheckCircle2, Gauge, LoaderCircle, Pencil, Save, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import { api } from '../api'
 import { maskProxyURL } from '../utils'
@@ -20,11 +20,17 @@ const message = reactive({ text: '', type: '' })
 const busy = ref(false)
 const page = ref(1)
 const pageSize = ref(10)
-const pagedProxies = computed(() => props.proxies.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
-
-watch(() => props.proxies.length, () => {
-  page.value = Math.min(page.value, Math.max(1, Math.ceil(props.proxies.length / pageSize.value)))
-})
+const rows = ref([])
+const total = ref(0)
+const pagedProxies = computed(() => rows.value)
+async function loadPage() {
+  const data = await api(`/api/proxies?page=${page.value}&page_size=${pageSize.value}`)
+  rows.value = data.items || []; total.value = Number(data.total || 0)
+  const lastPage = Math.max(1, Math.ceil(total.value / pageSize.value))
+  if (page.value > lastPage) { page.value = lastPage; return loadPage() }
+}
+function setPage(value) { page.value = value; loadPage() }
+function setPageSize(value) { pageSize.value = value; page.value = 1; loadPage() }
 
 function setMessage(text = '', type = '') { Object.assign(message, { text, type }) }
 
@@ -75,6 +81,7 @@ async function save() {
     reset()
     emit('reload')
     emit('select', profile.url)
+    await loadPage()
     setMessage(`${profile.name} 已保存并设为全局代理`, 'success')
   } catch (error) {
     setMessage(error.message, 'error')
@@ -197,11 +204,13 @@ async function remove(proxy) {
     if (form.id === proxy.id) reset()
     emit('reload')
     if (props.selectedURL === proxy.url) emit('select', '')
+    await loadPage()
     setMessage(`${proxy.name} 已删除`, 'success')
   } catch (error) {
     setMessage(error.message, 'error')
   }
 }
+onMounted(loadPage)
 </script>
 
 <template>
@@ -230,7 +239,7 @@ async function remove(proxy) {
         <div class="panel-title responsive">
           <div><span>PROFILES</span><h2>代理线路</h2></div>
           <div class="heading-actions">
-            <span class="muted-count">{{ proxies.length }} 个配置</span>
+            <span class="muted-count">{{ total }} 个配置</span>
             <button class="btn ghost" type="button" :disabled="Boolean(batch.mode) || !proxies.length" @click="testAll('connectivity')"><Gauge :size="15" />测试全部线路</button>
             <button class="btn ghost" type="button" :disabled="Boolean(batch.mode) || !proxies.length" @click="testAll('quality')"><ShieldCheck :size="15" />测试全部 OpenAI 质量</button>
           </div>
@@ -245,7 +254,7 @@ async function remove(proxy) {
           <table class="proxy-list-table">
             <thead><tr><th>名称</th><th>地址</th><th>出口 IP / 地区</th><th>连通性</th><th>OpenAI 质量</th><th>使用状态</th><th class="actions-column">操作</th></tr></thead>
             <tbody>
-              <tr v-if="!proxies.length"><td colspan="7" class="empty-cell">暂无代理配置</td></tr>
+              <tr v-if="!pagedProxies.length"><td colspan="7" class="empty-cell">暂无代理配置</td></tr>
               <tr v-for="proxy in pagedProxies" :key="proxy.id">
                 <td><strong>{{ proxy.name }}</strong></td>
                 <td class="mono" :title="maskProxyURL(proxy.url)">{{ maskProxyURL(proxy.url) }}</td>
@@ -283,7 +292,7 @@ async function remove(proxy) {
             </tbody>
           </table>
         </div>
-        <Pagination :page="page" :page-size="pageSize" :total="proxies.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
+        <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="setPage" @update:page-size="setPageSize" />
       </section>
     </div>
   </section>

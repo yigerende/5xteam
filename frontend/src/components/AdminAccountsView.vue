@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { Check, CheckCircle2, Copy, FileJson, FileKey2, Pencil, RefreshCw, Save, Trash2, X } from 'lucide-vue-next'
 import { api } from '../api'
 import { decodeJWTPayload, findAccessToken, findRefreshToken, formatTime, shortID } from '../utils'
@@ -21,11 +21,20 @@ const capacityBusy = ref(new Set())
 const capacityAllBusy = ref(false)
 const page = ref(1)
 const pageSize = ref(10)
+const rows = ref([])
+const total = ref(0)
+const listSummary = reactive({ all: 0, child_entries: 0, child_total_cost_usd: 0 })
 const adminMenu = ref('list')
 const credentialDialog = reactive({ open: false, loading: false, error: '', label: '', email: '', accountID: '', teamAccountID: '', accessToken: '', refreshToken: '', copied: '' })
-const pages = computed(() => Math.max(1, Math.ceil(props.accounts.length / pageSize.value)))
-const pagedAccounts = computed(() => props.accounts.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
-watch(() => props.accounts.length, () => { page.value = Math.min(page.value, pages.value) })
+const pagedAccounts = computed(() => rows.value)
+async function loadPage() {
+  const data = await api(`/api/admin-accounts?page=${page.value}&page_size=${pageSize.value}`)
+  rows.value = data.items || []; total.value = Number(data.total || 0); Object.assign(listSummary, data.summary || {})
+  const lastPage = Math.max(1, Math.ceil(total.value / pageSize.value))
+  if (page.value > lastPage) { page.value = lastPage; return loadPage() }
+}
+function setPage(value) { page.value = value; loadPage() }
+function setPageSize(value) { pageSize.value = value; page.value = 1; loadPage() }
 
 const capacitySummary = computed(() => {
   const summary = { standard: { total: 0, remaining: 0 }, premium: { total: 0, remaining: 0 }, loaded: 0 }
@@ -38,7 +47,7 @@ const capacitySummary = computed(() => {
   }
   return summary
 })
-const teamRotationChildSummary = computed(() => props.accounts.reduce((total, account) => total + Number(account.team_rotation_child_count || 0), 0))
+const teamRotationChildSummary = computed(() => Number(listSummary.child_entries || 0))
 
 async function loadCapacity(account) {
   const nextBusy = new Set(capacityBusy.value); nextBusy.add(account.id); capacityBusy.value = nextBusy
@@ -137,7 +146,7 @@ async function save() {
       body: { label: form.label.trim(), access_token: parsed.accessToken || form.session.trim(), refresh_token: parsed.refreshToken || form.refreshToken.trim(), team_account_id: form.teamID.trim() },
     })
     reset()
-    emit('reload')
+    emit('reload'); await loadPage()
     adminMenu.value = 'list'
     setMessage(`${account.label} 已加密保存`, 'success')
   } catch (error) { setMessage(error.message, 'error') }
@@ -162,7 +171,7 @@ async function refresh(account) {
   busy.value = true
   try {
     const result = await api(`/api/admin-accounts/${encodeURIComponent(account.id)}/refresh`, { method: 'POST', body: {} })
-    emit('reload')
+    emit('reload'); await loadPage()
     setMessage(result.message, 'success')
   } catch (error) { setMessage(error.message, 'error') }
   finally { busy.value = false }
@@ -197,16 +206,17 @@ async function remove(account) {
   try {
     await api(`/api/admin-accounts/${encodeURIComponent(account.id)}`, { method: 'DELETE' })
     if (form.id === account.id) reset()
-    emit('reload')
+    emit('reload'); await loadPage()
     setMessage(`${account.label} 已删除`, 'success')
   } catch (error) { setMessage(error.message, 'error') }
 }
+onMounted(loadPage)
 </script>
 
 <template>
   <section class="view-stack">
-    <header class="page-heading"><div><span class="overline">CREDENTIAL VAULT</span><h1>母号管理</h1><p>维护团队管理员凭据与自动续期状态</p></div><StatusPill tone="success">{{ accounts.length }} 个母号</StatusPill></header>
-    <nav class="admin-subnav" aria-label="母号管理菜单"><button type="button" :class="{ active: adminMenu === 'add' }" @click="adminMenu = 'add'"><FileJson :size="14" />添加母号</button><button type="button" :class="{ active: adminMenu === 'list' }" @click="adminMenu = 'list'"><CheckCircle2 :size="14" />母号列表 <span>{{ accounts.length }}</span></button></nav>
+    <header class="page-heading"><div><span class="overline">CREDENTIAL VAULT</span><h1>母号管理</h1><p>维护团队管理员凭据与自动续期状态</p></div><StatusPill tone="success">{{ total }} 个母号</StatusPill></header>
+    <nav class="admin-subnav" aria-label="母号管理菜单"><button type="button" :class="{ active: adminMenu === 'add' }" @click="adminMenu = 'add'"><FileJson :size="14" />添加母号</button><button type="button" :class="{ active: adminMenu === 'list' }" @click="adminMenu = 'list'"><CheckCircle2 :size="14" />母号列表 <span>{{ total }}</span></button></nav>
     <section class="metric-grid seat-summary"><article class="metric-card"><span>普通席位总量</span><strong>{{ capacitySummary.loaded ? capacitySummary.standard.total : '—' }}</strong><small>剩余 {{ capacitySummary.loaded ? capacitySummary.standard.remaining : '—' }}</small></article><article class="metric-card"><span>高级席位 5x 总量</span><strong>{{ capacitySummary.loaded ? capacitySummary.premium.total : '—' }}</strong><small>剩余 {{ capacitySummary.loaded ? capacitySummary.premium.remaining : '—' }}</small></article><article class="metric-card"><span>普通席位剩余</span><strong>{{ capacitySummary.loaded ? capacitySummary.standard.remaining : '—' }}</strong><small>跨母号汇总</small></article><article class="metric-card"><span>高级席位 5x 剩余</span><strong>{{ capacitySummary.loaded ? capacitySummary.premium.remaining : '—' }}</strong><small>跨母号汇总</small></article><article class="metric-card"><span>累计进入子号总数</span><strong>{{ teamRotationChildSummary }}</strong><small>所有母号累计汇总</small></article></section>
     <div :class="['management-grid', { 'list-only': adminMenu === 'list' }]">
       <form v-if="adminMenu === 'add'" class="panel editor-panel" @submit.prevent="save">
@@ -222,11 +232,11 @@ async function remove(account) {
       </form>
 
       <section v-if="adminMenu === 'list'" class="panel list-panel">
-        <div class="panel-title"><div><span>ACCOUNTS</span><h2>已保存母号</h2></div><div class="heading-actions"><span class="muted-count">{{ accounts.length }} 条记录</span><button class="btn ghost" type="button" :disabled="capacityAllBusy || !accounts.length" @click="loadCapacities"><RefreshCw :class="{ spin: capacityAllBusy }" :size="15" />刷新全部席位</button></div></div>
+        <div class="panel-title"><div><span>ACCOUNTS</span><h2>已保存母号</h2></div><div class="heading-actions"><span class="muted-count">{{ total }} 条记录</span><button class="btn ghost" type="button" :disabled="capacityAllBusy || !accounts.length" @click="loadCapacities"><RefreshCw :class="{ spin: capacityAllBusy }" :size="15" />刷新全部席位</button></div></div>
         <div class="table-shell"><table><thead><tr><th>名称 / 邮箱</th><th>计划</th><th>团队</th><th>普通席位</th><th>高级席位 5x</th><th>累计进入子号次数</th><th>子号累计消耗</th><th>续期</th><th>校验</th><th class="actions-column">操作</th></tr></thead><tbody>
           <tr v-if="!accounts.length"><td colspan="10" class="empty-cell">暂无母号配置</td></tr>
           <tr v-for="account in pagedAccounts" :key="account.id"><td class="account-cell"><strong>{{ account.label }}</strong><small>{{ account.email }}</small></td><td>{{ account.plan_type || '-' }}</td><td class="mono" :title="account.team_account_id">{{ shortID(account.team_account_id) }}</td><td class="seat-cell" :title="seatTitle(account, 'standard')"><strong>{{ seatText(account, 'standard') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td class="seat-cell" :title="seatTitle(account, 'premium')"><strong>{{ seatText(account, 'premium') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td><strong>{{ account.team_rotation_child_count || 0 }}</strong><small class="table-note">次</small></td><td><strong>${{ Number(account.team_rotation_child_cost_usd || 0).toFixed(4) }}</strong><small class="table-note">Sub2</small></td><td><StatusPill :tone="account.refresh_token_present ? 'success' : 'pending'">{{ account.refresh_token_present ? 'RT 已保存' : '无 RT' }}</StatusPill><small class="table-note">{{ account.access_token_expires_at ? `AT ${formatTime(account.access_token_expires_at)} 到期` : '未记录到期时间' }}</small></td><td><template v-if="tests.get(account.id)"><StatusPill :tone="tests.get(account.id).valid ? 'success' : 'danger'">{{ tests.get(account.id).valid ? '有效' : '无效' }}</StatusPill><small class="table-note">{{ tests.get(account.id).latency_ms }}ms</small></template><StatusPill v-else tone="pending">未校验</StatusPill></td><td><div class="row-actions"><IconButton label="查看 AT / RT" :disabled="busy" @click="openCredentialDialog(account)"><FileKey2 :size="15" /></IconButton><IconButton label="刷新席位" :disabled="capacityBusy.has(account.id)" @click="loadCapacity(account)"><RefreshCw :size="15" /></IconButton><IconButton label="校验凭据" :disabled="busy" @click="test(account)"><CheckCircle2 :size="15" /></IconButton><IconButton label="刷新 AT/RT" :disabled="busy" @click="refresh(account)"><RefreshCw :size="15" /></IconButton><IconButton label="编辑母号" @click="edit(account)"><Pencil :size="15" /></IconButton><IconButton label="删除母号" danger @click="remove(account)"><Trash2 :size="15" /></IconButton></div></td></tr>
-        </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="accounts.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
+        </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="total" @update:page="setPage" @update:page-size="setPageSize" />
       </section>
     </div>
     <div v-if="credentialDialog.open" class="modal-backdrop credential-dialog-backdrop" @click.self="closeCredentialDialog"><section class="modal credential-dialog" role="dialog" aria-modal="true" aria-labelledby="admin-credential-dialog-title"><header class="credential-dialog-header"><div><span class="overline">TEAM ADMIN CREDENTIALS</span><h2 id="admin-credential-dialog-title">查看母号 AT / RT</h2><p>{{ credentialDialog.label }} · {{ credentialDialog.email }}</p></div><IconButton label="关闭凭证窗口" @click="closeCredentialDialog"><X :size="16" /></IconButton></header><div v-if="credentialDialog.loading" class="credential-loading"><RefreshCw class="spin" :size="20" /><span>正在读取加密凭证</span></div><template v-else><div v-if="credentialDialog.error" class="credential-error">{{ credentialDialog.error }}</div><label class="credential-token-field"><span><strong>Access Token (AT)</strong><button type="button" :disabled="!credentialDialog.accessToken" @click="copyCredential('at')"><Check v-if="credentialDialog.copied === 'at'" :size="14" /><Copy v-else :size="14" />{{ credentialDialog.copied === 'at' ? '已复制' : '复制 AT' }}</button></span><textarea :value="credentialDialog.accessToken || '未保存'" readonly rows="5" spellcheck="false" @focus="$event.target.select()"></textarea></label><label class="credential-token-field"><span><strong>Refresh Token (RT)</strong><button type="button" :disabled="!credentialDialog.refreshToken" @click="copyCredential('rt')"><Check v-if="credentialDialog.copied === 'rt'" :size="14" /><Copy v-else :size="14" />{{ credentialDialog.copied === 'rt' ? '已复制' : '复制 RT' }}</button></span><textarea :value="credentialDialog.refreshToken || '未保存'" readonly rows="4" spellcheck="false" @focus="$event.target.select()"></textarea></label><small v-if="credentialDialog.accountID || credentialDialog.teamAccountID" class="credential-account-id mono">Account ID: {{ credentialDialog.accountID || '-' }} · Team: {{ credentialDialog.teamAccountID || '-' }}</small></template></section></div>

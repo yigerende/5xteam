@@ -21,7 +21,17 @@ import (
 	"chatgpt-space-merge/internal/workflow"
 )
 
-func (s *Server) listProAccounts(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) listProAccounts(w http.ResponseWriter, r *http.Request) {
+	if paginationRequested(r) {
+		page := parsePagination(r)
+		items, total, summary, err := s.store.ProAccountsPage(r.URL.Query().Get("query"), r.URL.Query().Get("merge_state"), page.Limit, page.Offset)
+		if err != nil {
+			writeAPI(w, http.StatusInternalServerError, nil, "读取 Pro 账号失败: "+err.Error())
+			return
+		}
+		writeAPI(w, http.StatusOK, paginatedData(items, total, page, map[string]any{"summary": summary}), "")
+		return
+	}
 	items := s.store.MailAccountsByManagementScope("pro")
 	if items == nil {
 		items = []model.MailAccountProfile{}

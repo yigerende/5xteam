@@ -14,6 +14,9 @@ const spaceFilter = ref('all')
 const query = ref('')
 const page = ref(1)
 const pageSize = ref(10)
+const rows = ref([])
+const total = ref(0)
+const listSummary = reactive({ all: 0, oauth_ready: 0, pushed: 0, merged: 0 })
 const selectedEmails = ref(new Set())
 const busy = ref('')
 const message = reactive({ text: '', type: '' })
@@ -22,6 +25,7 @@ const sub2Groups = ref([])
 const cpaGroups = ref([])
 const countdown = ref(0)
 let countdownTimer
+let searchTimer
 
 const defaults = () => ({
   provider: 'sub2', quota_enabled: false, quota_check_interval_seconds: 120,
@@ -33,27 +37,27 @@ const defaults = () => ({
 })
 const settings = reactive(defaults())
 
-const filteredAccounts = computed(() => {
-  const needle = query.value.trim().toLowerCase()
-  return props.accounts.filter((account) => {
-    if (spaceFilter.value === 'unmerged' && account.space_merged_once) return false
-    if (spaceFilter.value === 'merged' && !account.space_merged_once) return false
-    return !needle || `${account.email} ${account.current_plan_type || ''} ${account.push_provider || ''}`.toLowerCase().includes(needle)
-  }).sort((a, b) => Date.parse(b.pro_managed_at || b.updated_at || 0) - Date.parse(a.pro_managed_at || a.updated_at || 0))
-})
-const displayedAccounts = computed(() => filteredAccounts.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
-const selectedAccounts = computed(() => props.accounts.filter((account) => selectedEmails.value.has(account.email.toLowerCase())))
+const displayedAccounts = computed(() => rows.value)
+const selectedAccounts = computed(() => rows.value.filter((account) => selectedEmails.value.has(account.email.toLowerCase())))
 const allVisibleSelected = computed(() => displayedAccounts.value.length && displayedAccounts.value.every((account) => selectedEmails.value.has(account.email.toLowerCase())))
-const oauthReady = computed(() => props.accounts.filter((a) => a.access_token_present && a.refresh_token_present).length)
-const pushed = computed(() => props.accounts.filter((a) => a.push_status === 'completed').length)
-const merged = computed(() => props.accounts.filter((a) => a.space_merged_once).length)
+const oauthReady = computed(() => Number(listSummary.oauth_ready || 0))
+const pushed = computed(() => Number(listSummary.pushed || 0))
+const merged = computed(() => Number(listSummary.merged || 0))
 const selectedAdmin = computed(() => props.adminAccounts.find((a) => a.id === settings.target_admin_id))
 
-watch([query, spaceFilter], () => { page.value = 1 })
-watch(() => props.accounts, (accounts) => {
-  const available = new Set(accounts.map((a) => a.email.toLowerCase()))
-  selectedEmails.value = new Set([...selectedEmails.value].filter((email) => available.has(email)))
-}, { deep: true })
+async function loadPage() {
+  const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value), query: query.value.trim(), merge_state: spaceFilter.value === 'all' ? '' : spaceFilter.value })
+  const data = await api(`/api/pro-accounts?${params}`)
+  rows.value = data.items || []; total.value = Number(data.total || 0); Object.assign(listSummary, data.summary || {})
+  const lastPage = Math.max(1, Math.ceil(total.value / pageSize.value))
+  if (page.value > lastPage) { page.value = lastPage; return loadPage() }
+  const visible = new Set(rows.value.map((account) => account.email.toLowerCase()))
+  selectedEmails.value = new Set([...selectedEmails.value].filter((email) => visible.has(email)))
+}
+function setPage(value) { page.value = value; selectedEmails.value = new Set(); loadPage() }
+function setPageSize(value) { pageSize.value = value; page.value = 1; selectedEmails.value = new Set(); loadPage() }
+function setSpaceFilter(value) { spaceFilter.value = value; page.value = 1; selectedEmails.value = new Set(); loadPage() }
+watch(query, () => { window.clearTimeout(searchTimer); page.value = 1; selectedEmails.value = new Set(); searchTimer = window.setTimeout(loadPage, 250) })
 
 function setMessage(text = '', type = '') { message.text = text; message.type = type }
 function toggle(account) { const next = new Set(selectedEmails.value); const email = account.email.toLowerCase(); next.has(email) ? next.delete(email) : next.add(email); selectedEmails.value = next }
@@ -61,7 +65,7 @@ function toggleVisible() { const next = new Set(selectedEmails.value); displayed
 function quotaLabel(window) { return window ? `${Number(window.used_percent || 0).toFixed(1)}%` : '-' }
 function statusTone(value) { return value === 'completed' ? 'success' : value === 'failed' || value === 'reauthorize_required' ? 'danger' : value === 'running' ? 'running' : 'pending' }
 function updateCountdown() { countdown.value = settings.next_quota_sweep_at ? Math.max(0, Math.ceil((Date.parse(settings.next_quota_sweep_at) - Date.now()) / 1000)) : 0 }
-async function reload() { await emit('reload') }
+async function reload() { await loadPage(); emit('reload') }
 
 async function loadSettings() {
   try {
@@ -145,8 +149,8 @@ async function saveSettings() {
   finally { busy.value = '' }
 }
 
-onMounted(async () => { await loadSettings(); countdownTimer = window.setInterval(updateCountdown, 1000) })
-onBeforeUnmount(() => window.clearInterval(countdownTimer))
+onMounted(async () => { await Promise.all([loadSettings(), loadPage()]); countdownTimer = window.setInterval(updateCountdown, 1000) })
+onBeforeUnmount(() => { window.clearInterval(countdownTimer); window.clearTimeout(searchTimer) })
 </script>
 
 <template>
@@ -164,18 +168,18 @@ onBeforeUnmount(() => window.clearInterval(countdownTimer))
 
     <template v-if="activeTab === 'accounts'">
       <div class="metric-grid pro-metrics">
-        <article class="metric-card blue"><UsersRound :size="17" /><div><span>Pro 账号</span><strong>{{ accounts.length }}</strong><small>当前账号池</small></div></article>
+        <article class="metric-card blue"><UsersRound :size="17" /><div><span>Pro 账号</span><strong>{{ listSummary.all }}</strong><small>当前账号池</small></div></article>
         <article class="metric-card green"><KeyRound :size="17" /><div><span>OAuth 完整</span><strong>{{ oauthReady }}</strong><small>AT 与 RT 已保存</small></div></article>
         <article class="metric-card amber"><Rocket :size="17" /><div><span>已推送</span><strong>{{ pushed }}</strong><small>当前下游可检测</small></div></article>
         <article class="metric-card slate"><BadgeCheck :size="17" /><div><span>已空间合并</span><strong>{{ merged }}</strong><small>永久成功标记</small></div></article>
       </div>
       <section class="panel list-panel">
-        <div class="account-toolbar"><div class="space-filter-tabs"><button :class="{ active: spaceFilter === 'all' }" @click="spaceFilter = 'all'">全部 <span>{{ accounts.length }}</span></button><button :class="{ active: spaceFilter === 'unmerged' }" @click="spaceFilter = 'unmerged'">未空间合并 <span>{{ accounts.length - merged }}</span></button><button :class="{ active: spaceFilter === 'merged' }" @click="spaceFilter = 'merged'">已空间合并 <span>{{ merged }}</span></button></div><div class="heading-actions"><label class="compact-search"><Search :size="14" /><input v-model="query" placeholder="搜索账号" /></label><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="checkPlans"><RefreshCw :size="14" />识别套餐</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('push')"><Rocket :size="14" />批量推送</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('quota')"><Gauge :size="14" />批量查额度</button></div></div>
+        <div class="account-toolbar"><div class="space-filter-tabs"><button :class="{ active: spaceFilter === 'all' }" @click="setSpaceFilter('all')">全部 <span>{{ listSummary.all }}</span></button><button :class="{ active: spaceFilter === 'unmerged' }" @click="setSpaceFilter('unmerged')">未空间合并 <span>{{ Math.max(0, listSummary.all - merged) }}</span></button><button :class="{ active: spaceFilter === 'merged' }" @click="setSpaceFilter('merged')">已空间合并 <span>{{ merged }}</span></button></div><div class="heading-actions"><label class="compact-search"><Search :size="14" /><input v-model="query" placeholder="搜索账号" /></label><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="checkPlans"><RefreshCw :size="14" />识别套餐</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('push')"><Rocket :size="14" />批量推送</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('quota')"><Gauge :size="14" />批量查额度</button></div></div>
         <div class="table-shell"><table class="pro-table"><thead><tr><th><input type="checkbox" :checked="allVisibleSelected" @change="toggleVisible" /></th><th>账号</th><th>OAuth</th><th>套餐</th><th>推送</th><th>5小时</th><th>7天</th><th>空间合并</th><th>四步状态</th><th class="actions-column">操作</th></tr></thead><tbody>
           <tr v-if="!displayedAccounts.length"><td colspan="10" class="empty-cell">暂无符合条件的 Pro 账号</td></tr>
           <tr v-for="account in displayedAccounts" :key="account.email"><td><input type="checkbox" :checked="selectedEmails.has(account.email.toLowerCase())" @change="toggle(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ formatTime(account.pro_managed_at || account.updated_at) }}</small><small v-if="account.pro_last_error" class="danger-text" :title="account.pro_last_error">{{ account.pro_last_error }}</small></td><td><StatusPill :tone="statusTone(account.oauth_status)">{{ account.access_token_present && account.refresh_token_present ? 'AT / RT 完整' : '待授权' }}</StatusPill><small v-if="account.oauth_expires_at" class="table-note">{{ formatTime(account.oauth_expires_at) }}</small></td><td><StatusPill :tone="account.current_plan_type === 'pro' ? 'success' : 'pending'">{{ account.current_plan_type || '未识别' }}</StatusPill></td><td><StatusPill :tone="statusTone(account.push_status)">{{ account.push_status === 'completed' ? (account.push_provider || '-').toUpperCase() : account.push_status || '未推送' }}</StatusPill></td><td>{{ quotaLabel(account.quota_5h) }}</td><td>{{ quotaLabel(account.quota_7d) }}<small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td><td><StatusPill :tone="account.space_merged_once ? 'success' : 'pending'">{{ account.space_merged_once ? '已成功' : '未合并' }}</StatusPill></td><td class="flow-state"><span v-for="(item, index) in [account.invite_status, account.accept_status, account.transfer_status, account.remove_status]" :key="index" :class="item">{{ ['邀', '进', '合', '移'][index] }}</span></td><td><div class="row-actions"><button class="icon-button" title="重新授权" :disabled="!!busy" @click="beginOAuth(account)"><LogIn :size="15" /></button><button class="icon-button" title="刷新 AT" :disabled="!!busy || !account.refresh_token_present" @click="runOne(account, 'refresh')"><RefreshCw :size="15" /></button><button class="icon-button" title="推送当前下游" :disabled="!!busy || !account.refresh_token_present" @click="runOne(account, 'push')"><Rocket :size="15" /></button><button class="icon-button" title="查询额度" :disabled="!!busy || account.push_status !== 'completed'" @click="runOne(account, 'quota')"><Gauge :size="15" /></button><button class="icon-button" title="执行或续跑空间合并" :disabled="!!busy || !account.refresh_token_present || account.remove_status === 'completed'" @click="runOne(account, 'merge')"><ShieldCheck :size="15" /></button><button class="icon-button" title="移回邮件管理" :disabled="!!busy" @click="returnOne(account)"><RotateCcw :size="15" /></button></div></td></tr>
         </tbody></table></div>
-        <Pagination :page="page" :page-size="pageSize" :total="filteredAccounts.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
+        <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="setPage" @update:page-size="setPageSize" />
       </section>
     </template>
 

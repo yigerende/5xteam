@@ -83,6 +83,37 @@ func (s *Server) mailStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listMailAccounts(w http.ResponseWriter, r *http.Request) {
+	if paginationRequested(r) {
+		page := parsePagination(r)
+		result, err := s.store.MailAccountsPage("mail", r.URL.Query().Get("query"), r.URL.Query().Get("space_state"), page.Limit, page.Offset)
+		if err != nil {
+			writeAPI(w, http.StatusInternalServerError, nil, "读取邮件账号失败: "+err.Error())
+			return
+		}
+		pipelines := make(map[string]model.FreeAccountProfile, len(result.Pipelines))
+		for _, pipeline := range result.Pipelines {
+			pipelines[strings.ToLower(strings.TrimSpace(pipeline.Email))] = pipeline
+		}
+		// Older data may predate OAuth synchronization. Repair only records on
+		// the requested page instead of scanning both complete account tables.
+		for index, item := range result.Items {
+			pipeline, ok := pipelines[strings.ToLower(strings.TrimSpace(item.Email))]
+			if !ok || item.RefreshTokenPresent || !pipeline.OAuthRefreshTokenPresent {
+				continue
+			}
+			if _, credentials, credentialErr := s.store.FreeAccountCredential(pipeline.ID); credentialErr == nil && strings.TrimSpace(credentials.OAuthRefreshToken) != "" {
+				if s.store.SaveMailAccountOAuth(item.Email, credentials.OAuthAccessToken, credentials.OAuthRefreshToken) == nil {
+					if refreshed, _, refreshErr := s.store.MailAccountCredential(item.Email); refreshErr == nil {
+						result.Items[index] = refreshed
+					}
+				}
+			}
+		}
+		writeAPI(w, http.StatusOK, paginatedData(result.Items, result.Total, page, map[string]any{
+			"success": true, "counts": result.Counts, "space_counts": result.SpaceCounts, "pipelines": result.Pipelines,
+		}), "")
+		return
+	}
 	// 邮箱管理属于 Space Console 自身数据，不再依赖外部管理器。
 	if local := s.store.MailAccountsByManagementScope("mail"); local != nil {
 		query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
@@ -264,6 +295,16 @@ func (s *Server) mailFetchStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listMailMessages(w http.ResponseWriter, r *http.Request) {
+	if paginationRequested(r) {
+		page := parsePagination(r)
+		items, total, err := s.store.MailMessagesPage(r.URL.Query().Get("query"), r.URL.Query().Get("mail_type"), page.Limit, page.Offset)
+		if err != nil {
+			writeAPI(w, http.StatusInternalServerError, nil, "读取邮件失败: "+err.Error())
+			return
+		}
+		writeAPI(w, http.StatusOK, paginatedData(items, total, page, map[string]any{"success": true, "messages": items}), "")
+		return
+	}
 	items := s.store.MailMessages(r.URL.Query().Get("query"), r.URL.Query().Get("mail_type"))
 	writeAPI(w, http.StatusOK, map[string]any{"success": true, "messages": items, "total": len(items)}, "")
 }

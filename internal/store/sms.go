@@ -13,58 +13,79 @@ func smsID() string { return fmt.Sprintf("sms-%d", time.Now().UnixNano()) }
 func (s *Store) SMSPhones(provider, state string, limit, offset int) ([]map[string]any, map[string]int, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query("SELECT id,provider,phone_number,card_code,api_url,max_bindings,status,lease_expires_at,note,last_code,last_code_at,last_error,last_attempt_at,created_at,updated_at FROM sms_phones ORDER BY created_at DESC,id")
+	limit, offset = normalizeLimitOffset(limit, offset)
+	provider, state = strings.TrimSpace(provider), strings.TrimSpace(state)
+	cutoff := formatTime(time.Now().Add(-30 * time.Second))
+	now := formatTime(time.Now())
+	const cte = `WITH phone_data AS (
+		SELECT p.id,p.provider,p.phone_number,p.card_code,p.api_url,p.max_bindings,p.status,p.lease_expires_at,p.note,
+			p.last_code,p.last_code_at,p.last_error,p.last_attempt_at,p.created_at,p.updated_at,COUNT(b.gpt_email) AS bind_count,
+			CASE
+				WHEN p.status!='active' THEN 'disabled'
+				WHEN p.lease_expires_at!='' AND p.lease_expires_at<? THEN 'expired'
+				WHEN COUNT(b.gpt_email)>=p.max_bindings THEN 'full'
+				WHEN p.last_attempt_at!='' AND p.last_attempt_at>=? THEN 'cooldown'
+				ELSE 'available'
+			END AS computed_state
+		FROM sms_phones p LEFT JOIN sms_phone_bindings b ON b.phone_id=p.id
+		GROUP BY p.id
+	)`
+	stats := map[string]int{"total": 0, "available": 0, "cooldown": 0, "full": 0, "expired": 0, "disabled": 0}
+	statRows, err := s.db.Query(cte+` SELECT computed_state,COUNT(*) FROM phone_data WHERE (?='' OR provider=?) GROUP BY computed_state`, now, cutoff, provider, provider)
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	var records [][15]string
-	var maxValues []int
+	for statRows.Next() {
+		var key string
+		var count int
+		if statRows.Scan(&key, &count) == nil {
+			stats[key] = count
+			stats["total"] += count
+		}
+	}
+	statRows.Close()
+	var total int
+	if err := s.db.QueryRow(cte+` SELECT COUNT(*) FROM phone_data WHERE (?='' OR provider=?) AND (?='' OR computed_state=?)`, now, cutoff, provider, provider, state, state).Scan(&total); err != nil {
+		return nil, nil, 0, err
+	}
+	rows, err := s.db.Query(cte+` SELECT id,provider,phone_number,card_code,api_url,max_bindings,status,lease_expires_at,note,last_code,last_code_at,last_error,last_attempt_at,created_at,updated_at,bind_count,computed_state
+		FROM phone_data WHERE (?='' OR provider=?) AND (?='' OR computed_state=?) ORDER BY created_at DESC,id LIMIT ? OFFSET ?`, now, cutoff, provider, provider, state, state, limit, offset)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	// Read and close the page rows before querying bindings. SQLite may have a
+	// single active reader; querying bindings while rows is still open can
+	// block indefinitely when the store is used with a small connection pool.
+	type phoneRow struct {
+		id, prov, phone, card, apiURL, status, lease, note, last, lastAt, lastErr, lastAttempt, created, updated, computedState string
+		maxBindings, bindCount int
+	}
+	pageRows := make([]phoneRow, 0, limit)
 	for rows.Next() {
-		var rec [15]string
-		var max int
-		if err := rows.Scan(&rec[0], &rec[1], &rec[2], &rec[3], &rec[4], &max, &rec[5], &rec[6], &rec[7], &rec[8], &rec[9], &rec[10], &rec[11], &rec[12], &rec[13]); err != nil {
+		var id, prov, phone, card, apiURL, status, lease, note, last, lastAt, lastErr, lastAttempt, created, updated, computedState string
+		var maxBindings, bindCount int
+		if err := rows.Scan(&id, &prov, &phone, &card, &apiURL, &maxBindings, &status, &lease, &note, &last, &lastAt, &lastErr, &lastAttempt, &created, &updated, &bindCount, &computedState); err != nil {
+			rows.Close()
 			return nil, nil, 0, err
 		}
-		records = append(records, rec)
-		maxValues = append(maxValues, max)
+		pageRows = append(pageRows, phoneRow{id: id, prov: prov, phone: phone, card: card, apiURL: apiURL, maxBindings: maxBindings, status: status, lease: lease, note: note, last: last, lastAt: lastAt, lastErr: lastErr, lastAttempt: lastAttempt, created: created, updated: updated, bindCount: bindCount, computedState: computedState})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, 0, err
 	}
 	rows.Close()
-	all := []map[string]any{}
-	stats := map[string]int{"total": 0, "available": 0, "cooldown": 0, "full": 0, "expired": 0, "disabled": 0}
-	for i, rec := range records {
-		id, prov, phone, card, apiURL, status, lease, note, last, lastAt, lastErr, lastAttempt, created, updated := rec[0], rec[1], rec[2], rec[3], rec[4], rec[5], rec[6], rec[7], rec[8], rec[9], rec[10], rec[11], rec[12], rec[13]
-		max := maxValues[i]
-		if provider != "" && prov != provider {
-			continue
-		}
-		binds := s.smsBindingsLocked(id)
-		st := smsState(status, lease, lastAttempt, max, len(binds))
-		if state != "" && state != st {
-			continue
-		}
-		stats[st]++
-		stats["total"]++
+	items := make([]map[string]any, 0, len(pageRows))
+	for _, row := range pageRows {
+		id, prov, phone, card, apiURL := row.id, row.prov, row.phone, row.card, row.apiURL
+		bindings := s.smsBindingsLocked(id)
 		masked := card
 		if len(card) > 8 {
 			masked = card[:4] + "****" + card[len(card)-4:]
 		}
-		all = append(all, map[string]any{"id": id, "provider": prov, "phone_number": phone, "card_code_masked": masked, "api_url": apiURL, "max_bindings": max, "status": status, "lease_expires_at": lease, "note": note, "last_code": last, "last_code_at": lastAt, "last_error": lastErr, "last_attempt_at": lastAttempt, "created_at": created, "updated_at": updated, "bind_count": len(binds), "bindings": binds, "state": st})
+		items = append(items, map[string]any{"id": id, "provider": prov, "phone_number": phone, "card_code_masked": masked, "api_url": apiURL, "max_bindings": row.maxBindings, "status": row.status, "lease_expires_at": row.lease, "note": row.note, "last_code": row.last, "last_code_at": row.lastAt, "last_error": row.lastErr, "last_attempt_at": row.lastAttempt, "created_at": row.created, "updated_at": row.updated, "bind_count": row.bindCount, "bindings": bindings, "state": row.computedState})
 	}
-	total := len(all)
-	if offset < 0 {
-		offset = 0
-	}
-	if limit <= 0 {
-		limit = total
-	}
-	if offset > total {
-		offset = total
-	}
-	end := offset + limit
-	if end > total {
-		end = total
-	}
-	return all[offset:end], stats, total, nil
+	return items, stats, total, nil
 }
 
 func smsState(status, lease, lastAttempt string, max, count int) string {
@@ -149,16 +170,28 @@ func (s *Store) DeleteSMSPhones(ids []string) (int, error) {
 	return n, nil
 }
 func (s *Store) SMSPhone(id string) (map[string]any, error) {
-	items, _, _, e := s.SMSPhones("", "", -1, 0)
-	if e != nil {
-		return nil, e
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var itemID, provider, phone, card, apiURL, status, lease, note, last, lastAt, lastErr, lastAttempt, created, updated string
+	var maxBindings int
+	if err := s.db.QueryRow(`SELECT id,provider,phone_number,card_code,api_url,max_bindings,status,lease_expires_at,note,
+		last_code,last_code_at,last_error,last_attempt_at,created_at,updated_at FROM sms_phones WHERE id=?`, strings.TrimSpace(id)).Scan(
+		&itemID, &provider, &phone, &card, &apiURL, &maxBindings, &status, &lease, &note,
+		&last, &lastAt, &lastErr, &lastAttempt, &created, &updated); err != nil {
+		return nil, errors.New("手机号不存在")
 	}
-	for _, x := range items {
-		if x["id"] == id {
-			return x, nil
-		}
+	bindings := s.smsBindingsLocked(itemID)
+	masked := card
+	if len(card) > 8 {
+		masked = card[:4] + "****" + card[len(card)-4:]
 	}
-	return nil, errors.New("手机号不存在")
+	return map[string]any{
+		"id": itemID, "provider": provider, "phone_number": phone, "card_code_masked": masked, "api_url": apiURL,
+		"max_bindings": maxBindings, "status": status, "lease_expires_at": lease, "note": note,
+		"last_code": last, "last_code_at": lastAt, "last_error": lastErr, "last_attempt_at": lastAttempt,
+		"created_at": created, "updated_at": updated, "bind_count": len(bindings), "bindings": bindings,
+		"state": smsState(status, lease, lastAttempt, maxBindings, len(bindings)),
+	}, nil
 }
 func (s *Store) SaveSMSCode(id, code, lease string) error {
 	s.mu.Lock()

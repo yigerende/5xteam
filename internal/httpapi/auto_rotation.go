@@ -37,14 +37,44 @@ func (s *Server) saveAutoRotationSettings(w http.ResponseWriter, r *http.Request
 	}
 	writeAPI(w, 200, saved, "")
 }
-func (s *Server) listAutoRotationRuns(w http.ResponseWriter, _ *http.Request) {
-	writeAPI(w, 200, s.store.AutoRotationRuns(), "")
+func (s *Server) listAutoRotationRuns(w http.ResponseWriter, r *http.Request) {
+	if !paginationRequested(r) {
+		writeAPI(w, 200, s.store.AutoRotationRuns(), "")
+		return
+	}
+	page := parsePagination(r)
+	items, total, err := s.store.AutoRotationRunsPage(page.Limit, page.Offset)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取自动轮转批次失败: "+err.Error())
+		return
+	}
+	writeAPI(w, 200, paginatedData(items, total, page, nil), "")
 }
 func (s *Server) listAutoRotationTasks(w http.ResponseWriter, r *http.Request) {
-	writeAPI(w, 200, s.store.AutoRotationTasks(r.PathValue("id")), "")
+	if !paginationRequested(r) {
+		writeAPI(w, 200, s.store.AutoRotationTasks(r.PathValue("id")), "")
+		return
+	}
+	page := parsePagination(r)
+	items, total, err := s.store.AutoRotationTasksPage(r.PathValue("id"), page.Limit, page.Offset)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取自动轮转任务失败: "+err.Error())
+		return
+	}
+	writeAPI(w, 200, paginatedData(items, total, page, nil), "")
 }
 func (s *Server) listAutoRotationEvents(w http.ResponseWriter, r *http.Request) {
-	writeAPI(w, 200, redactExecutionEvents(s.store.AutoRotationEvents(r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id"))), "")
+	if !paginationRequested(r) {
+		writeAPI(w, 200, redactExecutionEvents(s.store.AutoRotationEvents(r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id"))), "")
+		return
+	}
+	page := parsePagination(r)
+	items, total, err := s.store.AutoRotationEventsPage(r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id"), r.URL.Query().Get("account_id"), r.URL.Query().Get("type"), r.URL.Query().Get("query"), page.Limit, page.Offset)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取执行事件失败: "+err.Error())
+		return
+	}
+	writeAPI(w, 200, paginatedData(redactExecutionEvents(items), total, page, nil), "")
 }
 
 type executionLogExport struct {

@@ -52,7 +52,10 @@ const historyLoading = ref(false);
 const smsMenu = ref("pool");
 const phonePage = ref(1);
 const phonePageSize = ref(10);
-const pagedPhones = computed(() => phones.value.slice((phonePage.value - 1) * phonePageSize.value, phonePage.value * phonePageSize.value));
+const phoneTotal = ref(0);
+const activationPage = ref(1);
+const activationPageSize = ref(10);
+const activationTotal = ref(0);
 
 const providerLabel = (key) =>
   ({
@@ -131,13 +134,11 @@ function formatActivationTime(item) {
 async function load() {
   loading.value = true;
   try {
-    const [providerData, phoneData] = await Promise.all([
+    const [providerData] = await Promise.all([
       api("/api/sms/providers"),
-      api("/api/sms/phones?limit=500&offset=0"),
+      loadPhones(),
     ]);
     providers.value = providerData.providers || [];
-    phones.value = phoneData.phones || [];
-    stats.value = phoneData.stats || {};
     if (
       !configProviders.value.some(
         (item) => item.key === configProvider.value,
@@ -153,23 +154,59 @@ async function load() {
     loading.value = false;
   }
 }
+async function loadPhones() {
+  const result = await api(`/api/sms/phones?page=${phonePage.value}&page_size=${phonePageSize.value}`);
+  phones.value = result.items || result.phones || [];
+  stats.value = result.stats || {};
+  phoneTotal.value = Number(result.total || 0);
+  const lastPage = Math.max(1, Math.ceil(phoneTotal.value / phonePageSize.value));
+  if (phonePage.value > lastPage) {
+    phonePage.value = lastPage;
+    return loadPhones();
+  }
+}
+function setPhonePage(value) {
+  phonePage.value = value;
+  loadPhones().catch((error) => setMessage(error.message, "error"));
+}
+function setPhonePageSize(value) {
+  phonePageSize.value = value;
+  phonePage.value = 1;
+  loadPhones().catch((error) => setMessage(error.message, "error"));
+}
 async function loadActivationHistory() {
   if (configProvider.value !== "hero_sms") {
     activationHistory.value = [];
+    activationTotal.value = 0;
     return;
   }
   historyLoading.value = true;
   try {
     const result = await api(
-      "/api/sms/platform/history?provider=hero_sms&limit=100",
+      `/api/sms/platform/history?provider=hero_sms&page=${activationPage.value}&page_size=${activationPageSize.value}`,
     );
     const items = Array.isArray(result.items) ? result.items : [];
     activationHistory.value = [...items].sort((a, b) => activationTimestamp(b) - activationTimestamp(a));
+    activationTotal.value = Number(result.total || 0);
+    const lastPage = Math.max(1, Math.ceil(activationTotal.value / activationPageSize.value));
+    if (activationPage.value > lastPage) {
+      activationPage.value = lastPage;
+      return loadActivationHistory();
+    }
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
     historyLoading.value = false;
   }
+}
+function setActivationPage(value) {
+  activationPage.value = value;
+  loadActivationHistory();
+}
+function setActivationPageSize(value) {
+  activationPageSize.value = value;
+  activationPage.value = 1;
+  loadActivationHistory();
 }
 async function loadConfig() {
   if (!configProvider.value) return;
@@ -178,7 +215,6 @@ async function loadConfig() {
       `/api/sms/platform/config?provider=${encodeURIComponent(configProvider.value)}`,
     );
     Object.assign(config, result.config || result);
-    await loadActivationHistory();
   } catch (error) {
     setMessage(error.message, "error");
   }
@@ -204,7 +240,8 @@ async function importPhones() {
       `导入完成：新增 ${result.added || 0} 个，跳过 ${result.skipped || 0} 个`,
       result.errors?.length ? "error" : "success",
     );
-    await load();
+    phonePage.value = 1;
+    await loadPhones();
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -225,7 +262,7 @@ async function deletePhone(phone) {
       body: { ids: [phone.id] },
     });
     setMessage("号源已删除", "success");
-    await load();
+    await loadPhones();
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -240,7 +277,7 @@ async function updatePhone(phone, patch) {
       body: { id: phone.id, ...patch },
     });
     setMessage("号源状态已更新", "success");
-    await load();
+    await loadPhones();
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -259,7 +296,7 @@ async function bindPhone() {
     bindDialog.value = null;
     bindEmail.value = "";
     setMessage("绑定成功", "success");
-    await load();
+    await loadPhones();
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -275,7 +312,7 @@ async function fetchCode(phone) {
       method: "POST",
       body: { id: phone.id },
     });
-    await load();
+    await loadPhones();
   } catch (error) {
     codeResult.value = { found: false, message: error.message };
   } finally {
@@ -374,7 +411,7 @@ onMounted(load);
       </div>
     </header>
     <MessageBar :message="message" />
-    <nav class="sms-subnav" aria-label="接码管理菜单"><button type="button" :class="{ active: smsMenu === 'pool' }" @click="smsMenu = 'pool'"><Smartphone :size="14" />号码池</button><button type="button" :class="{ active: smsMenu === 'settings' }" @click="smsMenu = 'settings'"><Save :size="14" />实时接码平台设置</button><button type="button" :class="{ active: smsMenu === 'history' }" @click="smsMenu = 'history'"><History :size="14" />激活历史</button></nav>
+    <nav class="sms-subnav" aria-label="接码管理菜单"><button type="button" :class="{ active: smsMenu === 'pool' }" @click="smsMenu = 'pool'"><Smartphone :size="14" />号码池</button><button type="button" :class="{ active: smsMenu === 'settings' }" @click="smsMenu = 'settings'"><Save :size="14" />实时接码平台设置</button><button type="button" :class="{ active: smsMenu === 'history' }" @click="smsMenu = 'history'; loadActivationHistory()"><History :size="14" />激活历史</button></nav>
     <div class="stat-grid compact top-cards">
       <div class="stat-card">
         <span>总号源</span><strong>{{ stats.total ?? phones.length }}</strong>
@@ -393,8 +430,8 @@ onMounted(load);
       </div>
       <div class="stat-card history-card">
         <span>hero-sms 激活历史</span
-        ><strong>{{ activationHistory.length }}</strong
-        ><small>{{ historyLoading ? "读取中…" : "最近 100 条" }}</small>
+        ><strong>{{ activationTotal }}</strong
+        ><small>{{ historyLoading ? "读取中…" : "激活记录" }}</small>
       </div>
     </div>
     <section v-if="smsMenu === 'pool'" class="panel">
@@ -421,7 +458,7 @@ onMounted(load);
             </tr>
           </thead>
           <tbody>
-            <tr v-for="phone in pagedPhones" :key="phone.id">
+            <tr v-for="phone in phones" :key="phone.id">
               <td class="mono">{{ phone.phone_number || "实时申请" }}</td>
               <td>{{ providerLabel(phone.provider) }}</td>
               <td
@@ -516,7 +553,7 @@ onMounted(load);
           </tbody>
         </table>
       </div>
-      <Pagination :page="phonePage" :page-size="phonePageSize" :total="phones.length" @update:page="phonePage = $event" @update:page-size="phonePageSize = $event" />
+      <Pagination :page="phonePage" :page-size="phonePageSize" :total="phoneTotal" @update:page="setPhonePage" @update:page-size="setPhonePageSize" />
     </section>
     <section v-if="smsMenu === 'settings' && configProviders.length" class="panel">
       <div class="panel-title">
@@ -671,6 +708,7 @@ onMounted(load);
           </tbody>
         </table>
       </div>
+      <Pagination :page="activationPage" :page-size="activationPageSize" :total="activationTotal" @update:page="setActivationPage" @update:page-size="setActivationPageSize" />
     </section>
     <div
       v-if="importOpen"

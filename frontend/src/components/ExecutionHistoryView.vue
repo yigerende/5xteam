@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ChevronDown, Download, RefreshCw } from 'lucide-vue-next'
 import { api, downloadFile } from '../api'
 import Pagination from './Pagination.vue'
@@ -12,6 +12,7 @@ const filter = ref('all')
 const expanded = ref(new Set())
 const page = ref(1)
 const pageSize = ref(10)
+const total = ref(0)
 const busy = ref(false)
 const exportBusy = ref(false)
 const error = ref('')
@@ -21,22 +22,33 @@ function typeName(value) { return eventTypes[value] || value || '系统事件' }
 function stageName(value) { return stages[value] || value || '-' }
 function stringify(value) { return value == null ? '' : JSON.stringify(value, null, 2) }
 function toggle(id) { const next = new Set(expanded.value); if (next.has(id)) next.delete(id); else next.add(id); expanded.value = next }
-const filtered = computed(() => events.value.filter((item) => {
-  if (filter.value !== 'all' && item.type !== filter.value) return false
-  const text = `${item.email || ''} ${item.account_id || ''} ${item.message || ''} ${item.stage || ''} ${item.provider || ''}`.toLowerCase()
-  return !query.value.trim() || text.includes(query.value.trim().toLowerCase())
-}))
-const shown = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
-async function load() { busy.value = true; error.value = ''; try { events.value = await api('/api/auto-rotation/events') } catch (e) { error.value = e.message } finally { busy.value = false } }
+const shown = events
+let searchTimer
+async function load() {
+  busy.value = true; error.value = ''
+  try {
+    const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value), query: query.value.trim(), type: filter.value === 'all' ? '' : filter.value })
+    const data = await api(`/api/auto-rotation/events?${params}`)
+    events.value = data.items || []
+    total.value = Number(data.total || 0)
+    const lastPage = Math.max(1, Math.ceil(total.value / pageSize.value))
+    if (page.value > lastPage) { page.value = lastPage; return load() }
+  } catch (e) { error.value = e.message } finally { busy.value = false }
+}
+function setPage(value) { page.value = value; load() }
+function setPageSize(value) { pageSize.value = value; page.value = 1; load() }
+watch(query, () => { window.clearTimeout(searchTimer); page.value = 1; searchTimer = window.setTimeout(load, 250) })
+watch(filter, () => { page.value = 1; load() })
 async function exportLogs() { exportBusy.value = true; error.value = ''; try { await downloadFile('/api/auto-rotation/events/export', 'team-execution-logs.json') } catch (e) { error.value = e.message } finally { exportBusy.value = false } }
 onMounted(load)
+onBeforeUnmount(() => window.clearTimeout(searchTimer))
 </script>
 <template>
   <section class="execution-history-view">
-    <div class="panel-title responsive"><div><span>EXECUTION HISTORY</span><h2>执行历史</h2><p class="panel-description">自动轮转、手动操作、401 检测、额度检测和重登共用同一套审计记录。</p></div><div class="heading-actions"><input v-model="query" class="history-search" placeholder="搜索账号、阶段或错误" @input="page = 1" /><select v-model="filter" class="history-filter" @change="page = 1"><option value="all">全部事件</option><option v-for="(label, key) in eventTypes" :key="key" :value="key">{{ label }}</option></select><button class="btn ghost" type="button" :disabled="exportBusy" @click="exportLogs"><Download :size="15" />{{ exportBusy ? '导出中…' : '一键导出日志' }}</button><button class="btn ghost" type="button" :disabled="busy" @click="load"><RefreshCw :class="{ spin: busy }" :size="15" />刷新</button></div></div>
+    <div class="panel-title responsive"><div><span>EXECUTION HISTORY</span><h2>执行历史</h2><p class="panel-description">自动轮转、手动操作、401 检测、额度检测和重登共用同一套审计记录。</p></div><div class="heading-actions"><input v-model="query" class="history-search" placeholder="搜索账号、阶段或错误" /><select v-model="filter" class="history-filter"><option value="all">全部事件</option><option v-for="(label, key) in eventTypes" :key="key" :value="key">{{ label }}</option></select><button class="btn ghost" type="button" :disabled="exportBusy" @click="exportLogs"><Download :size="15" />{{ exportBusy ? '导出中…' : '一键导出日志' }}</button><button class="btn ghost" type="button" :disabled="busy" @click="load"><RefreshCw :class="{ spin: busy }" :size="15" />刷新</button></div></div>
     <div v-if="error" class="history-error">{{ error }}</div>
     <div class="table-shell"><table><thead><tr><th>时间</th><th>来源</th><th>线路</th><th>账号</th><th>事件</th><th>阶段</th><th>尝试</th><th>耗时</th><th>结果</th></tr></thead><tbody><tr v-if="!shown.length"><td colspan="9" class="empty-cell">暂无执行事件</td></tr><template v-for="event in shown" :key="event.id"><tr><td>{{ formatTime(event.created_at) }}</td><td>{{ event.source || '-' }}</td><td>{{ event.provider ? event.provider.toUpperCase() : '-' }}</td><td>{{ event.account_id || event.admin_account_id || '-' }}</td><td>{{ typeName(event.type) }}</td><td>{{ stageName(event.stage) }}</td><td>{{ event.attempt || '-' }}</td><td>{{ event.duration_ms ? `${event.duration_ms} ms` : '-' }}</td><td><button v-if="event.request || event.response || event.details" class="history-expand" type="button" @click="toggle(event.id)"><ChevronDown :class="{ expanded: expanded.has(event.id) }" :size="14" />{{ event.message || '查看详情' }}</button><span v-else>{{ event.message || '-' }}</span></td></tr><tr v-if="expanded.has(event.id)" class="history-detail-row"><td colspan="9"><div class="history-detail"><div v-if="event.message"><strong>消息</strong><p>{{ event.message }}</p></div><div v-if="event.request"><strong>请求参数</strong><pre>{{ stringify(event.request) }}</pre></div><div v-if="event.response"><strong>返回参数</strong><pre>{{ stringify(event.response) }}</pre></div><div v-if="event.details"><strong>详情</strong><pre>{{ stringify(event.details) }}</pre></div></div></td></tr></template></tbody></table></div>
-    <Pagination :page="page" :page-size="pageSize" :total="filtered.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
+    <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="setPage" @update:page-size="setPageSize" />
   </section>
 </template>
 <style scoped>

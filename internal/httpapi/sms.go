@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,10 @@ func (s *Server) listSMSProviders(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) listSMSPhones(w http.ResponseWriter, r *http.Request) {
 	limit, offset := 500, 0
+	page := parsePagination(r)
+	if paginationRequested(r) {
+		limit, offset = page.Limit, page.Offset
+	}
 	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
 		limit = v
 	}
@@ -33,7 +38,11 @@ func (s *Server) listSMSPhones(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 500, nil, "读取号源失败: "+err.Error())
 		return
 	}
-	writeAPI(w, 200, map[string]any{"phones": phones, "stats": stats, "total": total}, "")
+	data := map[string]any{"phones": phones, "items": phones, "stats": stats, "total": total}
+	if paginationRequested(r) {
+		data["page"], data["page_size"] = page.Page, page.PageSize
+	}
+	writeAPI(w, 200, data, "")
 }
 
 type smsImportInput struct {
@@ -438,6 +447,7 @@ func (s *Server) testSMSPlatform(w http.ResponseWriter, r *http.Request) {
 // legacy handler_api.php endpoint remains the source for balance/number
 // operations.  The API key is only read server-side and is never returned.
 func (s *Server) getSMSPlatformHistory(w http.ResponseWriter, r *http.Request) {
+	page := parsePagination(r)
 	provider := strings.TrimSpace(r.URL.Query().Get("provider"))
 	if provider != "hero_sms" {
 		writeAPI(w, http.StatusOK, map[string]any{"provider": provider, "items": []any{}, "total": 0, "message": "当前仅支持 hero-sms 激活历史"}, "")
@@ -476,7 +486,15 @@ func (s *Server) getSMSPlatformHistory(w http.ResponseWriter, r *http.Request) {
 	if legacyHandler {
 		q.Set("action", "getHistory")
 	}
-	if limit := strings.TrimSpace(r.URL.Query().Get("limit")); limit != "" {
+	if paginationRequested(r) {
+		if legacyHandler {
+			q.Set("limit", strconv.Itoa(page.Offset+page.Limit))
+		} else {
+			q.Set("limit", strconv.Itoa(page.Limit))
+			q.Set("offset", strconv.Itoa(page.Offset))
+			q.Set("page", strconv.Itoa(page.Page))
+		}
+	} else if limit := strings.TrimSpace(r.URL.Query().Get("limit")); limit != "" {
 		q.Set("limit", limit)
 	}
 	u.RawQuery = q.Encode()
@@ -515,7 +533,9 @@ func (s *Server) getSMSPlatformHistory(w http.ResponseWriter, r *http.Request) {
 		fq := fallbackURL.Query()
 		fq.Set("api_key", apiKey)
 		fq.Set("action", "getHistory")
-		if limit := strings.TrimSpace(r.URL.Query().Get("limit")); limit != "" {
+		if paginationRequested(r) {
+			fq.Set("limit", strconv.Itoa(page.Offset+page.Limit))
+		} else if limit := strings.TrimSpace(r.URL.Query().Get("limit")); limit != "" {
 			fq.Set("limit", limit)
 		}
 		fallbackURL.RawQuery = fq.Encode()
@@ -529,6 +549,7 @@ func (s *Server) getSMSPlatformHistory(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal(fallbackRaw, &fallbackPayload) == nil && fallbackResp.StatusCode >= 200 && fallbackResp.StatusCode < 300 {
 				resp.StatusCode = fallbackResp.StatusCode
 				raw, payload = fallbackRaw, fallbackPayload
+				legacyHandler = true
 			}
 		}
 	}
@@ -537,7 +558,16 @@ func (s *Server) getSMSPlatformHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := payload
+	providerTotal := 0
 	if obj, ok := payload.(map[string]any); ok {
+		for _, key := range []string{"total", "count", "total_count"} {
+			if value, exists := obj[key]; exists {
+				if parsed, parseErr := strconv.Atoi(fmt.Sprint(value)); parseErr == nil && parsed >= 0 {
+					providerTotal = parsed
+					break
+				}
+			}
+		}
 		for _, key := range []string{"items", "data", "activations", "history", "results"} {
 			if value, exists := obj[key]; exists {
 				items = value
@@ -545,11 +575,52 @@ func (s *Server) getSMSPlatformHistory(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	total := 0
+	total := providerTotal
 	if list, ok := items.([]any); ok {
-		total = len(list)
+		sort.SliceStable(list, func(i, j int) bool { return smsActivationTimestamp(list[i]) > smsActivationTimestamp(list[j]) })
+		if total == 0 {
+			total = len(list)
+		}
+		if paginationRequested(r) && legacyHandler {
+			start := page.Offset
+			if start > len(list) {
+				start = len(list)
+			}
+			end := start + page.Limit
+			if end > len(list) {
+				end = len(list)
+			}
+			items = list[start:end]
+		}
 	}
-	writeAPI(w, http.StatusOK, map[string]any{"provider": provider, "items": items, "total": total}, "")
+	data := map[string]any{"provider": provider, "items": items, "total": total}
+	if paginationRequested(r) {
+		data["page"], data["page_size"] = page.Page, page.PageSize
+	}
+	writeAPI(w, http.StatusOK, data, "")
+}
+
+func smsActivationTimestamp(value any) int64 {
+	item, ok := value.(map[string]any)
+	if !ok {
+		return 0
+	}
+	for _, key := range []string{"created_at", "createdAt", "timestamp", "time", "date"} {
+		raw := strings.TrimSpace(fmt.Sprint(item[key]))
+		if raw == "" || raw == "<nil>" {
+			continue
+		}
+		if numeric, err := strconv.ParseFloat(raw, 64); err == nil {
+			if numeric < 1e12 {
+				numeric *= 1000
+			}
+			return int64(numeric)
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			return parsed.UnixMilli()
+		}
+	}
+	return 0
 }
 
 func compactSMSJSON(value any) string {

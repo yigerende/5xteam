@@ -41,6 +41,8 @@ const joinOpen = ref(false)
 const fileInput = ref(null)
 const folderInput = ref(null)
 const teamMenu = ref('accounts')
+const pipelineMenu = reactive({ account: null, top: 0, left: 0, open: false })
+let pipelineMenuCloseTimer
 const capacityCacheKey = 'space-console-admin-capacities-v1'
 function readCapacityCache() {
   try {
@@ -62,9 +64,11 @@ const lastCapacityFetchAt = ref(initialCapacityCache.fetchedAt)
 const joinCapacityRefreshing = ref(false)
 const page = ref(1)
 const pageSize = ref(10)
+const accountTotal = ref(0)
+const accountSummary = reactive({ all: 0, outside: 0, inside: 0, removed: 0, oauth_ready: 0, monitoring: 0, inside_premium: 0, quota_7d_remaining_total: 0, quota_7d_count: 0, oldest_status_checked_at: '', oldest_quota_checked_at: '', pending_seats_by_admin: {} })
 const teamSpaceFilter = ref('')
 const selectedAccountIDs = ref(new Set())
-const lifecycleView = reactive({ account: null, events: [], task: null, loading: false, error: '' })
+const lifecycleView = reactive({ account: null, events: [], task: null, loading: false, error: '', page: 1, pageSize: 10, total: 0 })
 
 function teamSpaceStatus(account) {
   if (account?.remove_status === 'completed') return 'removed'
@@ -74,36 +78,19 @@ function teamSpaceStatus(account) {
 function isPremiumSeatType(seatType) {
   return ['prolite', 'premium', '5x'].includes(String(seatType || '').trim().toLowerCase())
 }
-const allDisplayedAccounts = computed(() => {
-  const statusOrder = { inside: 0, outside: 1, removed: 2 }
-  const filtered = teamSpaceFilter.value
-    ? liveAccounts.value.filter((item) => teamSpaceStatus(item) === teamSpaceFilter.value)
-    : liveAccounts.value
-  return [...filtered].sort((a, b) => {
-    const statusDiff = (statusOrder[teamSpaceStatus(a)] ?? 9) - (statusOrder[teamSpaceStatus(b)] ?? 9)
-    if (statusDiff) return statusDiff
-    const aTime = new Date(a.imported_at || a.created_at || 0).getTime()
-    const bTime = new Date(b.imported_at || b.created_at || 0).getTime()
-    if (Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime) return bTime - aTime
-    return String(a.email || '').localeCompare(String(b.email || ''))
-  })
-})
-const pages = computed(() => Math.max(1, Math.ceil(allDisplayedAccounts.value.length / pageSize.value)))
-const displayedAccounts = computed(() => allDisplayedAccounts.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
+const allDisplayedAccounts = computed(() => liveAccounts.value)
+const displayedAccounts = computed(() => liveAccounts.value)
 const selectedPipelineAccounts = computed(() => liveAccounts.value.filter((item) => selectedAccountIDs.value.has(String(item.id))))
 const allDisplayedSelected = computed(() => displayedAccounts.value.length > 0 && displayedAccounts.value.every((item) => selectedAccountIDs.value.has(String(item.id))))
-watch(() => allDisplayedAccounts.value.length, () => { page.value = Math.min(page.value, pages.value) })
-watch(teamSpaceFilter, () => { page.value = 1 })
 watch(() => liveAccounts.value.map((item) => String(item.id)).join(','), () => {
   const available = new Set(liveAccounts.value.map((item) => String(item.id)))
   selectedAccountIDs.value = new Set([...selectedAccountIDs.value].filter((id) => available.has(id)))
 })
 const activeActivities = computed(() => Object.values(activities))
-const joinedCount = computed(() => displayedAccounts.value.filter((item) => item.accept_status === 'completed' && item.remove_status !== 'completed').length)
-const oauthCount = computed(() => displayedAccounts.value.filter((item) => item.oauth_status === 'completed').length)
-const monitoringCount = computed(() => displayedAccounts.value.filter((item) => item.push_status === 'completed' && item.remove_status !== 'completed').length)
-const removedCount = computed(() => displayedAccounts.value.filter((item) => item.remove_status === 'completed').length)
-const quota7DWindows = computed(() => liveAccounts.value.filter((item) => teamSpaceStatus(item) === 'inside').map((item) => item.quota_7d).filter(Boolean))
+const joinedCount = computed(() => Number(accountSummary.inside || 0))
+const oauthCount = computed(() => Number(accountSummary.oauth_ready || 0))
+const monitoringCount = computed(() => Number(accountSummary.monitoring || 0))
+const removedCount = computed(() => Number(accountSummary.removed || 0))
 const premiumSeatSummary = computed(() => {
   let total = 0
   for (const value of adminCapacities.value.values()) {
@@ -111,33 +98,27 @@ const premiumSeatSummary = computed(() => {
   }
   // The total comes from the cached Team capacity snapshot, while the
   // remaining count must follow the current pipeline state immediately.
-  const insidePremium = liveAccounts.value.filter((account) => (
-    teamSpaceStatus(account) === 'inside' && isPremiumSeatType(account.seat_type)
-  )).length
+  const insidePremium = Number(accountSummary.inside_premium || 0)
   const remaining = Math.max(0, total - insidePremium)
   return { total, remaining }
 })
 const average7DRemaining = computed(() => {
-  const windows = quota7DWindows.value
   const seatTotal = premiumSeatSummary.value.total
-  if (!windows.length || !seatTotal) return '未查询'
-  const remainingTotal = windows.reduce((sum, item) => sum + Math.max(0, 100 - Number(item.used_percent || 0)), 0)
+  if (!Number(accountSummary.quota_7d_count || 0) || !seatTotal) return '未查询'
+  const remainingTotal = Number(accountSummary.quota_7d_remaining_total || 0)
   const average = remainingTotal / seatTotal
   return `${average.toFixed(average % 1 ? 1 : 0)}%`
 })
 function nextCheckSeconds(timestampKey, intervalSeconds, enabled = true) {
   if (!enabled) return null
   const interval = Math.max(10, Number(intervalSeconds) || 120)
-  const candidates = liveAccounts.value
-    .filter((item) => hasDownstream(item) && item?.remove_status !== 'completed')
-    .map((item) => {
-      const value = item?.[timestampKey]
-      if (!value) return 0
-      const checkedAt = new Date(value).getTime()
-      if (!Number.isFinite(checkedAt)) return 0
-      return Math.max(0, Math.ceil(interval - (clock.value - checkedAt) / 1000))
-    })
-  return candidates.length ? Math.min(...candidates) : null
+  if (!Number(accountSummary.monitoring || 0)) return null
+  const summaryKey = timestampKey === 'status_checked_at' ? 'oldest_status_checked_at' : 'oldest_quota_checked_at'
+  const value = accountSummary[summaryKey]
+  if (!value) return 0
+  const checkedAt = new Date(value).getTime()
+  if (!Number.isFinite(checkedAt)) return 0
+  return Math.max(0, Math.ceil(interval - (clock.value - checkedAt) / 1000))
 }
 const statusCountdown = computed(() => nextCheckSeconds('status_checked_at', pushProvider.value === 'cpa' ? cpaForm.statusCheckIntervalSeconds : sub2Form.statusCheckIntervalSeconds, pushProvider.value === 'cpa' ? cpaForm.enable401Check : sub2Form.enable401Check))
 const quotaCountdown = computed(() => nextCheckSeconds('quota_checked_at', pushProvider.value === 'cpa' ? cpaForm.quotaCheckIntervalSeconds : sub2Form.quotaCheckIntervalSeconds))
@@ -167,10 +148,6 @@ function costText(account) {
 const hasDownstream = (account) => pushProvider.value === 'cpa'
   ? !!account?.cpa_auth_file_name
   : Number(account?.sub2_account_id) > 0
-
-watch(() => props.accounts, (value) => {
-  liveAccounts.value = value.map((item) => ({ ...item }))
-}, { immediate: true, deep: true })
 
 async function loadAdminCapacity(account) {
   if (!account?.id) return
@@ -237,13 +214,8 @@ watch([teamMenu, () => props.active], ([value, active]) => {
 // a seat that is already in use by this pipeline.
 const pendingSeatUsage = computed(() => {
   const usage = new Map()
-  for (const account of liveAccounts.value) {
-    if (!account?.admin_account_id || account.remove_status === 'completed') continue
-    if (!['pending', 'running', 'completed'].includes(account.invite_status) || account.accept_status === 'completed') continue
-    const type = ['prolite', 'premium', '5x'].includes(String(account.seat_type || '').toLowerCase()) ? 'premium' : 'standard'
-    const current = usage.get(account.admin_account_id) || { standard: 0, premium: 0 }
-    current[type] += 1
-    usage.set(account.admin_account_id, current)
+  for (const [adminID, counts] of Object.entries(accountSummary.pending_seats_by_admin || {})) {
+    usage.set(adminID, { standard: Number(counts?.standard || 0), premium: Number(counts?.premium || 0) })
   }
   return usage
 })
@@ -279,7 +251,12 @@ function adminOptionLabel(admin) {
 }
 
 watch(() => props.entryEmail, (value) => {
-  if (value) setMessage(`${value} 已从邮件管理进入流水线，可继续邀请并进入空间`, 'success')
+  if (value) {
+    teamSpaceFilter.value = ''
+    page.value = 1
+    refreshLiveAccounts().catch(() => {})
+    setMessage(`${value} 已从邮件管理进入流水线，可继续邀请并进入空间`, 'success')
+  }
 }, { immediate: true })
 
 function setMessage(text = '', type = '') { Object.assign(message, { text, type }) }
@@ -326,28 +303,43 @@ function syncActivityStage(account) {
   if (activity.stage !== previousStage) setMessage(`${account.email}：${activityText(activity)}`)
 }
 async function refreshLiveAccounts() {
-  const accounts = await api('/api/free-accounts')
-  liveAccounts.value = accounts
-  accounts.forEach(syncActivityStage)
-  return accounts
+  const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value), space_state: teamSpaceFilter.value })
+  const data = await api(`/api/free-accounts?${params}`)
+  liveAccounts.value = data.items || []
+  accountTotal.value = Number(data.total || 0)
+  Object.assign(accountSummary, data.summary || {})
+  const lastPage = Math.max(1, Math.ceil(accountTotal.value / pageSize.value))
+  if (page.value > lastPage) {
+    page.value = lastPage
+    return refreshLiveAccounts()
+  }
+  liveAccounts.value.forEach(syncActivityStage)
+  return liveAccounts.value
 }
+function setAccountPage(value) { page.value = value; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
+function setAccountPageSize(value) { pageSize.value = value; page.value = 1; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
+function setTeamSpaceFilter(value) { teamSpaceFilter.value = teamSpaceFilter.value === value ? '' : value; page.value = 1; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
 async function openLifecycle(account) {
+  if (String(lifecycleView.account?.id || '') !== String(account?.id || '')) lifecycleView.page = 1
   lifecycleView.account = account
   lifecycleView.events = []
   lifecycleView.task = null
   lifecycleView.error = ''
   lifecycleView.loading = true
   try {
-    const result = await api(`/api/free-accounts/${encodeURIComponent(account.id)}/events`)
+    const result = await api(`/api/free-accounts/${encodeURIComponent(account.id)}/events?page=${lifecycleView.page}&page_size=${lifecycleView.pageSize}`)
     lifecycleView.account = result.account || account
     lifecycleView.task = result.lifecycle_task || null
-    lifecycleView.events = result.events || []
+    lifecycleView.events = result.items || result.events || []
+    lifecycleView.total = Number(result.total || lifecycleView.events.length)
   } catch (error) {
     lifecycleView.error = error.message
   } finally {
     lifecycleView.loading = false
   }
 }
+function setLifecyclePage(value) { lifecycleView.page = value; openLifecycle(lifecycleView.account) }
+function setLifecyclePageSize(value) { lifecycleView.pageSize = value; lifecycleView.page = 1; openLifecycle(lifecycleView.account) }
 async function exportAccountLogs(account = lifecycleView.account) {
   if (!account?.id) return
   try {
@@ -667,6 +659,38 @@ async function runAction(account, action) {
     setMessage(action === 'quota' && result.auto_removed ? `${account.email} 额度已耗尽并自动移出` : `${account.email}：${label}完成`, 'success')
   } catch (error) { setMessage(error.message, 'error') }
 }
+function closePipelineMenu(delay = 160) {
+  window.clearTimeout(pipelineMenuCloseTimer)
+  pipelineMenuCloseTimer = window.setTimeout(() => {
+    pipelineMenu.open = false
+    pipelineMenu.account = null
+  }, delay)
+}
+function keepPipelineMenuOpen() {
+  window.clearTimeout(pipelineMenuCloseTimer)
+}
+function showPipelineMenu(account, event) {
+  window.clearTimeout(pipelineMenuCloseTimer)
+  const rect = event.currentTarget.getBoundingClientRect()
+  const menuWidth = 218
+  const menuHeight = 250
+  pipelineMenu.account = account
+  pipelineMenu.left = Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.right - menuWidth))
+  pipelineMenu.top = rect.bottom + menuHeight > window.innerHeight - 8
+    ? Math.max(8, rect.top - menuHeight - 6)
+    : rect.bottom + 6
+  pipelineMenu.open = true
+}
+function runPipelineMenuAction(action) {
+  const account = pipelineMenu.account
+  pipelineMenu.open = false
+  pipelineMenu.account = null
+  if (!account) return
+  if (action === 'lifecycle') return openLifecycle(account)
+  if (action === 'oauth') return acquireOAuth(account)
+  if (action === 'join') return openJoin(account)
+  return runAction(account, action)
+}
 async function savePolicy(account, values = {}) {
   busy.value = account.id
   try {
@@ -709,20 +733,21 @@ function quotaText(window) {
 let clockTimer
 let liveRefreshTimer
 onMounted(async () => {
-  await loadPushSettings(); await loadSub2()
+  await Promise.all([loadPushSettings(), loadSub2(), refreshLiveAccounts()])
   clockTimer = window.setInterval(() => { clock.value = Date.now() }, 1000)
-  liveRefreshTimer = window.setInterval(() => { refreshLiveAccounts().catch(() => {}) }, 10000)
+  liveRefreshTimer = window.setInterval(() => { if (props.active) refreshLiveAccounts().catch(() => {}) }, 10000)
 })
 onBeforeUnmount(() => window.clearInterval(clockTimer))
 onBeforeUnmount(() => window.clearInterval(liveRefreshTimer))
 onBeforeUnmount(stopCapacityRefreshTimer)
+onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
 </script>
 
 <template>
   <section class="view-stack">
     <header class="page-heading">
       <div><span class="overline">TEAM ROTATION</span><h1>Team 轮转</h1><p>Free 账号入队、加入团队、Codex 授权、Sub2 推送与额度回收</p></div>
-      <div class="heading-actions"><StatusPill :tone="activeActivities.length ? 'running' : 'success'">{{ activeActivities.length ? `${activeActivities.length} 个操作执行中` : `${displayedAccounts.length} 个账号` }}</StatusPill><button class="btn ghost" type="button" @click="refreshLiveAccounts"><RefreshCw :size="15" />刷新</button></div>
+      <div class="heading-actions"><StatusPill :tone="activeActivities.length ? 'running' : 'success'">{{ activeActivities.length ? `${activeActivities.length} 个操作执行中` : `${accountSummary.all} 个账号` }}</StatusPill><button class="btn ghost" type="button" @click="refreshLiveAccounts"><RefreshCw :size="15" />刷新</button></div>
     </header>
 
     <nav class="team-subnav" aria-label="Team 轮转菜单">
@@ -734,11 +759,11 @@ onBeforeUnmount(stopCapacityRefreshTimer)
     </nav>
 
     <div v-if="teamMenu === 'accounts'" class="metric-grid team-metrics">
-      <article class="metric-card blue"><Upload :size="17" /><div><span>已导入</span><strong>{{ displayedAccounts.length }}</strong><small>持久化 Free 账号</small></div></article>
+      <article class="metric-card blue"><Upload :size="17" /><div><span>已导入</span><strong>{{ accountSummary.all }}</strong><small>持久化 Free 账号</small></div></article>
       <article class="metric-card green"><DoorOpen :size="17" /><div><span>空间内</span><strong>{{ joinedCount }}</strong><small>已接受团队邀请</small></div></article>
       <article class="metric-card amber"><KeyRound :size="17" /><div><span>OAuth 就绪</span><strong>{{ oauthCount }}</strong><small>Codex 凭据已绑定</small></div></article>
       <article class="metric-card slate"><Gauge :size="17" /><div><span>监控 / 已移出</span><strong>{{ monitoringCount }} / {{ removedCount }}</strong><small>Sub2 额度状态</small></div></article>
-      <article class="metric-card blue"><Gauge :size="17" /><div><span>7天平均剩余额度</span><strong>{{ average7DRemaining }}</strong><small>按 5x 席位总数归一化 · 已查询 {{ quota7DWindows.length }} 个账号</small></div></article>
+      <article class="metric-card blue"><Gauge :size="17" /><div><span>7天平均剩余额度</span><strong>{{ average7DRemaining }}</strong><small>按 5x 席位总数归一化 · 已查询 {{ accountSummary.quota_7d_count }} 个账号</small></div></article>
       <article class="metric-card amber capacity-metric-card"><Gauge :size="17" /><div><span>5x 席位总数 / 剩余</span><strong>{{ premiumSeatSummary.total }} / {{ premiumSeatSummary.remaining }}</strong><small>{{ lastCapacityFetchAt ? `更新于 ${formatTime(lastCapacityFetchAt)}` : '尚未读取席位' }}</small></div><button class="metric-refresh-button" type="button" title="刷新 5x 席位" :disabled="capacityRefreshing" @click="loadAdminCapacities({ force: true })"><RefreshCw :class="{ spin: capacityRefreshing }" :size="14" /></button></article>
     </div>
 
@@ -804,9 +829,9 @@ onBeforeUnmount(stopCapacityRefreshTimer)
         </div>
       </div>
       <div class="space-filter-tabs" role="tablist" aria-label="空间状态筛选">
-        <button type="button" :class="{ active: teamSpaceFilter === 'outside' }" @click="teamSpaceFilter = teamSpaceFilter === 'outside' ? '' : 'outside'">未进入空间 <span>{{ liveAccounts.filter((item) => teamSpaceStatus(item) === 'outside').length }}</span></button>
-        <button type="button" :class="{ active: teamSpaceFilter === 'inside' }" @click="teamSpaceFilter = teamSpaceFilter === 'inside' ? '' : 'inside'">在空间里面 <span>{{ liveAccounts.filter((item) => teamSpaceStatus(item) === 'inside').length }}</span></button>
-        <button type="button" :class="{ active: teamSpaceFilter === 'removed' }" @click="teamSpaceFilter = teamSpaceFilter === 'removed' ? '' : 'removed'">已移出空间 <span>{{ liveAccounts.filter((item) => teamSpaceStatus(item) === 'removed').length }}</span></button>
+        <button type="button" :class="{ active: teamSpaceFilter === 'outside' }" @click="setTeamSpaceFilter('outside')">未进入空间 <span>{{ accountSummary.outside }}</span></button>
+        <button type="button" :class="{ active: teamSpaceFilter === 'inside' }" @click="setTeamSpaceFilter('inside')">在空间里面 <span>{{ accountSummary.inside }}</span></button>
+        <button type="button" :class="{ active: teamSpaceFilter === 'removed' }" @click="setTeamSpaceFilter('removed')">已移出空间 <span>{{ accountSummary.removed }}</span></button>
       </div>
       <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>累计消耗</th><th>5小时</th><th>7天</th><th>移出策略</th><th>重登成功 / 连续失败</th><th class="actions-column">操作</th></tr></thead><tbody>
         <tr v-if="!displayedAccounts.length"><td colspan="10" class="empty-cell">暂无 Free 账号</td></tr>
@@ -819,16 +844,27 @@ onBeforeUnmount(stopCapacityRefreshTimer)
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
           <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
           <td><strong>{{ account.relogin_count || 0 }} / {{ account.relogin_failure_count || 0 }}</strong><small class="table-note">成功 / 失败阈值 {{ activeReloginFailureLimit }}</small></td>
-          <td><div class="row-actions"><IconButton label="查看账号全流程" @click="openLifecycle(account)"><MoreHorizontal :size="15" /></IconButton><IconButton :label="joinActionLabel(account)" :disabled="account.dead || isAccountBusy(account) || joinCapacityRefreshing || !adminAccounts.length || account.remove_status === 'completed'" @click="openJoin(account)"><LoaderCircle v-if="activityFor(account)?.action === 'join' || joinCapacityRefreshing" class="spin" :size="15" /><DoorOpen v-else :size="15" /></IconButton><IconButton label="获取 Codex AT / RT" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="acquireOAuth(account)"><LoaderCircle v-if="activityFor(account)?.action === 'oauth'" class="spin" :size="15" /><KeyRound v-else :size="15" /></IconButton><IconButton label="重登并重新推送" :disabled="account.dead || isAccountBusy(account) || account.accept_status !== 'completed' || !hasDownstream(account) || account.remove_status === 'completed'" @click="runAction(account, 'relogin')"><LoaderCircle v-if="activityFor(account)?.action === 'relogin'" class="spin" :size="15" /><RefreshCw v-else :size="15" /></IconButton><IconButton :label="`推送到${activeProviderLabel}`" :disabled="account.dead || isAccountBusy(account) || account.oauth_status !== 'completed' || hasDownstream(account)" @click="runAction(account, 'push')"><LoaderCircle v-if="activityFor(account)?.action === 'push'" class="spin" :size="15" /><Send v-else :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !hasDownstream(account)" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="立即移出空间" danger :disabled="isAccountBusy(account) || account.accept_status !== 'completed' || account.remove_status === 'completed'" @click="runAction(account, 'remove')"><LoaderCircle v-if="activityFor(account)?.action === 'remove'" class="spin" :size="15" /><Unplug v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
+          <td><div class="row-actions"><IconButton label="更多操作" @mouseenter="showPipelineMenu(account, $event)" @mouseleave="closePipelineMenu()"><MoreHorizontal :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !hasDownstream(account)" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
         </tr>
-      </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="allDisplayedAccounts.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
+      </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="accountTotal" @update:page="setAccountPage" @update:page-size="setAccountPageSize" />
     </section>
+
+    <Teleport to="body">
+      <div v-if="pipelineMenu.open && pipelineMenu.account" class="pipeline-action-menu" :style="{ top: `${pipelineMenu.top}px`, left: `${pipelineMenu.left}px` }" @mouseenter="keepPipelineMenuOpen" @mouseleave="closePipelineMenu()">
+        <button type="button" @click="runPipelineMenuAction('lifecycle')"><History :size="14" />查看账号全流程</button>
+        <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || joinCapacityRefreshing || !adminAccounts.length || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('join')"><DoorOpen :size="14" />{{ joinActionLabel(pipelineMenu.account) }}</button>
+        <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('oauth')"><KeyRound :size="14" />获取 Codex AT / RT</button>
+        <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || !hasDownstream(pipelineMenu.account) || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('relogin')"><RefreshCw :size="14" />重登并重新推送</button>
+        <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.oauth_status !== 'completed' || hasDownstream(pipelineMenu.account)" @click="runPipelineMenuAction('push')"><Send :size="14" />推送到{{ activeProviderLabel }}</button>
+        <button type="button" class="danger-action" :disabled="isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('remove')"><Unplug :size="14" />立即移出空间</button>
+      </div>
+    </Teleport>
 
     <div v-if="joinOpen" class="modal-backdrop" @click.self="joinOpen = false"><form class="modal" @submit.prevent="joinAccount"><span class="overline">JOIN TEAM SPACE</span><h2>{{ joinActionLabel(joinForm.account) }}</h2><p>{{ joinForm.account?.email }}</p><label class="field"><span>邀请母号</span><select v-model="joinForm.adminAccountID" required><option value="">请选择母号</option><option v-for="admin in adminAccounts" :key="admin.id" :value="admin.id">{{ adminOptionLabel(admin) }}</option></select></label><label class="field"><span>本次邀请席位</span><select v-model="joinForm.seatType"><option value="default">Standard（标准）</option><option value="prolite">Premium（5x）</option></select></label><div class="panel-actions"><button class="btn ghost" type="button" @click="joinOpen = false">取消</button><button class="btn primary" type="submit"><DoorOpen :size="15" />确认执行</button></div></form></div>
 
     <div v-if="manualPushForm.account" class="modal-backdrop" @click.self="manualPushForm.account = null"><form class="modal" @submit.prevent="saveManualPushStage"><span class="overline">LINK SUB2 ACCOUNT</span><h2>标记推送成功</h2><p>{{ manualPushForm.account?.email }}</p><label class="field"><span>Sub2 账号 ID</span><input v-model="manualPushForm.sub2AccountID" type="number" min="1" step="1" required placeholder="例如 1024" /></label><div class="panel-actions"><button class="btn ghost" type="button" @click="manualPushForm.account = null">取消</button><button class="btn primary" type="submit"><Link2 :size="15" />关联并标记成功</button></div></form></div>
 
-    <div v-if="lifecycleView.account" class="modal-backdrop" @click.self="lifecycleView.account = null"><section class="modal lifecycle-modal"><div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>从进入 Team 轮转到最终移出的完整流程</p></div><div class="heading-actions"><button class="btn ghost" type="button" @click="exportAccountLogs()"><Download :size="15" />导出账号日志</button><button class="icon-button" type="button" title="关闭" @click="lifecycleView.account = null">×</button></div></div><div v-if="lifecycleView.loading" class="lifecycle-loading">正在加载执行记录…</div><div v-else-if="lifecycleView.error" class="danger-text">{{ lifecycleView.error }}</div><template v-else><div class="lifecycle-summary"><span>进入时间：{{ formatTime(lifecycleView.account.imported_at) }}</span><span>当前状态：{{ lifecycleView.account.status || '-' }}</span><span>当前线路：{{ lifecycleView.account.push_provider || activeProviderLabel }}</span><span>重登成功：{{ lifecycleView.account.relogin_count || 0 }} 次</span><span>连续失败：{{ lifecycleView.account.relogin_failure_count || 0 }} / {{ activeReloginFailureLimit }}</span></div><div class="lifecycle-timeline"><div v-if="!lifecycleView.events.length" class="empty-cell">暂无详细事件</div><article v-for="event in lifecycleView.events" :key="event.id" class="lifecycle-event"><i></i><div><time>{{ formatTime(event.created_at) }}</time><strong>{{ event.stage || event.operation || event.type || '系统事件' }}</strong><span>{{ event.message || '-' }}</span><small v-if="event.attempt || event.duration_ms">{{ event.attempt ? `第 ${event.attempt} 次` : '' }} {{ event.duration_ms ? `· ${event.duration_ms} ms` : '' }}</small><details v-if="event.request || event.response || event.details"><summary>查看请求/返回参数</summary><pre v-if="event.request">请求：{{ JSON.stringify(event.request, null, 2) }}</pre><pre v-if="event.response">返回：{{ JSON.stringify(event.response, null, 2) }}</pre><pre v-if="event.details">详情：{{ JSON.stringify(event.details, null, 2) }}</pre></details></div></article></div></template></section></div>
+    <div v-if="lifecycleView.account" class="modal-backdrop" @click.self="lifecycleView.account = null"><section class="modal lifecycle-modal"><div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>从进入 Team 轮转到最终移出的完整流程</p></div><div class="heading-actions"><button class="btn ghost" type="button" @click="exportAccountLogs()"><Download :size="15" />导出账号日志</button><button class="icon-button" type="button" title="关闭" @click="lifecycleView.account = null">×</button></div></div><div v-if="lifecycleView.loading" class="lifecycle-loading">正在加载执行记录…</div><div v-else-if="lifecycleView.error" class="danger-text">{{ lifecycleView.error }}</div><template v-else><div class="lifecycle-summary"><span>进入时间：{{ formatTime(lifecycleView.account.imported_at) }}</span><span>当前状态：{{ lifecycleView.account.status || '-' }}</span><span>当前线路：{{ lifecycleView.account.push_provider || activeProviderLabel }}</span><span>重登成功：{{ lifecycleView.account.relogin_count || 0 }} 次</span><span>连续失败：{{ lifecycleView.account.relogin_failure_count || 0 }} / {{ activeReloginFailureLimit }}</span></div><div class="lifecycle-timeline"><div v-if="!lifecycleView.events.length" class="empty-cell">暂无详细事件</div><article v-for="event in lifecycleView.events" :key="event.id" class="lifecycle-event"><i></i><div><time>{{ formatTime(event.created_at) }}</time><strong>{{ event.stage || event.operation || event.type || '系统事件' }}</strong><span>{{ event.message || '-' }}</span><small v-if="event.attempt || event.duration_ms">{{ event.attempt ? `第 ${event.attempt} 次` : '' }} {{ event.duration_ms ? `· ${event.duration_ms} ms` : '' }}</small><details v-if="event.request || event.response || event.details"><summary>查看请求/返回参数</summary><pre v-if="event.request">请求：{{ JSON.stringify(event.request, null, 2) }}</pre><pre v-if="event.response">返回：{{ JSON.stringify(event.response, null, 2) }}</pre><pre v-if="event.details">详情：{{ JSON.stringify(event.details, null, 2) }}</pre></details></div></article></div><Pagination :page="lifecycleView.page" :page-size="lifecycleView.pageSize" :total="lifecycleView.total" @update:page="setLifecyclePage" @update:page-size="setLifecyclePageSize" /></template></section></div>
 
   </section>
 </template>
@@ -876,6 +912,11 @@ onBeforeUnmount(stopCapacityRefreshTimer)
 .group-picker > p { grid-column: 1 / -1; padding: 9px; }
 .free-list { overflow: hidden; contain: layout paint; }
 .free-list table { min-width: 1280px; }
+.pipeline-action-menu { position: fixed; z-index: 1000; display: grid; width: 218px; gap: 2px; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-elevated); box-shadow: 0 12px 30px rgba(0, 0, 0, .18); }
+.pipeline-action-menu button { display: flex; align-items: center; gap: 8px; min-height: 31px; padding: 0 9px; border: 0; border-radius: 4px; background: transparent; color: var(--text-2); font-size: 10px; text-align: left; cursor: pointer; }
+.pipeline-action-menu button:hover:not(:disabled) { background: var(--surface-2); color: var(--green-strong); }
+.pipeline-action-menu button:disabled { color: var(--muted); cursor: not-allowed; opacity: .55; }
+.pipeline-action-menu button.danger-action { color: var(--red); }
 .execution-list { display: grid; gap: 8px; margin: -4px 0 14px; }
 .space-filter-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
 .space-filter-tabs button { display: inline-flex; min-height: 32px; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); color: var(--muted); font-size: 10px; font-weight: 650; }

@@ -304,8 +304,18 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, 200, settings, "")
 }
 
-func (s *Server) listProxies(w http.ResponseWriter, _ *http.Request) {
-	writeAPI(w, 200, s.store.Proxies(), "")
+func (s *Server) listProxies(w http.ResponseWriter, r *http.Request) {
+	if !paginationRequested(r) {
+		writeAPI(w, 200, s.store.Proxies(), "")
+		return
+	}
+	page := parsePagination(r)
+	items, total, err := s.store.ProxiesPage(page.Limit, page.Offset)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取代理列表失败: "+err.Error())
+		return
+	}
+	writeAPI(w, 200, paginatedData(items, total, page, nil), "")
 }
 
 func (s *Server) createProxy(w http.ResponseWriter, r *http.Request) {
@@ -404,8 +414,18 @@ func (s *Server) testProxyOpenAIQuality(w http.ResponseWriter, r *http.Request) 
 	writeAPI(w, 200, result, "")
 }
 
-func (s *Server) listAdminAccounts(w http.ResponseWriter, _ *http.Request) {
-	writeAPI(w, 200, s.store.AdminAccounts(), "")
+func (s *Server) listAdminAccounts(w http.ResponseWriter, r *http.Request) {
+	if !paginationRequested(r) {
+		writeAPI(w, 200, s.store.AdminAccounts(), "")
+		return
+	}
+	page := parsePagination(r)
+	items, total, summary, err := s.store.AdminAccountsPage(page.Limit, page.Offset)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取母号列表失败: "+err.Error())
+		return
+	}
+	writeAPI(w, 200, paginatedData(items, total, page, map[string]any{"summary": summary}), "")
 }
 
 func (s *Server) adminAccountCapacity(w http.ResponseWriter, r *http.Request) {
@@ -440,8 +460,18 @@ type openAIAccountInput struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-func (s *Server) listOpenAIAccounts(w http.ResponseWriter, _ *http.Request) {
-	writeAPI(w, 200, s.store.OpenAIAccounts(), "")
+func (s *Server) listOpenAIAccounts(w http.ResponseWriter, r *http.Request) {
+	if !paginationRequested(r) {
+		writeAPI(w, 200, s.store.OpenAIAccounts(), "")
+		return
+	}
+	page := parsePagination(r)
+	items, total, err := s.store.OpenAIAccountsPage(page.Limit, page.Offset)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取 OpenAI 账号失败: "+err.Error())
+		return
+	}
+	writeAPI(w, 200, paginatedData(items, total, page, nil), "")
 }
 
 func (s *Server) createOpenAIAccount(w http.ResponseWriter, r *http.Request) {
@@ -1101,8 +1131,18 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, 200, map[string]bool{"cancelled": true}, "")
 }
 
-func (s *Server) history(w http.ResponseWriter, _ *http.Request) {
-	writeAPI(w, 200, s.store.History(), "")
+func (s *Server) history(w http.ResponseWriter, r *http.Request) {
+	if !paginationRequested(r) {
+		writeAPI(w, 200, s.store.History(), "")
+		return
+	}
+	page := parsePagination(r)
+	items, total, summary, err := s.store.HistoryPage(page.Limit, page.Offset)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取执行历史失败: "+err.Error())
+		return
+	}
+	writeAPI(w, 200, paginatedData(items, total, page, map[string]any{"summary": summary}), "")
 }
 
 func (s *Server) clearHistory(w http.ResponseWriter, _ *http.Request) {
@@ -1114,7 +1154,17 @@ func (s *Server) clearHistory(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) accountProgress(w http.ResponseWriter, r *http.Request) {
-	writeAPI(w, 200, s.store.AccountProgress(r.URL.Query().Get("team_account_id")), "")
+	if !paginationRequested(r) {
+		writeAPI(w, 200, s.store.AccountProgress(r.URL.Query().Get("team_account_id")), "")
+		return
+	}
+	page := parsePagination(r)
+	items, total, err := s.store.AccountProgressPage(r.URL.Query().Get("team_account_id"), page.Limit, page.Offset)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取账号进度失败: "+err.Error())
+		return
+	}
+	writeAPI(w, 200, paginatedData(items, total, page, nil), "")
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
