@@ -78,6 +78,37 @@ func (c *Client) Upload(ctx context.Context, settings model.CPASettings, key, fi
 	return err
 }
 
+// RestoreScheduling re-enables the existing auth file after a successful
+// in-place OAuth update. CPA clears unavailable/error/retry state when a
+// disabled credential is explicitly enabled through this endpoint.
+func (c *Client) RestoreScheduling(ctx context.Context, settings model.CPASettings, key, fileName string) error {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return errors.New("CPA auth 文件名不能为空")
+	}
+	payload, err := json.Marshal(map[string]any{"name": fileName, "disabled": false})
+	if err != nil {
+		return err
+	}
+	if _, _, err = c.request(ctx, settings, key, http.MethodPatch, "/v0/management/auth-files/status", bytes.NewReader(payload), "application/json"); err != nil {
+		return fmt.Errorf("恢复 CPA 调度失败: %w", err)
+	}
+	files, err := c.List(ctx, settings, key)
+	if err != nil {
+		return fmt.Errorf("校验 CPA 调度状态失败: %w", err)
+	}
+	for _, file := range files {
+		if !strings.EqualFold(file.Name, fileName) {
+			continue
+		}
+		if file.Disabled || file.Unavailable || strings.EqualFold(strings.TrimSpace(file.Status), "disabled") {
+			return errors.New("CPA auth 文件仍处于禁止调度状态")
+		}
+		return nil
+	}
+	return errors.New("恢复调度后未找到 CPA auth 文件")
+}
+
 func (c *Client) Groups(ctx context.Context, settings model.CPASettings, key string) ([]Group, error) {
 	data, _, err := c.request(ctx, settings, key, http.MethodGet, "/v0/management/account-groups", nil, "")
 	if err != nil {

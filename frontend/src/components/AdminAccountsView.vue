@@ -18,6 +18,7 @@ const busy = ref(false)
 const fileInput = ref(null)
 const capacities = ref(new Map())
 const capacityBusy = ref(new Set())
+const capacityAllBusy = ref(false)
 const page = ref(1)
 const pageSize = ref(10)
 const adminMenu = ref('list')
@@ -27,8 +28,9 @@ const pagedAccounts = computed(() => props.accounts.slice((page.value - 1) * pag
 watch(() => props.accounts.length, () => { page.value = Math.min(page.value, pages.value) })
 
 const capacitySummary = computed(() => {
-  const summary = { standard: { total: 0, remaining: 0 }, premium: { total: 0, remaining: 0 } }
+  const summary = { standard: { total: 0, remaining: 0 }, premium: { total: 0, remaining: 0 }, loaded: 0 }
   for (const value of capacities.value.values()) {
+	if (value?.standard || value?.premium) summary.loaded += 1
     for (const key of ['standard', 'premium']) {
       summary[key].total += Number(value?.[key]?.total || 0)
       summary[key].remaining += Number(value?.[key]?.remaining || 0)
@@ -48,8 +50,18 @@ async function loadCapacity(account) {
   } finally { const next = new Set(capacityBusy.value); next.delete(account.id); capacityBusy.value = next }
 }
 
-async function loadCapacities() { await Promise.all(props.accounts.map(loadCapacity)) }
-watch(() => props.accounts.map(account => account.id).join(','), loadCapacities, { immediate: true })
+async function loadCapacities() {
+  if (capacityAllBusy.value || !props.accounts.length) return
+  capacityAllBusy.value = true
+  try {
+    await Promise.all(props.accounts.map(loadCapacity))
+    setMessage('全部母号席位已刷新', 'success')
+  } finally { capacityAllBusy.value = false }
+}
+watch(() => props.accounts.map(account => account.id).join(','), () => {
+  const ids = new Set(props.accounts.map(account => account.id))
+  capacities.value = new Map([...capacities.value.entries()].filter(([id]) => ids.has(id)))
+})
 function seatText(account, key) { const bucket = capacities.value.get(account.id)?.[key]; return bucket ? `${bucket.remaining} / ${bucket.total}` : '—' }
 function seatError(account) { return capacities.value.get(account.id)?.error || '' }
 function seatTitle(account, key) { const bucket = capacities.value.get(account.id)?.[key]; return bucket ? `剩余 ${bucket.remaining}，总计 ${bucket.total}` : seatError(account) || '点击刷新席位数据' }
@@ -195,7 +207,7 @@ async function remove(account) {
   <section class="view-stack">
     <header class="page-heading"><div><span class="overline">CREDENTIAL VAULT</span><h1>母号管理</h1><p>维护团队管理员凭据与自动续期状态</p></div><StatusPill tone="success">{{ accounts.length }} 个母号</StatusPill></header>
     <nav class="admin-subnav" aria-label="母号管理菜单"><button type="button" :class="{ active: adminMenu === 'add' }" @click="adminMenu = 'add'"><FileJson :size="14" />添加母号</button><button type="button" :class="{ active: adminMenu === 'list' }" @click="adminMenu = 'list'"><CheckCircle2 :size="14" />母号列表 <span>{{ accounts.length }}</span></button></nav>
-    <section class="metric-grid seat-summary"><article class="metric-card"><span>普通席位总量</span><strong>{{ capacitySummary.standard.total }}</strong><small>剩余 {{ capacitySummary.standard.remaining }}</small></article><article class="metric-card"><span>高级席位 5x 总量</span><strong>{{ capacitySummary.premium.total }}</strong><small>剩余 {{ capacitySummary.premium.remaining }}</small></article><article class="metric-card"><span>普通席位剩余</span><strong>{{ capacitySummary.standard.remaining }}</strong><small>跨母号汇总</small></article><article class="metric-card"><span>高级席位 5x 剩余</span><strong>{{ capacitySummary.premium.remaining }}</strong><small>跨母号汇总</small></article><article class="metric-card"><span>累计进入子号总数</span><strong>{{ teamRotationChildSummary }}</strong><small>所有母号累计汇总</small></article></section>
+    <section class="metric-grid seat-summary"><article class="metric-card"><span>普通席位总量</span><strong>{{ capacitySummary.loaded ? capacitySummary.standard.total : '—' }}</strong><small>剩余 {{ capacitySummary.loaded ? capacitySummary.standard.remaining : '—' }}</small></article><article class="metric-card"><span>高级席位 5x 总量</span><strong>{{ capacitySummary.loaded ? capacitySummary.premium.total : '—' }}</strong><small>剩余 {{ capacitySummary.loaded ? capacitySummary.premium.remaining : '—' }}</small></article><article class="metric-card"><span>普通席位剩余</span><strong>{{ capacitySummary.loaded ? capacitySummary.standard.remaining : '—' }}</strong><small>跨母号汇总</small></article><article class="metric-card"><span>高级席位 5x 剩余</span><strong>{{ capacitySummary.loaded ? capacitySummary.premium.remaining : '—' }}</strong><small>跨母号汇总</small></article><article class="metric-card"><span>累计进入子号总数</span><strong>{{ teamRotationChildSummary }}</strong><small>所有母号累计汇总</small></article></section>
     <div :class="['management-grid', { 'list-only': adminMenu === 'list' }]">
       <form v-if="adminMenu === 'add'" class="panel editor-panel" @submit.prevent="save">
         <div class="panel-title"><div><span>{{ form.id ? 'EDIT' : 'NEW' }}</span><h2>{{ form.id ? '编辑母号' : '添加母号' }}</h2></div><button v-if="form.id" class="btn ghost" type="button" @click="reset"><X :size="15" />取消</button></div>
@@ -210,10 +222,10 @@ async function remove(account) {
       </form>
 
       <section v-if="adminMenu === 'list'" class="panel list-panel">
-        <div class="panel-title"><div><span>ACCOUNTS</span><h2>已保存母号</h2></div><span class="muted-count">{{ accounts.length }} 条记录</span></div>
-        <div class="table-shell"><table><thead><tr><th>名称 / 邮箱</th><th>计划</th><th>团队</th><th>普通席位</th><th>高级席位 5x</th><th>累计进入子号次数</th><th>续期</th><th>校验</th><th class="actions-column">操作</th></tr></thead><tbody>
-          <tr v-if="!accounts.length"><td colspan="9" class="empty-cell">暂无母号配置</td></tr>
-          <tr v-for="account in pagedAccounts" :key="account.id"><td class="account-cell"><strong>{{ account.label }}</strong><small>{{ account.email }}</small></td><td>{{ account.plan_type || '-' }}</td><td class="mono" :title="account.team_account_id">{{ shortID(account.team_account_id) }}</td><td class="seat-cell" :title="seatTitle(account, 'standard')"><strong>{{ seatText(account, 'standard') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td class="seat-cell" :title="seatTitle(account, 'premium')"><strong>{{ seatText(account, 'premium') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td><strong>{{ account.team_rotation_child_count || 0 }}</strong><small class="table-note">次</small></td><td><StatusPill :tone="account.refresh_token_present ? 'success' : 'pending'">{{ account.refresh_token_present ? 'RT 已保存' : '无 RT' }}</StatusPill><small class="table-note">{{ account.access_token_expires_at ? `AT ${formatTime(account.access_token_expires_at)} 到期` : '未记录到期时间' }}</small></td><td><template v-if="tests.get(account.id)"><StatusPill :tone="tests.get(account.id).valid ? 'success' : 'danger'">{{ tests.get(account.id).valid ? '有效' : '无效' }}</StatusPill><small class="table-note">{{ tests.get(account.id).latency_ms }}ms</small></template><StatusPill v-else tone="pending">未校验</StatusPill></td><td><div class="row-actions"><IconButton label="查看 AT / RT" :disabled="busy" @click="openCredentialDialog(account)"><FileKey2 :size="15" /></IconButton><IconButton label="刷新席位" :disabled="capacityBusy.has(account.id)" @click="loadCapacity(account)"><RefreshCw :size="15" /></IconButton><IconButton label="校验凭据" :disabled="busy" @click="test(account)"><CheckCircle2 :size="15" /></IconButton><IconButton label="刷新 AT/RT" :disabled="busy" @click="refresh(account)"><RefreshCw :size="15" /></IconButton><IconButton label="编辑母号" @click="edit(account)"><Pencil :size="15" /></IconButton><IconButton label="删除母号" danger @click="remove(account)"><Trash2 :size="15" /></IconButton></div></td></tr>
+        <div class="panel-title"><div><span>ACCOUNTS</span><h2>已保存母号</h2></div><div class="heading-actions"><span class="muted-count">{{ accounts.length }} 条记录</span><button class="btn ghost" type="button" :disabled="capacityAllBusy || !accounts.length" @click="loadCapacities"><RefreshCw :class="{ spin: capacityAllBusy }" :size="15" />刷新全部席位</button></div></div>
+        <div class="table-shell"><table><thead><tr><th>名称 / 邮箱</th><th>计划</th><th>团队</th><th>普通席位</th><th>高级席位 5x</th><th>累计进入子号次数</th><th>子号累计消耗</th><th>续期</th><th>校验</th><th class="actions-column">操作</th></tr></thead><tbody>
+          <tr v-if="!accounts.length"><td colspan="10" class="empty-cell">暂无母号配置</td></tr>
+          <tr v-for="account in pagedAccounts" :key="account.id"><td class="account-cell"><strong>{{ account.label }}</strong><small>{{ account.email }}</small></td><td>{{ account.plan_type || '-' }}</td><td class="mono" :title="account.team_account_id">{{ shortID(account.team_account_id) }}</td><td class="seat-cell" :title="seatTitle(account, 'standard')"><strong>{{ seatText(account, 'standard') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td class="seat-cell" :title="seatTitle(account, 'premium')"><strong>{{ seatText(account, 'premium') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td><strong>{{ account.team_rotation_child_count || 0 }}</strong><small class="table-note">次</small></td><td><strong>${{ Number(account.team_rotation_child_cost_usd || 0).toFixed(4) }}</strong><small class="table-note">Sub2</small></td><td><StatusPill :tone="account.refresh_token_present ? 'success' : 'pending'">{{ account.refresh_token_present ? 'RT 已保存' : '无 RT' }}</StatusPill><small class="table-note">{{ account.access_token_expires_at ? `AT ${formatTime(account.access_token_expires_at)} 到期` : '未记录到期时间' }}</small></td><td><template v-if="tests.get(account.id)"><StatusPill :tone="tests.get(account.id).valid ? 'success' : 'danger'">{{ tests.get(account.id).valid ? '有效' : '无效' }}</StatusPill><small class="table-note">{{ tests.get(account.id).latency_ms }}ms</small></template><StatusPill v-else tone="pending">未校验</StatusPill></td><td><div class="row-actions"><IconButton label="查看 AT / RT" :disabled="busy" @click="openCredentialDialog(account)"><FileKey2 :size="15" /></IconButton><IconButton label="刷新席位" :disabled="capacityBusy.has(account.id)" @click="loadCapacity(account)"><RefreshCw :size="15" /></IconButton><IconButton label="校验凭据" :disabled="busy" @click="test(account)"><CheckCircle2 :size="15" /></IconButton><IconButton label="刷新 AT/RT" :disabled="busy" @click="refresh(account)"><RefreshCw :size="15" /></IconButton><IconButton label="编辑母号" @click="edit(account)"><Pencil :size="15" /></IconButton><IconButton label="删除母号" danger @click="remove(account)"><Trash2 :size="15" /></IconButton></div></td></tr>
         </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="accounts.length" @update:page="page = $event" @update:page-size="pageSize = $event" />
       </section>
     </div>
@@ -240,4 +252,6 @@ async function remove(account) {
 .credential-token-field button:disabled { opacity: .45; cursor: not-allowed; }
 .credential-token-field textarea { width: 100%; resize: vertical; box-sizing: border-box; border: 1px solid var(--line); border-radius: 5px; padding: 9px; background: var(--surface-2); color: var(--text); font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .credential-account-id { display: block; margin-top: 14px; color: var(--muted); font-size: 10px; }
+.spin { animation: admin-spin .9s linear infinite; }
+@keyframes admin-spin { to { transform: rotate(360deg); } }
 </style>

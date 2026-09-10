@@ -15,6 +15,7 @@ type Settings struct {
 	NetworkRetryInterval   int    `json:"network_retry_interval_seconds"`
 	Concurrency            int    `json:"concurrency"`
 	ProxyURL               string `json:"proxy_url"`
+	OAuthProxyMode         string `json:"oauth_proxy_mode"`
 	SMSProvider            string `json:"sms_provider"`
 	AllowSMS               bool   `json:"allow_sms"`
 	AutoCleanup            bool   `json:"auto_cleanup"`
@@ -149,11 +150,36 @@ type ProxyProfile struct {
 }
 
 type ProxyTestResult struct {
-	Reachable  bool      `json:"reachable"`
-	HTTPStatus int       `json:"http_status,omitempty"`
-	LatencyMS  int64     `json:"latency_ms"`
-	Message    string    `json:"message"`
-	CheckedAt  time.Time `json:"checked_at"`
+	Reachable   bool      `json:"reachable"`
+	HTTPStatus  int       `json:"http_status,omitempty"`
+	LatencyMS   int64     `json:"latency_ms"`
+	Message     string    `json:"message"`
+	IPAddress   string    `json:"ip_address,omitempty"`
+	Country     string    `json:"country,omitempty"`
+	CountryCode string    `json:"country_code,omitempty"`
+	Region      string    `json:"region,omitempty"`
+	City        string    `json:"city,omitempty"`
+	CheckedAt   time.Time `json:"checked_at"`
+}
+
+// ProxyOpenAIQualityResult mirrors the OpenAI portion of Sub2API's proxy
+// quality report while keeping the result independent from any account.
+type ProxyOpenAIQualityResult struct {
+	Status        string    `json:"status"` // pass/warn/fail/challenge
+	Score         int       `json:"score"`
+	Grade         string    `json:"grade"`
+	Summary       string    `json:"summary"`
+	ExitIP        string    `json:"exit_ip,omitempty"`
+	Country       string    `json:"country,omitempty"`
+	CountryCode   string    `json:"country_code,omitempty"`
+	Region        string    `json:"region,omitempty"`
+	City          string    `json:"city,omitempty"`
+	BaseLatencyMS int64     `json:"base_latency_ms,omitempty"`
+	HTTPStatus    int       `json:"http_status,omitempty"`
+	LatencyMS     int64     `json:"latency_ms,omitempty"`
+	Message       string    `json:"message"`
+	CFRay         string    `json:"cf_ray,omitempty"`
+	CheckedAt     time.Time `json:"checked_at"`
 }
 
 type AdminAccountProfile struct {
@@ -170,6 +196,7 @@ type AdminAccountProfile struct {
 	AccessTokenExpiresAt   *time.Time `json:"access_token_expires_at,omitempty"`
 	LastRefreshedAt        *time.Time `json:"last_refreshed_at,omitempty"`
 	TeamRotationChildCount int        `json:"team_rotation_child_count"`
+	TeamRotationChildCost  float64    `json:"team_rotation_child_cost_usd"`
 	CreatedAt              time.Time  `json:"created_at"`
 	UpdatedAt              time.Time  `json:"updated_at"`
 }
@@ -233,7 +260,7 @@ func DefaultSettings() Settings {
 		Role: "standard-user", InviteDelaySeconds: 3,
 		AcceptDelaySeconds: 2, TransferDelaySeconds: 5, RequestTimeoutSeconds: 45,
 		NetworkRetryCount: 2, NetworkRetryInterval: 3,
-		Concurrency: 2, AllowSMS: true, AutoCleanup: true,
+		Concurrency: 2, OAuthProxyMode: "global", AllowSMS: true, AutoCleanup: true,
 	}
 }
 

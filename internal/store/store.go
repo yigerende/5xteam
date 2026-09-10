@@ -869,6 +869,7 @@ func (s *Store) AdminAccounts() []model.AdminAccountProfile {
 			result = append(result, profile)
 		}
 	}
+	_ = rows.Close()
 	s.reconcileAdminTeamRotationChildCounts(result)
 	return result
 }
@@ -881,6 +882,7 @@ func (s *Store) reconcileAdminTeamRotationChildCounts(accounts []model.AdminAcco
 		return
 	}
 	counts := make(map[string]int, len(accounts))
+	costs := make(map[string]float64, len(accounts))
 	rows, err := s.db.Query("SELECT profile FROM free_accounts")
 	if err != nil {
 		return
@@ -895,8 +897,20 @@ func (s *Store) reconcileAdminTeamRotationChildCounts(accounts []model.AdminAcco
 		if profile.AdminAccountID != "" && profile.AcceptStatus == "completed" {
 			counts[profile.AdminAccountID]++
 		}
+		if len(profile.CostByAdmin) > 0 {
+			for adminID, cost := range profile.CostByAdmin {
+				if adminID != "" && cost > 0 {
+					costs[adminID] += cost
+				}
+			}
+		} else if profile.AdminAccountID != "" && profile.TotalCostUSD > 0 {
+			// Compatibility for an account written between the introduction of
+			// total_cost_usd and per-Team cost attribution.
+			costs[profile.AdminAccountID] += profile.TotalCostUSD
+		}
 	}
 	for i := range accounts {
+		accounts[i].TeamRotationChildCost = costs[accounts[i].ID]
 		count := counts[accounts[i].ID]
 		if count <= accounts[i].TeamRotationChildCount {
 			continue

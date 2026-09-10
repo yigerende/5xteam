@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -148,5 +150,70 @@ func TestRenameAccountUsesExistingAccountID(t *testing.T) {
 	}
 	if gotPath != "/api/v1/admin/accounts/42" || account.ID != 42 || account.Name != "renamed" {
 		t.Fatalf("unexpected rename result: path=%q account=%+v", gotPath, account)
+	}
+}
+
+func TestRestoreSchedulingClearsTemporaryBlockAndVerifiesAccount(t *testing.T) {
+	var calls []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/login" {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"access_token":"admin-token"}}`))
+			return
+		}
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/schedulable"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["schedulable"] != true {
+				t.Errorf("schedulable body = %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{"id":42}}`))
+		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/temp-unschedulable"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"message":"cleared"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/accounts/42":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"id":42,"name":"existing","status":"active","schedulable":true}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	account, err := New().RestoreScheduling(context.Background(), model.Sub2Settings{URL: ts.URL, Email: "admin@example.com"}, "secret", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !account.Schedulable || account.Status != "active" {
+		t.Fatalf("account was not restored: %+v", account)
+	}
+	want := []string{
+		"POST /api/v1/admin/accounts/42/schedulable",
+		"DELETE /api/v1/admin/accounts/42/temp-unschedulable",
+		"GET /api/v1/admin/accounts/42",
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestQueryTotalStandardCost(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/login" {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"access_token":"admin-token"}}`))
+			return
+		}
+		if r.URL.Path != "/api/v1/admin/accounts/42/stats" || r.URL.Query().Get("days") != "90" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"summary":{"total_standard_cost":12.3456,"total_cost":99}}}`))
+	}))
+	defer ts.Close()
+
+	cost, err := New().QueryTotalStandardCost(context.Background(), model.Sub2Settings{URL: ts.URL, Email: "admin@example.com"}, "secret", 42)
+	if err != nil || cost != 12.3456 {
+		t.Fatalf("cost = %v, err=%v", cost, err)
 	}
 }

@@ -48,6 +48,29 @@ func TestStatusDoesNotConvertCPAManagement401ToAccount401(t *testing.T) {
 	}
 }
 
+func TestRestoreSchedulingEnablesAndVerifiesAuthFile(t *testing.T) {
+	var body map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "disabled": false})
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []any{map[string]any{"name": "a.json", "status": "active", "disabled": false, "unavailable": false}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	if err := New().RestoreScheduling(t.Context(), model.CPASettings{URL: ts.URL}, "key", "a.json"); err != nil {
+		t.Fatal(err)
+	}
+	if body["name"] != "a.json" || body["disabled"] != false {
+		t.Fatalf("restore body = %#v", body)
+	}
+}
+
 func TestWalkCPASnapshotsParsesRatioShape(t *testing.T) {
 	var five, seven model.FreeQuotaWindow
 	walkCPASnapshots(map[string]any{

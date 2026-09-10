@@ -702,6 +702,14 @@ func (s *Server) executeCodexOAuth(email string, progress func(string), diagnost
 	if err != nil || strings.TrimSpace(mailCreds.PickupURL) == "" {
 		return nil, errors.New("邮箱未配置取件链接")
 	}
+	proxyLease, err := s.acquireOAuthProxy()
+	if err != nil {
+		return nil, err
+	}
+	defer proxyLease.Release()
+	if progress != nil {
+		progress(fmt.Sprintf("已分配 OAuth 代理：%s（当前任务 %d）", proxyLease.label, proxyLease.activeCount))
+	}
 	settings := s.store.Settings()
 	provider := strings.TrimSpace(settings.SMSProvider)
 	smsCfg := map[string]any{}
@@ -720,7 +728,7 @@ func (s *Server) executeCodexOAuth(email string, progress func(string), diagnost
 			}
 		}
 	}
-	payload, _ := json.Marshal(map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword, "proxy": settings.ProxyURL, "sms_provider": provider, "sms_config": smsCfg})
+	payload, _ := json.Marshal(map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword, "proxy": proxyLease.url, "sms_provider": provider, "sms_config": smsCfg})
 	python := workflow.FindPython()
 	if python == "" {
 		return nil, errors.New("未找到 Python 运行环境")
@@ -1051,6 +1059,8 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 		item.QuotaStatus, item.LastError = "running", ""
 	})
 	var window5H, window7D *model.FreeQuotaWindow
+	var totalCost *float64
+	var costErr error
 	if strings.EqualFold(settings.Provider, "cpa") {
 		cpaSettings, cpaKey, cpaErr := s.store.CPASettings()
 		if cpaErr != nil {
@@ -1068,10 +1078,36 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 			}
 		}
 	} else {
-		quota, qerr := s.sub2.QueryQuota(ctx, settings, password, profile.Sub2AccountID)
-		err = qerr
+		var quota sub2.QuotaUsage
+		var quotaErr error
+		var queriedCost float64
+		var wait sync.WaitGroup
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			quota, quotaErr = s.sub2.QueryQuota(ctx, settings, password, profile.Sub2AccountID)
+		}()
+		go func() {
+			defer wait.Done()
+			queriedCost, costErr = s.sub2.QueryTotalStandardCost(ctx, settings, password, profile.Sub2AccountID)
+		}()
+		wait.Wait()
+		err = quotaErr
 		if err == nil {
 			window5H, window7D = quota.Windows()
+		}
+		if costErr == nil {
+			totalCost = &queriedCost
+			if updated, updateErr := s.saveSub2CostSnapshot(profile.ID, profile.AdminAccountID, profile.Sub2AccountID, queriedCost); updateErr == nil {
+				profile = updated
+			} else {
+				costErr = updateErr
+			}
+		}
+		if costErr != nil {
+			s.auditAccountEvent(ctx, profile.ID, "cost_query_failed", "quota", "quota", "sub2", "Sub2 累计消耗查询失败，保留上次成功数据", map[string]any{"error": costErr.Error(), "account_id": profile.Sub2AccountID})
+		} else {
+			s.auditAccountEvent(ctx, profile.ID, "cost_updated", "quota", "quota", "sub2", "Sub2 累计消耗已更新", map[string]any{"downstream_total_cost_usd": *totalCost, "total_cost_usd": profile.TotalCostUSD, "account_id": profile.Sub2AccountID})
 		}
 	}
 	if err != nil {
@@ -1134,6 +1170,42 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	}
 	profile, err = s.performFreeAccountRemove(ctx, profile.ID)
 	return profile, err == nil, err
+}
+
+func (s *Server) saveSub2CostSnapshot(accountID, adminID string, downstreamID int64, downstreamTotal float64) (model.FreeAccountProfile, error) {
+	if downstreamTotal < 0 {
+		downstreamTotal = 0
+	}
+	identity := strconv.FormatInt(downstreamID, 10)
+	now := time.Now()
+	return s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
+		sameIdentity := item.CostProvider == "sub2" && item.CostDownstreamIdentity == identity
+		if item.CostByAdmin == nil {
+			item.CostByAdmin = make(map[string]float64)
+			if item.TotalCostUSD > 0 && strings.TrimSpace(item.AdminAccountID) != "" {
+				item.CostByAdmin[item.AdminAccountID] = item.TotalCostUSD
+			}
+		}
+		delta := downstreamTotal
+		if sameIdentity {
+			delta = downstreamTotal - item.CostDownstreamSnapshot
+			if delta < 0 {
+				delta = 0
+			}
+		}
+		if delta > 0 {
+			item.TotalCostUSD += delta
+			if strings.TrimSpace(adminID) != "" {
+				item.CostByAdmin[adminID] += delta
+			}
+		}
+		item.CostProvider = "sub2"
+		item.CostDownstreamIdentity = identity
+		if !sameIdentity || downstreamTotal > item.CostDownstreamSnapshot {
+			item.CostDownstreamSnapshot = downstreamTotal
+		}
+		item.CostCheckedAt = &now
+	})
 }
 
 func isSub2Unauthorized(err error) bool {
@@ -1355,6 +1427,10 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 		if cpaErr = s.cpa.Upload(ctx, cpaSettings, cpaKey, fileName, encoded); cpaErr != nil {
 			return cpaErr
 		}
+		if cpaErr = s.cpa.RestoreScheduling(ctx, cpaSettings, cpaKey, fileName); cpaErr != nil {
+			return cpaErr
+		}
+		s.auditAccountEvent(ctx, accountID, "relogin", "push", "relogin", "cpa", "CPA 原账号凭据已更新并恢复调度", map[string]any{"auth_file": fileName})
 		now := time.Now()
 		_, cpaErr = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
 			item.Status, item.OAuthStatus, item.PushStatus, item.QuotaStatus, item.LastError = "monitoring", "completed", "completed", "pending", ""
@@ -1382,6 +1458,10 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	if _, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentials(profile, credentials)); err != nil {
 		return err
 	}
+	if _, err := s.sub2.RestoreScheduling(ctx, settings, password, oldAccountID); err != nil {
+		return err
+	}
+	s.auditAccountEvent(ctx, accountID, "relogin", "push", "relogin", "sub2", "Sub2 原账号凭据已更新并恢复调度", map[string]any{"account_id": oldAccountID})
 	updatedName := profile.Sub2AccountName
 	// Preserve the existing display convention (time + -重登) without changing
 	// the account identity. A name update is cosmetic; if this optional request
@@ -1458,6 +1538,7 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	// concurrently. This also protects manual, automatic and dead-account paths.
 	unlockTeam := s.lockTeamAccountRemove(profile.TeamAccountID)
 	defer unlockTeam()
+	profile = s.refreshSub2CostBeforeRemoval(ctx, profile)
 	_, adminCredentials, err := s.currentAdminCredential(ctx, profile.AdminAccountID)
 	if err != nil {
 		s.failFreeAccount(profile.ID, "remove", err)
@@ -1489,6 +1570,25 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	_ = s.store.ReleaseSeatReservationByAccount(id)
 	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "seat_released", Source: "remove", Operation: "remove", Stage: "remove", Message: "账号移出空间，释放席位预占"})
 	return updated, updateErr
+}
+
+func (s *Server) refreshSub2CostBeforeRemoval(ctx context.Context, profile model.FreeAccountProfile) model.FreeAccountProfile {
+	settings, password, err := s.store.Sub2Settings()
+	if err != nil || strings.EqualFold(settings.Provider, "cpa") || profile.Sub2AccountID < 1 {
+		return profile
+	}
+	cost, err := s.sub2.QueryTotalStandardCost(ctx, settings, password, profile.Sub2AccountID)
+	if err != nil {
+		s.auditAccountEvent(ctx, profile.ID, "cost_query_failed", "remove", "remove", "sub2", "移出前累计消耗查询失败，继续执行移出", map[string]any{"error": err.Error(), "account_id": profile.Sub2AccountID})
+		return profile
+	}
+	updated, err := s.saveSub2CostSnapshot(profile.ID, profile.AdminAccountID, profile.Sub2AccountID, cost)
+	if err != nil {
+		s.auditAccountEvent(ctx, profile.ID, "cost_query_failed", "remove", "remove", "sub2", "移出前累计消耗保存失败，继续执行移出", map[string]any{"error": err.Error(), "account_id": profile.Sub2AccountID})
+		return profile
+	}
+	s.auditAccountEvent(ctx, profile.ID, "cost_updated", "remove", "remove", "sub2", "移出前已更新最终累计消耗", map[string]any{"downstream_total_cost_usd": cost, "total_cost_usd": updated.TotalCostUSD, "account_id": profile.Sub2AccountID})
+	return updated
 }
 
 func (s *Server) deleteLinkedDownstream(ctx context.Context, profile model.FreeAccountProfile) error {

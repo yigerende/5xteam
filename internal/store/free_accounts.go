@@ -143,6 +143,9 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		profile.Sub2GroupIDs, profile.Sub2GroupNames = existing.Sub2GroupIDs, existing.Sub2GroupNames
 		profile.ReloginCount, profile.ReloginFailureCount, profile.ReloginLastFailedAt = existing.ReloginCount, existing.ReloginFailureCount, existing.ReloginLastFailedAt
 		profile.Quota5H, profile.Quota7D, profile.ExhaustionPolicy, profile.AutoRemove = existing.Quota5H, existing.Quota7D, existing.ExhaustionPolicy, existing.AutoRemove
+		profile.TotalCostUSD, profile.CostCheckedAt = existing.TotalCostUSD, existing.CostCheckedAt
+		profile.CostProvider, profile.CostDownstreamIdentity = existing.CostProvider, existing.CostDownstreamIdentity
+		profile.CostDownstreamSnapshot, profile.CostByAdmin = existing.CostDownstreamSnapshot, existing.CostByAdmin
 		profile.JoinedAt, profile.OAuthReadyAt, profile.PushedAt, profile.QuotaCheckedAt, profile.StatusCheckedAt, profile.RemovedAt = existing.JoinedAt, existing.OAuthReadyAt, existing.PushedAt, existing.QuotaCheckedAt, existing.StatusCheckedAt, existing.RemovedAt
 		profile.ImportedAt, profile.CreatedAt = existing.ImportedAt, existing.CreatedAt
 		if pureImport && strings.TrimSpace(profile.TeamAccountID) == "" && profile.AcceptStatus != "completed" {

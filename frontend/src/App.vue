@@ -71,7 +71,12 @@ watch(theme, (value) => {
 }, { immediate: true })
 watch(current, (value) => localStorage.setItem('space-console-tab', value))
 
-function selectTab(id) { current.value = id; mobileOpen.value = false; if (id === 'pro') reloadProAccounts() }
+function selectTab(id) {
+  current.value = id
+  mobileOpen.value = false
+  if (id === 'pro') reloadProAccounts()
+  if (id === 'admins') reloadAdmins()
+}
 function isNavActive(item) { return item.id === 'space-merge' ? spaceMergeActive.value : current.value === item.id }
 async function reloadAdmins() { try { adminAccounts.value = await api('/api/admin-accounts') } catch (error) { loadingError.value = error.message } }
 async function reloadOpenAI() { try { openAIAccounts.value = await api('/api/openai-accounts') } catch (error) { loadingError.value = error.message } }
@@ -142,7 +147,7 @@ onMounted(checkAuth)
       <HistoryView v-if="current === 'history'" :history="history" @reload="reloadHistory" />
       <AdminAccountsView v-if="current === 'admins'" :accounts="adminAccounts" @reload="reloadAdmins" />
       <OpenAIAccountsView v-if="current === 'openai'" :accounts="openAIAccounts" @reload="reloadOpenAI" />
-      <ProxiesView v-if="current === 'proxies'" :proxies="proxies" :selected-u-r-l="settings?.proxy_url || ''" @reload="reloadProxies" @select="selectProxy" />
+      <ProxiesView v-show="current === 'proxies'" :proxies="proxies" :selected-u-r-l="settings?.proxy_url || ''" @reload="reloadProxies" @select="selectProxy" />
       <SettingsView v-if="current === 'settings'" :settings="settings" :proxies="proxies" @saved="settings = $event" />
     </main>
     <div v-if="passwordDialog" class="modal-backdrop" @click.self="passwordDialog = false"><section class="modal-panel"><div class="modal-heading"><div><span class="overline">ACCOUNT SECURITY</span><h2>修改密码</h2></div><button class="icon-button" type="button" title="关闭" @click="passwordDialog = false"><X :size="17" /></button></div><form class="modal-form" @submit.prevent="changePassword"><label class="field"><span>当前密码</span><input v-model="passwordForm.current_password" type="password" required /></label><label class="field"><span>新密码</span><input v-model="passwordForm.new_password" type="password" minlength="6" required /></label><label class="field"><span>确认新密码</span><input v-model="passwordForm.confirm_password" type="password" minlength="6" required /></label><div v-if="passwordMessage" class="login-error">{{ passwordMessage }}</div><div class="modal-actions"><button class="btn" type="button" @click="passwordDialog = false">取消</button><button class="btn primary" type="submit" :disabled="passwordBusy">{{ passwordBusy ? '保存中…' : '确认修改' }}</button></div></form></section></div>

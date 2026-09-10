@@ -38,6 +38,9 @@ type Server struct {
 	mailFetchJobs     map[string]map[string]any
 	oauthMu           sync.RWMutex
 	oauthJobs         map[string]map[string]any
+	oauthProxyMu      sync.Mutex
+	oauthProxyActive  map[string]int
+	oauthProxyCursor  uint64
 	planCheckMu       sync.Mutex
 	planCheckNext     time.Time
 	proLocks          sync.Map
@@ -78,7 +81,7 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 	// Cleanup is a single local transaction and runs once at startup, outside
 	// all request/rotation workers.
 	_ = dataStore.PurgeAutoRotationHistory(time.Now().Add(-48 * time.Hour))
-	server := &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), cpa: cpa.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any), auditQueue: make(chan model.AutoRotationEvent, 2048), auditStop: make(chan struct{})}
+	server := &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), cpa: cpa.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any), oauthProxyActive: make(map[string]int), auditQueue: make(chan model.AutoRotationEvent, 2048), auditStop: make(chan struct{})}
 	server.auditWG.Add(1)
 	go server.auditWriter()
 	return server, nil
@@ -114,6 +117,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/proxies/{id}", s.updateProxy)
 	mux.HandleFunc("DELETE /api/proxies/{id}", s.deleteProxy)
 	mux.HandleFunc("POST /api/proxies/test", s.testProxy)
+	mux.HandleFunc("POST /api/proxies/openai-quality", s.testProxyOpenAIQuality)
 	mux.HandleFunc("GET /api/admin-accounts", s.listAdminAccounts)
 	mux.HandleFunc("POST /api/admin-accounts", s.createAdminAccount)
 	mux.HandleFunc("PUT /api/admin-accounts/{id}", s.updateAdminAccount)
@@ -280,6 +284,7 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &settings, 1<<20); err != nil {
 		return
 	}
+	settings.OAuthProxyMode = normalizeOAuthProxyMode(settings.OAuthProxyMode)
 	if err := validateSettings(settings); err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
@@ -375,8 +380,27 @@ func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 400, nil, err.Error())
 		return
 	}
-	settings := s.store.Settings()
-	result := workflow.TestProxy(r.Context(), normalized, settings.BaseURL, 15*time.Second)
+	result := workflow.TestProxyExit(r.Context(), normalized, 15*time.Second)
+	writeAPI(w, 200, result, "")
+}
+
+func (s *Server) testProxyOpenAIQuality(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		URL string `json:"url"`
+	}
+	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
+		return
+	}
+	if len(input.URL) > 1000 {
+		writeAPI(w, 400, nil, "代理地址不能超过 1000 个字符")
+		return
+	}
+	normalized, err := workflow.NormalizeProxyAddress(strings.TrimSpace(input.URL))
+	if err != nil {
+		writeAPI(w, 400, nil, err.Error())
+		return
+	}
+	result := workflow.TestProxyOpenAIQuality(r.Context(), normalized, 15*time.Second)
 	writeAPI(w, 200, result, "")
 }
 
@@ -918,6 +942,9 @@ func validateSettings(value model.Settings) error {
 	}
 	if value.Role != "standard-user" && value.Role != "admin" {
 		return errors.New("成员角色只能选择 standard-user 或 admin")
+	}
+	if mode := normalizeOAuthProxyMode(value.OAuthProxyMode); mode != "global" && mode != "least_used" {
+		return errors.New("OAuth 代理策略无效")
 	}
 	if value.Concurrency < 1 || value.Concurrency > 20 {
 		return errors.New("并发数必须在 1 到 20 之间（当前流程实际固定串行执行）")

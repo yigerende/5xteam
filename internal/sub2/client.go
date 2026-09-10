@@ -27,8 +27,10 @@ type Group struct {
 }
 
 type Account struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Schedulable bool   `json:"schedulable"`
 }
 
 type RateLimitWindow struct {
@@ -220,6 +222,70 @@ func (c *Client) RenameAccount(ctx context.Context, settings model.Sub2Settings,
 		account.Name = name
 	}
 	return account, nil
+}
+
+// RestoreScheduling clears both persistent and temporary scheduler blocks
+// left by a downstream 401, then verifies that the original account can be
+// selected again.
+func (c *Client) RestoreScheduling(ctx context.Context, settings model.Sub2Settings, password string, accountID int64) (Account, error) {
+	if accountID < 1 {
+		return Account{}, errors.New("Sub2 账号 ID 无效")
+	}
+	path := "/api/v1/admin/accounts/" + strconv.FormatInt(accountID, 10)
+	if _, err := c.doJSON(ctx, settings, password, http.MethodPost, path+"/schedulable", map[string]any{"schedulable": true}, nil); err != nil {
+		return Account{}, fmt.Errorf("恢复 Sub2 调度开关失败: %w", err)
+	}
+	if _, err := c.doJSON(ctx, settings, password, http.MethodDelete, path+"/temp-unschedulable", nil, nil); err != nil {
+		return Account{}, fmt.Errorf("清除 Sub2 临时禁用状态失败: %w", err)
+	}
+	data, err := c.doJSON(ctx, settings, password, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return Account{}, fmt.Errorf("校验 Sub2 调度状态失败: %w", err)
+	}
+	var account Account
+	if err := json.Unmarshal(data, &account); err != nil {
+		return Account{}, fmt.Errorf("解析 Sub2 调度状态失败: %w", err)
+	}
+	if account.ID < 1 {
+		account.ID = accountID
+	}
+	if !account.Schedulable {
+		return account, errors.New("Sub2 账号仍处于禁止调度状态")
+	}
+	if status := strings.ToLower(strings.TrimSpace(account.Status)); status != "" && status != "active" {
+		return account, fmt.Errorf("Sub2 账号状态仍为 %s", account.Status)
+	}
+	return account, nil
+}
+
+// QueryTotalStandardCost returns the model-price-equivalent USD usage stored
+// by Sub2 for this account. Team rotation accounts live for at most a few
+// days, so the API's maximum 90-day window covers their complete lifecycle.
+func (c *Client) QueryTotalStandardCost(ctx context.Context, settings model.Sub2Settings, password string, accountID int64) (float64, error) {
+	if accountID < 1 {
+		return 0, errors.New("Sub2 账号 ID 无效")
+	}
+	path := "/api/v1/admin/accounts/" + strconv.FormatInt(accountID, 10) + "/stats?days=90"
+	data, err := c.doJSON(ctx, settings, password, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		Summary struct {
+			TotalStandardCost *float64 `json:"total_standard_cost"`
+			TotalCost         *float64 `json:"total_cost"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return 0, fmt.Errorf("解析 Sub2 累计消耗失败: %w", err)
+	}
+	if result.Summary.TotalStandardCost != nil {
+		return max(0, *result.Summary.TotalStandardCost), nil
+	}
+	if result.Summary.TotalCost != nil {
+		return max(0, *result.Summary.TotalCost), nil
+	}
+	return 0, errors.New("Sub2 累计消耗响应缺少 total_standard_cost")
 }
 
 // DeleteAccount removes a downstream Sub2 account by its admin ID.
