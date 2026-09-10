@@ -58,6 +58,7 @@ function readCapacityCache() {
 }
 const initialCapacityCache = readCapacityCache()
 const adminCapacities = ref(initialCapacityCache.map)
+const snapshotCapacities = ref(new Map())
 const adminCapacityLoading = ref(new Set())
 const capacityRefreshing = ref(false)
 const lastCapacityFetchAt = ref(initialCapacityCache.fetchedAt)
@@ -93,7 +94,7 @@ const monitoringCount = computed(() => Number(accountSummary.monitoring || 0))
 const removedCount = computed(() => Number(accountSummary.removed || 0))
 const premiumSeatSummary = computed(() => {
   let total = 0
-  for (const value of adminCapacities.value.values()) {
+  for (const value of snapshotCapacities.value.values()) {
     total += Number(value?.premium?.total || 0)
   }
   // The total comes from the cached Team capacity snapshot, while the
@@ -170,6 +171,17 @@ async function loadAdminCapacity(account) {
   }
 }
 
+async function loadCapacitySnapshots() {
+  const data = await api('/api/admin-capacity-snapshots', { cache: 'no-store' })
+  const entries = Object.entries(data || {})
+  snapshotCapacities.value = new Map(entries.map(([id, value]) => [/^\d+$/.test(id) ? Number(id) : id, value]))
+  const fetchedAt = entries.reduce((latest, [, value]) => {
+    const timestamp = new Date(value?.fetched_at || 0).getTime()
+    return Number.isFinite(timestamp) && timestamp > latest ? timestamp : latest
+  }, 0)
+  if (fetchedAt) lastCapacityFetchAt.value = fetchedAt
+}
+
 async function loadAdminCapacities({ force = false } = {}) {
   if (!props.active || teamMenu.value !== 'accounts') return
   const now = Date.now()
@@ -177,10 +189,15 @@ async function loadAdminCapacities({ force = false } = {}) {
   if (capacityRefreshing.value) return
   capacityRefreshing.value = true
   try {
+    // Keep local capacity data aligned with the current mother list. This
+    // also removes entries left by a deleted mother from browser storage.
+    const currentIDs = new Set(props.adminAccounts.map((account) => account.id))
+    adminCapacities.value = new Map([...adminCapacities.value.entries()].filter(([id]) => currentIDs.has(id)))
     await Promise.all(props.adminAccounts.map(loadAdminCapacity))
     lastCapacityFetchAt.value = Date.now()
     const entries = Object.fromEntries(adminCapacities.value.entries())
     window.localStorage.setItem(capacityCacheKey, JSON.stringify({ entries, fetchedAt: lastCapacityFetchAt.value }))
+    await loadCapacitySnapshots()
   } finally {
     capacityRefreshing.value = false
   }
@@ -189,6 +206,8 @@ async function loadAdminCapacities({ force = false } = {}) {
 let capacityRefreshTimer
 function startCapacityRefreshTimer() {
   window.clearInterval(capacityRefreshTimer)
+  // Refresh the upstream capacity every 30 minutes, persist the result, and
+  // let the card continue to render from the saved snapshot.
   capacityRefreshTimer = window.setInterval(() => loadAdminCapacities().catch(() => {}), 30 * 60 * 1000)
 }
 function stopCapacityRefreshTimer() {
@@ -196,11 +215,11 @@ function stopCapacityRefreshTimer() {
   capacityRefreshTimer = undefined
 }
 watch(() => props.adminAccounts.map((account) => account.id).join(','), () => {
-  if (props.active && teamMenu.value === 'accounts') loadAdminCapacities().catch(() => {})
+  if (props.active && teamMenu.value === 'accounts') loadCapacitySnapshots().catch(() => {})
 })
 watch([teamMenu, () => props.active], ([value, active]) => {
   if (active && value === 'accounts') {
-    loadAdminCapacities().catch(() => {})
+    loadCapacitySnapshots().catch(() => {})
     startCapacityRefreshTimer()
   } else {
     stopCapacityRefreshTimer()

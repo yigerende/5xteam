@@ -1166,6 +1166,11 @@ func (s *Store) DeleteAdminAccount(id string) error {
 	if count, _ := result.RowsAffected(); count == 0 {
 		return errors.New("母号配置不存在")
 	}
+	// Capacity snapshots are keyed by the mother account and must not survive
+	// deletion, otherwise old seat totals can reappear in aggregate cards.
+	if _, err := s.db.Exec("DELETE FROM admin_capacity_snapshots WHERE admin_account_id = ?", id); err != nil {
+		return err
+	}
 	return nil
 }
 

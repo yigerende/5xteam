@@ -126,6 +126,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin-accounts/{id}/refresh", s.refreshAdminAccount)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/credentials", s.adminAccountCredentials)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/capacity", s.adminAccountCapacity)
+	mux.HandleFunc("GET /api/admin-capacity-snapshots", s.adminCapacitySnapshots)
 	mux.HandleFunc("POST /api/admin-accounts/test", s.testAdminAccount)
 	mux.HandleFunc("POST /api/tokens/inspect", s.inspectTokens)
 	mux.HandleFunc("GET /api/openai-accounts", s.listOpenAIAccounts)
@@ -457,6 +458,24 @@ func (s *Server) adminAccountCapacity(w http.ResponseWriter, r *http.Request) {
 	// every trigger.
 	_ = s.store.SaveAdminCapacitySnapshot(profile.ID, capacity)
 	writeAPI(w, http.StatusOK, capacity, "")
+}
+
+// adminCapacitySnapshots exposes the same persisted snapshots consumed by
+// automatic rotation. Filter by current mother accounts so legacy rows from
+// deleted accounts can never affect the UI aggregate.
+func (s *Server) adminCapacitySnapshots(w http.ResponseWriter, _ *http.Request) {
+	active := make(map[string]struct{})
+	for _, admin := range s.store.AdminAccounts() {
+		active[admin.ID] = struct{}{}
+	}
+	snapshots := s.store.AdminCapacitySnapshots()
+	result := make(map[string]model.AdminSeatCapacity)
+	for id, snapshot := range snapshots {
+		if _, ok := active[id]; ok {
+			result[id] = snapshot
+		}
+	}
+	writeAPI(w, http.StatusOK, result, "")
 }
 
 type openAIAccountInput struct {
