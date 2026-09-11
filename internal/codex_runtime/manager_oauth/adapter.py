@@ -1,7 +1,8 @@
 """Keep project diagnostics, dead-account handling and SMS persistence local."""
 import json
 import re
-from urllib.parse import urlsplit
+import time
+from urllib.parse import parse_qs, urlsplit
 
 from . import bridge, upstream
 
@@ -41,6 +42,93 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
             "login_auth_status": "not_started",
         }
         bridge.set_login_details(self.login_details)
+
+    def is_chatgpt_at(self):
+        return self.payload.get("credential_mode") == "chatgpt_at"
+
+    def prepare_oauth_authorize_url(self):
+        if not self.is_chatgpt_at():
+            return super().prepare_oauth_authorize_url()
+        self.oauth_authorize_source = "chatgpt_web"
+        self.log("oauth_init", "后端协议：生成 ChatGPT Web 登录会话")
+        csrf_token = self.get_csrf_token()
+        authorize_url = self.signin_openai(csrf_token)
+        self.remember_oauth_params_from_authorize_url(authorize_url)
+        return authorize_url
+
+    def exchange_oauth_callback(self, callback_url):
+        if not self.is_chatgpt_at():
+            return super().exchange_oauth_callback(callback_url)
+        query = parse_qs(urlsplit(callback_url).query)
+        returned_state = upstream.first_text(query.get("state", [""])[0])
+        if self.oauth_state and returned_state and returned_state != self.oauth_state:
+            raise RuntimeError("OpenAI OAuth state mismatch")
+        self.follow_callback(callback_url)
+        session = self.get_session()
+        access_token = upstream.first_text(session.get("accessToken"), session.get("access_token"))
+        if not access_token:
+            raise RuntimeError("ChatGPT Web session returned no accessToken")
+        session["access_token"] = access_token
+        session["accessToken"] = access_token
+        session_token = self.get_session_cookie()
+        if session_token:
+            session["session_token"] = session_token
+        return session
+
+    def resolve_realtime_phone_source(self, account_email):
+        if not self.payload.get("hero_managed") or self._sms_realtime_provider() != "hero_sms":
+            return super().resolve_realtime_phone_source(account_email)
+        previous = self.payload.get("_hero_activation")
+        try:
+            result = bridge.call("hero_replace", id=previous["activation_id"]) if previous else bridge.call("hero_acquire")
+        except Exception as exc:
+            raise upstream.LoginFlowError(
+                "Hero 申请或换号失败，已停止继续申请：" + str(exc),
+                code="sms_provider_failed", retryable=False,
+            ) from exc
+        act_id = str(result["id"])
+        phone = "+" + upstream.normalize_phone_digits(result["phone"])
+        row = {"id": "hero_sms:" + act_id, "activation_id": act_id, "card_code": act_id,
+               "phone_number": phone, "provider": "hero_sms", "realtime": True}
+        self.payload["_hero_activation"] = row
+        self.payload["_resolved_sms_phone"] = row
+        self.log("phone_pool", ("Hero 更换号码成功" if previous else "Hero 申请号码成功") + "，激活 ID " + act_id)
+        return {"id": row["id"], "mode": "realtime", "provider": "hero_sms", "phone": phone,
+                "phone_digits": upstream.normalize_phone_digits(phone), "card_code": act_id,
+                "api_url": "", "account_email": account_email}
+
+    def fetch_phone_verification_code(self, phone_hint="", attempts=24, delay=5):
+        if not self.payload.get("hero_managed") or not self.payload.get("_hero_activation"):
+            return super().fetch_phone_verification_code(phone_hint, attempts, delay)
+        act_id = self.payload["_hero_activation"]["activation_id"]
+        deadline = time.monotonic() + 90
+        for attempt in range(min(attempts, 18)):
+            if time.monotonic() >= deadline:
+                break
+            manual_code = upstream.manual_phone_code_for_payload(self.payload)
+            if manual_code:
+                bridge.protect_code(manual_code)
+                self.log("manual_phone_code", "使用手动填写的手机验证码")
+                return manual_code
+            result = bridge.call("hero_fetch", id=act_id, timeout_seconds=max(0.01, min(10, deadline - time.monotonic())))
+            code = str(result.get("code") or "").strip()
+            if result.get("found") and re.fullmatch(r"\d{4,8}", code):
+                bridge.protect_code(code)
+                self.log("phone_code", "Hero 已收到短信验证码", "success")
+                return code
+            remaining = max(0, deadline - time.monotonic())
+            self.log("phone_code", f"Hero 激活 {act_id} 等待短信，第 {attempt + 1} 次，剩余 {int(remaining)} 秒")
+            time.sleep(min(max(1, delay), remaining))
+        self.log("phone_code", "Hero 单号等待短信已超时", "warning")
+        return ""
+
+    def _release_realtime_phone(self, phone, ok):
+        if self.payload.get("hero_managed") and phone.get("provider") == "hero_sms":
+            bridge.call("hero_release", id=phone["activation_id"], finish=ok)
+            self.payload.pop("_hero_activation", None)
+            self.log("phone_pool", "Hero 已提交后台" + ("完成" if ok else "取消") + "任务，等待平台确认")
+            return
+        return super()._release_realtime_phone(phone, ok)
 
     def set_login_method(self, method, label):
         self.login_details.update(login_method=method, login_method_label=label, login_auth_status="running")
@@ -135,12 +223,18 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
 
     def _handle_rejected_phone(self, exc):
         phone = self.payload.get("_resolved_sms_phone") or {}
+        if self.payload.get("hero_managed") and "invalid_auth_step" in str(exc.reason).lower():
+            raise upstream.LoginFlowError(
+                "手机验证的授权步骤已失效，停止换号并回收当前激活：" + str(exc.reason),
+                code="phone_session_invalid", retryable=True,
+            ) from exc
         phone_id = str(phone.get("id") or "")
         tried = self.payload.setdefault("_sms_tried_ids", [])
         if phone_id and phone_id not in tried:
             tried.append(phone_id)
         if phone.get("realtime") or phone.get("activation_id"):
-            self._release_realtime_phone(phone, ok=False)
+            if not (self.payload.get("hero_managed") and phone.get("provider") == "hero_sms"):
+                self._release_realtime_phone(phone, ok=False)
         elif phone_id:
             bridge.call("sms_rejected", id=phone_id, disable=exc.disable, reason=exc.reason)
         self.log("phone_pool", "当前号码未通过，换号重试：" + str(exc.reason), "warning")
@@ -165,6 +259,7 @@ def run(payload, rpc=None):
     pickup = str(payload.get("pickup_url") or "").strip()
     provider = str(payload.get("sms_provider") or "").strip()
     mode = "password_totp" if payload.get("login_mode") == "password_totp" else "email_otp"
+    credential_mode = "chatgpt_at" if payload.get("credential_mode") == "chatgpt_at" else "codex_rt"
     local = {"email": email, "password": str(payload.get("gpt_password") or "") if mode == "password_totp" else "",
              "_totp_secret": str(payload.get("totp_secret") or ""),
              "force_email_code": mode == "email_otp", "email_code_login": mode == "email_otp",
@@ -173,17 +268,19 @@ def run(payload, rpc=None):
              "login_fallback_reason": payload.get("login_fallback_reason") or "",
              "login_method_reason": payload.get("login_method_reason") or "",
              "proxy": payload.get("proxy"),
-             "job_id": "local", "allow_sms": bool(payload.get("allow_sms", True)),
-             "sms_config": payload.get("sms_config") or {}, "credential_mode": "codex_rt",
+             "job_id": "local", "allow_sms": bool(payload.get("allow_sms", True)) and credential_mode != "chatgpt_at",
+             "skip_phone_verification": credential_mode == "chatgpt_at",
+             "sms_config": payload.get("sms_config") or {}, "credential_mode": credential_mode,
              "sms_realtime_provider": provider if provider in {"hero_sms", "nextpro", "congou", "chatai"} else "",
              "sms_provider": provider if provider in {"generic", "chongpt", "chong10666"} else "",
+             "hero_managed": rpc is not None,
              "generic_accounts": [{"email": email, "pickup_url": pickup, "imap_host": pickup,
                                    "mode": "mailtoken" if urlsplit(pickup).fragment else "directurl"}] if pickup else []}
     bridge.configure({**payload, **local}, rpc)
     flow = None
     try:
         flow = ProjectProtocolLogin("local", local)
-        bridge.emit("login_method", "login_start", "开始本次 OAuth 登录")
+        bridge.emit("login_method", "login_start", "开始本次 ChatGPT 登录" if credential_mode == "chatgpt_at" else "开始本次 OAuth 登录")
         session = flow.login()
         token = upstream.jwt_payload(session.get("id_token") or session.get("access_token") or "")
         auth = token.get("https://api.openai.com/auth") or {}

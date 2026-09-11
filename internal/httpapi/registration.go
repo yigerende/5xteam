@@ -371,26 +371,40 @@ func (s *Server) runLocalRegistration(id, email string) {
 }
 
 func (s *Server) runLocalLogin(id, email string) {
-	s.updateRegistration(id, "running", "按 turb 纯协议登录 OpenAI")
+	s.updateRegistration(id, "running", "按全局 OAuth 登录方式获取 ChatGPT 临时 AT")
 	profile, creds, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		s.finishRegistration(id, "failed", err.Error())
 		return
 	}
-	result, err := runTurbStyleProtocolLoginWithProgress(context.Background(), email, creds.PickupURL, s.store.Settings().ProxyURL, func(message string) {
+	result, err := s.executeChatGPTAT(email, func(message string) {
 		s.updateRegistration(id, "running", message)
-	})
+	}, nil)
 	if err != nil {
 		s.finishRegistration(id, "failed", err.Error())
 		return
 	}
+	if result == nil || result["success"] != true {
+		message, _ := result["error"].(string)
+		if strings.TrimSpace(message) == "" {
+			message = "ChatGPT 临时 AT 登录失败"
+		}
+		if isDeadOAuthResult(result, message) {
+			_ = s.store.MarkMailAccountDead(email, message)
+		}
+		s.finishRegistration(id, "failed", message)
+		return
+	}
 	at, _ := result["access_token"].(string)
 	if strings.TrimSpace(at) == "" {
-		s.finishRegistration(id, "failed", "纯协议登录未返回 accessToken")
+		s.finishRegistration(id, "failed", "ChatGPT Web Session 未返回 accessToken")
 		return
 	}
 	creds.Email = email
 	creds.AccessToken = strings.TrimSpace(at)
+	if encoded, encodeErr := json.Marshal(result); encodeErr == nil {
+		creds.ChatGPTSession = string(encoded)
+	}
 	profile.Email = email
 	if strings.TrimSpace(profile.Label) == "" {
 		profile.Label = email

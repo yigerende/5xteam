@@ -65,6 +65,9 @@ func TestTurbIntegrationSavesCompleteSessionWithoutTeamRotation(t *testing.T) {
 	if !profile.TotpSecretPresent || credentials.TotpSecret != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("totp secret was not saved: profile=%+v secret=%q", profile, credentials.TotpSecret)
 	}
+	if profile.RegistrationStatus != "success" {
+		t.Fatalf("completed turb registration was not marked successful: profile=%+v", profile)
+	}
 	if accounts := dataStore.FreeAccounts(); len(accounts) != 0 {
 		t.Fatalf("pure turb push entered Team rotation: %#v", accounts)
 	}

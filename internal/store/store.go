@@ -131,6 +131,13 @@ func (s *Store) initSchema() error {
 		CREATE TABLE IF NOT EXISTS sms_platform_configs (
 			provider TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS sms_activations (
+			id TEXT PRIMARY KEY, email TEXT NOT NULL, state TEXT NOT NULL,
+			encrypted_config TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT ''
+		);
+		CREATE INDEX IF NOT EXISTS idx_sms_activations_due ON sms_activations(state,next_attempt_at);
+		CREATE INDEX IF NOT EXISTS idx_sms_activations_email ON sms_activations(email,state);
 		CREATE TABLE IF NOT EXISTS history (
 			id TEXT PRIMARY KEY, completed_at TEXT NOT NULL, payload TEXT NOT NULL
 		);

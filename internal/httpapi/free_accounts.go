@@ -760,6 +760,14 @@ func (s *Server) auditOAuthProtocolDiagnostic(accountID, jobID, trigger string, 
 // reaches this function, so they all share the same gpt-account-manager style
 // proxy behavior.
 func (s *Server) executeCodexOAuth(email string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (result map[string]any, runErr error) {
+	return s.executeOpenAILogin(email, "codex_rt", progress, diagnostic)
+}
+
+func (s *Server) executeChatGPTAT(email string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (result map[string]any, runErr error) {
+	return s.executeOpenAILogin(email, "chatgpt_at", progress, diagnostic)
+}
+
+func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (result map[string]any, runErr error) {
 	_, credentials, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return nil, err
@@ -857,7 +865,7 @@ func (s *Server) executeCodexOAuth(email string, progress func(string), diagnost
 			if progress != nil {
 				progress(fmt.Sprintf("OAuth 出口质检通过：%s（HTTP %d，IP %s）", lease.label, probe.AuthStatus, probe.ExitIP))
 			}
-			result, runErr := s.executeCodexOAuthWithProxy(email, proxyURL, lease.label, lease.activeCount, login, progress, diagnostic)
+			result, runErr := s.executeOpenAILoginWithProxy(email, proxyURL, lease.label, lease.activeCount, credentialMode, login, progress, diagnostic)
 			lease.Release()
 			lastResult, lastErr = result, runErr
 			if runErr == nil && result != nil && result["success"] == true {
@@ -937,7 +945,7 @@ func isRetryableOAuthNetworkResult(result map[string]any, runErr error) bool {
 // executeCodexOAuthWithProxy owns the protocol process only. The proxy is
 // selected and quality-checked by executeCodexOAuth and remains unchanged for
 // this complete OAuth attempt.
-func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, activeCount int, login oauthLoginSelection, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
+func (s *Server) executeOpenAILoginWithProxy(email, proxyURL, proxyLabel string, activeCount int, credentialMode string, login oauthLoginSelection, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
 	if progress != nil {
 		progress(fmt.Sprintf("已分配 OAuth 代理：%s（当前任务 %d）", proxyLabel, activeCount))
 	}
@@ -997,7 +1005,10 @@ func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, 
 	}
 	payload := map[string]any{"email": email, "pickup_url": login.credentials.PickupURL,
 		"proxy": proxyURL, "sms_provider": provider, "sms_config": smsCfg,
-		"allow_sms": settings.AllowSMS, "stdio_rpc": true}
+		"allow_sms": settings.AllowSMS, "stdio_rpc": true, "credential_mode": credentialMode}
+	if credentialMode == "chatgpt_at" {
+		payload["allow_sms"] = false
+	}
 	login.apply(payload)
 	python := workflow.FindPython()
 	if python == "" {
@@ -1026,7 +1037,11 @@ func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, 
 		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("Codex OAuth 执行失败: %w", err)
+		flowName := "Codex OAuth"
+		if credentialMode == "chatgpt_at" {
+			flowName = "ChatGPT 临时 AT 登录"
+		}
+		return nil, fmt.Errorf("%s执行失败: %w", flowName, err)
 	}
 	return result, nil
 }

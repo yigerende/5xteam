@@ -151,9 +151,9 @@ class Scenario:
         code = "111111" if not self.identifiers or self.o.get("old_code_only") else "234567"
         return "<title>OpenAI verification code</title><p>Your code is " + code + "</p>"
 
-    def run(self, **payload):
+    def run(self, rpc=None, **payload):
         with patch("curl_cffi.requests.request", side_effect=self.request), patch("curl_cffi.requests.post", side_effect=self.post), patch.object(core, "http_request_text", side_effect=self.mail), patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("unexpected real network in fixture")), patch.object(core.time, "sleep", side_effect=self.sleeps.append), contextlib.redirect_stderr(self.logs):
-            return run({"email": "fixture@example.com", "pickup_url": "https://mail.example/pickup/private", "proxy": "http://user:proxy-password@proxy.example:8080", **payload})
+            return run({"email": "fixture@example.com", "pickup_url": "https://mail.example/pickup/private", "proxy": "http://user:proxy-password@proxy.example:8080", **payload}, rpc=rpc)
 
 
 class FakeProvider:
@@ -176,6 +176,58 @@ class FakeProvider:
 
 
 class ProtocolFlowTests(unittest.TestCase):
+    def test_managed_hero_replaces_without_cancel_then_finishes(self):
+        calls = []
+        def rpc(method, params):
+            calls.append((method, params))
+            if method == "hero_acquire":
+                return {"id": "1", "phone": "66990000001"}
+            if method == "hero_replace":
+                self.assertEqual(params["id"], "1")
+                return {"id": "2", "phone": "66990000002"}
+            if method == "hero_fetch":
+                self.assertEqual(params["id"], "2")
+                return {"found": True, "code": "012345"}
+            if method == "hero_release":
+                self.assertEqual(params, {"id": "2", "finish": True})
+                return True
+            raise AssertionError(method)
+        s = Scenario(phone=True, reject_phones=1)
+        result = s.run(rpc=rpc, sms_provider="hero_sms")
+        self.assertTrue(result["success"], result)
+        self.assertEqual([m for m, _ in calls], ["hero_acquire", "hero_replace", "hero_fetch", "hero_release"])
+        self.assertNotIn("012345", s.logs.getvalue())
+
+    def test_managed_hero_replace_failure_stops_new_purchase(self):
+        calls = []
+        def rpc(method, params):
+            calls.append(method)
+            if method == "hero_acquire":
+                return {"id": "1", "phone": "66990000001"}
+            if method == "hero_replace":
+                raise RuntimeError("Hero-SMS HTTP 422: not replaceable yet")
+            raise AssertionError(method)
+        result = Scenario(phone=True, reject_phones=1).run(rpc=rpc, sms_provider="hero_sms")
+        self.assertFalse(result["success"])
+        self.assertFalse(result["retryable"])
+        self.assertEqual(result["error_code"], "sms_provider_failed")
+        self.assertEqual(calls, ["hero_acquire", "hero_replace"])
+
+    def test_managed_hero_timeout_has_bounded_polls_and_replacements(self):
+        calls = []
+        def rpc(method, params):
+            calls.append(method)
+            if method in {"hero_acquire", "hero_replace"}:
+                return {"id": str(calls.count("hero_replace") + 1), "phone": "66990000001"}
+            if method == "hero_fetch":
+                return {"found": False}
+            raise AssertionError(method)
+        result = Scenario(phone=True).run(rpc=rpc, sms_provider="hero_sms")
+        self.assertFalse(result["success"])
+        self.assertEqual(calls.count("hero_acquire"), 1)
+        self.assertEqual(calls.count("hero_replace"), 2)
+        self.assertEqual(calls.count("hero_fetch"), 54)
+
     def success(self, s, **payload):
         result = s.run(**payload)
         self.assertTrue(result.get("success"), result)

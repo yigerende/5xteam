@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
+
+	"chatgpt-space-merge/internal/herosms"
 )
 
 // One gate coordinates card-pool transactions across all OAuth subprocesses.
@@ -15,11 +18,12 @@ var oauthSMSGate = make(chan struct{}, 1)
 var oauthSMSLeases = map[string]*oauthProtocolRPC{}
 
 type oauthProtocolRPC struct {
-	server *Server
-	ctx    context.Context
-	email  string
-	locked bool
-	owned  map[string]bool
+	server    *Server
+	ctx       context.Context
+	email     string
+	locked    bool
+	owned     map[string]bool
+	heroOwned map[string]herosms.Config
 }
 
 func (p *oauthProtocolRPC) lock() error {
@@ -43,6 +47,13 @@ func (p *oauthProtocolRPC) unlock() {
 }
 
 func (p *oauthProtocolRPC) close() {
+	for id := range p.heroOwned {
+		if err := p.server.store.QueueSMSActivation(id, false); err != nil {
+			p.server.heroEvent(p.email, id, "cleanup_error", "Hero 回收任务保存失败", err)
+		} else {
+			p.server.heroEvent(p.email, id, "cleanup_queued", "OAuth 已结束，遗留 Hero 激活已安排后台取消", nil)
+		}
+	}
 	if len(p.owned) == 0 {
 		p.unlock()
 		return
@@ -61,6 +72,9 @@ func (p *oauthProtocolRPC) close() {
 }
 
 func (p *oauthProtocolRPC) call(method string, args map[string]any) (any, error) {
+	if strings.HasPrefix(method, "hero_") {
+		return p.callHero(method, args)
+	}
 	str := func(key string) string { value, _ := args[key].(string); return value }
 	switch method {
 	case "sms_lock":

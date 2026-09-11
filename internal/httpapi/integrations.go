@@ -85,7 +85,12 @@ func (s *Server) importTurbRegistration(w http.ResponseWriter, r *http.Request) 
 				mailCreds.ChatGPTSession = old.ChatGPTSession
 			}
 		}
-		_, mailErr := s.store.SaveMailAccount(model.MailAccountProfile{Email: email, Label: email, Group: "free"}, mailCreds)
+		_, mailErr := s.store.SaveMailAccount(model.MailAccountProfile{
+			Email:              email,
+			Label:              email,
+			Group:              "free",
+			RegistrationStatus: "success",
+		}, mailCreds)
 		if mailErr != nil {
 			writeAPI(w, http.StatusBadRequest, nil, "邮箱资料保存失败: "+mailErr.Error())
 			return

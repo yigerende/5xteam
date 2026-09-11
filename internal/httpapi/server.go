@@ -39,6 +39,7 @@ type Server struct {
 	oauthMu           sync.RWMutex
 	oauthJobs         map[string]map[string]any
 	oauthProxyMu      sync.Mutex
+	heroAccountLocks  sync.Map
 	oauthProxyActive  map[string]int
 	oauthProxyCursor  uint64
 	planCheckMu       sync.Mutex
@@ -77,6 +78,9 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 	_ = dataStore.RecoverAutoRotationClaims()
 	_ = dataStore.RecoverAutoRotationTasks()
 	_ = dataStore.RecoverProWorkflows()
+	if err := dataStore.RecoverSMSActivations(); err != nil {
+		return nil, err
+	}
 	// Keep the execution history bounded to the requested two-day window.
 	// Cleanup is a single local transaction and runs once at startup, outside
 	// all request/rotation workers.
@@ -228,6 +232,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sms/platform/balance", s.getSMSPlatformBalance)
 	mux.HandleFunc("POST /api/sms/platform/test", s.testSMSPlatform)
 	mux.HandleFunc("GET /api/sms/platform/history", s.getSMSPlatformHistory)
+	mux.HandleFunc("GET /api/sms/platform/activations", s.getSMSActiveActivations)
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(mustSub(s.static, "assets")))))
 	mux.HandleFunc("GET /", s.index)
 	return s.requestLog(s.securityHeaders(s.authMiddleware(mux)))
@@ -235,6 +240,7 @@ func (s *Server) Handler() http.Handler {
 
 // StartBackground runs periodic Free account quota checks until ctx is done.
 func (s *Server) StartBackground(ctx context.Context) {
+	go s.monitorHeroActivations(ctx)
 	go s.monitorFreeAccounts(ctx)
 	go s.autoRotationLoop(ctx)
 	go s.autoRotationHistoryCleanup(ctx)

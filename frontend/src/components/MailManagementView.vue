@@ -97,6 +97,16 @@ const batchLoginDialog = reactive({
   failed: 0,
   items: [],
 });
+const atCheckDialog = reactive({
+  open: false,
+  running: false,
+  total: 0,
+  finished: 0,
+  valid: 0,
+  invalid: 0,
+  failed: 0,
+  items: [],
+});
 const credentialDialog = reactive({
   open: false,
   email: "",
@@ -156,6 +166,12 @@ const batchLoginTerminal = computed(
 );
 const batchLoginTitle = computed(() =>
   batchLoginDialog.mode === "oauth" ? "批量登录并获取 RT / AT" : "批量获取临时 AT",
+);
+const atCheckTerminal = computed(
+  () => atCheckDialog.total > 0 && atCheckDialog.finished >= atCheckDialog.total,
+);
+const atCheckPercent = computed(() =>
+  atCheckDialog.total ? Math.round((atCheckDialog.finished / atCheckDialog.total) * 100) : 0,
 );
 const pipelineByEmail = computed(
   () =>
@@ -514,25 +530,66 @@ watch(accountQuery, () => {
   accountSearchTimer = window.setTimeout(loadAccountsHandled, 250);
 });
 async function checkAT(emails = []) {
+  const targets = [...new Set(emails.map((email) => String(email || "").trim().toLowerCase()).filter(Boolean))];
+  if (!targets.length) return setMessage("请先选择需要检测 AT 的邮箱账号", "error");
   busy.value = "check-at";
+  Object.assign(atCheckDialog, {
+    open: true,
+    running: true,
+    total: targets.length,
+    finished: 0,
+    valid: 0,
+    invalid: 0,
+    failed: 0,
+    items: targets.map((email) => ({ email, status: "queued", message: "等待检测" })),
+  });
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < atCheckDialog.items.length) {
+      const item = atCheckDialog.items[nextIndex++];
+      item.status = "running";
+      item.message = "正在请求 OpenAI 验证 AT";
+      try {
+        const result = await api(`/api/mail/accounts/${encodeURIComponent(item.email)}/check-at`, {
+          method: "POST",
+          body: {},
+        });
+        const valid = !!result.result?.valid;
+        item.status = valid ? "valid" : "invalid";
+        item.message = result.result?.message || (valid ? "AT 有效" : "AT 无效");
+        if (valid) atCheckDialog.valid += 1;
+        else atCheckDialog.invalid += 1;
+      } catch (error) {
+        item.status = "failed";
+        item.message = error.message;
+        atCheckDialog.failed += 1;
+      } finally {
+        atCheckDialog.finished += 1;
+      }
+    }
+  };
   try {
-    const result = await api("/api/mail/accounts/check-at", {
-      method: "POST",
-      body: { emails },
-    });
+    const concurrency = Math.min(5, targets.length);
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
     await loadAccounts();
-    const checked = result.items || [];
-    const failed = Object.keys(result.errors || {}).length;
-    const valid = checked.filter((item) => item.result?.valid).length;
     setMessage(
-      `AT 检测完成：有效 ${valid}，无效 ${checked.length - valid}${failed ? `，失败 ${failed}` : ""}`,
-      failed || checked.some((item) => !item.result?.valid) ? "error" : "success",
+      `AT 检测完成：有效 ${atCheckDialog.valid}，无效 ${atCheckDialog.invalid}${atCheckDialog.failed ? `，失败 ${atCheckDialog.failed}` : ""}`,
+      atCheckDialog.invalid || atCheckDialog.failed ? "error" : "success",
     );
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
+    atCheckDialog.running = false;
     busy.value = "";
   }
+}
+function atCheckTone(item) {
+  if (item.status === "valid") return "success";
+  if (item.status === "invalid" || item.status === "failed") return "danger";
+  return item.status === "running" ? "running" : "pending";
+}
+function atCheckLabel(item) {
+  return { queued: "等待", running: "检测中", valid: "有效", invalid: "无效", failed: "失败" }[item.status] || item.status;
 }
 async function loadMessages() {
   const query = new URLSearchParams({
@@ -1466,7 +1523,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                         ><button
                           class="action-menu-item"
                           type="button"
-                          :disabled="!!busy || !!loginJobFor(account) || !pipelineFor(account) || pipelineFor(account).accept_status !== 'completed'"
+                          :disabled="!!loginJobFor(account)"
                           @click="
                             closeActionMenu();
                             startAccountOAuthTask(account);
@@ -1855,6 +1912,70 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             </button>
           </footer>
         </template>
+      </section>
+    </div>
+
+    <div v-if="atCheckDialog.open" class="modal-backdrop login-dialog-backdrop">
+      <section
+        class="modal at-check-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="at-check-dialog-title"
+      >
+        <header class="login-dialog-header">
+          <div class="login-dialog-mark" :class="atCheckTerminal ? (atCheckDialog.invalid || atCheckDialog.failed ? 'danger' : 'success') : 'running'">
+            <CheckCircle2 v-if="atCheckTerminal && !atCheckDialog.invalid && !atCheckDialog.failed" :size="21" />
+            <XCircle v-else-if="atCheckTerminal" :size="21" />
+            <LoaderCircle v-else class="spin" :size="21" />
+          </div>
+          <div>
+            <span class="overline">ACCESS TOKEN CHECK</span>
+            <h2 id="at-check-dialog-title">检测 AT</h2>
+            <p>{{ atCheckDialog.finished }} / {{ atCheckDialog.total }} 已完成</p>
+          </div>
+          <StatusPill :tone="atCheckTerminal ? (atCheckDialog.invalid || atCheckDialog.failed ? 'danger' : 'success') : 'running'">
+            {{ atCheckTerminal ? '检测完成' : '并发检测中' }}
+          </StatusPill>
+          <IconButton
+            v-if="atCheckTerminal"
+            label="关闭 AT 检测进度"
+            @click="atCheckDialog.open = false"
+          ><X :size="16" /></IconButton>
+        </header>
+
+        <div class="batch-login-summary at-check-summary">
+          <span>总数 <strong>{{ atCheckDialog.total }}</strong></span>
+          <span>已完成 <strong>{{ atCheckDialog.finished }}</strong></span>
+          <span class="success">有效 <strong>{{ atCheckDialog.valid }}</strong></span>
+          <span :class="{ danger: atCheckDialog.invalid }">无效 <strong>{{ atCheckDialog.invalid }}</strong></span>
+          <span :class="{ danger: atCheckDialog.failed }">失败 <strong>{{ atCheckDialog.failed }}</strong></span>
+        </div>
+        <div
+          class="batch-login-progress"
+          role="progressbar"
+          :aria-valuenow="atCheckDialog.finished"
+          aria-valuemin="0"
+          :aria-valuemax="atCheckDialog.total"
+        >
+          <i :class="{ danger: atCheckDialog.invalid || atCheckDialog.failed }" :style="{ width: `${atCheckPercent}%` }"></i>
+        </div>
+
+        <div class="at-check-list">
+          <div v-for="item in atCheckDialog.items" :key="item.email" class="at-check-item">
+            <span class="batch-task-state" :class="atCheckTone(item)">
+              <CheckCircle2 v-if="item.status === 'valid'" :size="15" />
+              <XCircle v-else-if="item.status === 'invalid' || item.status === 'failed'" :size="15" />
+              <LoaderCircle v-else-if="item.status === 'running'" class="spin" :size="15" />
+              <Circle v-else :size="15" />
+            </span>
+            <span><strong>{{ item.email }}</strong><small>{{ item.message }}</small></span>
+            <StatusPill :tone="atCheckTone(item)">{{ atCheckLabel(item) }}</StatusPill>
+          </div>
+        </div>
+
+        <footer v-if="atCheckTerminal" class="panel-actions login-dialog-actions">
+          <button class="btn primary" type="button" @click="atCheckDialog.open = false">关闭</button>
+        </footer>
       </section>
     </div>
 
@@ -2519,12 +2640,23 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
   padding: 0;
   overflow: hidden;
 }
+.at-check-dialog {
+  display: flex;
+  width: min(780px, 100%);
+  max-height: min(760px, calc(100vh - 40px));
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
 .batch-login-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(90px, 1fr));
   gap: 1px;
   border-bottom: 1px solid var(--line);
   background: var(--line);
+}
+.at-check-summary {
+  grid-template-columns: repeat(5, minmax(80px, 1fr));
 }
 .batch-login-summary span {
   display: flex;
@@ -2556,6 +2688,41 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
   height: 100%;
   background: var(--green);
   transition: width 0.25s ease;
+}
+.batch-login-progress i.danger {
+  background: var(--red);
+}
+.at-check-list {
+  min-height: 240px;
+  overflow-y: auto;
+}
+.at-check-item {
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 20px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.at-check-item > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.at-check-item strong,
+.at-check-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.at-check-item strong {
+  color: var(--text-2);
+  font-size: 11px;
+}
+.at-check-item small {
+  color: var(--muted);
+  font-size: 10px;
 }
 .batch-login-list {
   min-height: 280px;
