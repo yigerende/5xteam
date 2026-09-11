@@ -32,6 +32,13 @@ def response_shape(response, flow):
 class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
     def __init__(self, job_id, payload):
         super().__init__(job_id, payload)
+        self.web_session = None
+        if payload.get("credential_mode") == "chatgpt_at":
+            from curl_cffi import requests as cffi_requests
+            self.web_session = cffi_requests.Session(
+                impersonate=upstream.OPENAI_IMPERSONATE,
+                proxies=upstream._cffi_proxies(self.proxy_url),
+            )
         self.last_stage = "oauth_init"
         self.last_status = 0
         self.login_details = {
@@ -43,6 +50,37 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
             "login_auth_status": "not_started",
         }
         bridge.set_login_details(self.login_details)
+
+    def close(self):
+        if self.web_session is not None:
+            try:
+                self.web_session.close()
+            except Exception:
+                pass
+
+    def set_cookie(self, name, value, domain, path="/"):
+        super().set_cookie(name, value, domain, path)
+        if not value or self.web_session is None:
+            return
+        try:
+            self.web_session.cookies.set(name, value, domain=domain, path=path)
+        except Exception:
+            pass
+
+    def _sync_web_session_cookies(self):
+        if self.web_session is None:
+            return
+        try:
+            for cookie in self.web_session.cookies.jar:
+                upstream.ChatGPTProtocolLogin.set_cookie(
+                    self,
+                    cookie.name,
+                    cookie.value or "",
+                    upstream.coerce_text(cookie.domain) or "chatgpt.com",
+                    upstream.coerce_text(cookie.path) or "/",
+                )
+        except Exception:
+            pass
 
     def is_chatgpt_at(self):
         return self.payload.get("credential_mode") == "chatgpt_at"
@@ -118,16 +156,25 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         self.oauth_authorize_source = "chatgpt_web"
         self.log("oauth_init", "后端协议：生成 ChatGPT Web 登录会话")
         self.device_id = self.device_id or uuid.uuid4().hex
-        self.request(
-            "https://chatgpt.com/login",
-            headers=self.headers("https://chatgpt.com/login", {"Referer": "https://chatgpt.com/"}),
-        )
+        try:
+            self.request(
+                "https://chatgpt.com/",
+                headers=self.headers("https://chatgpt.com/", {
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer": "https://chatgpt.com/",
+                    "Upgrade-Insecure-Requests": "1",
+                }),
+                timeout=20,
+                allow_redirects=True,
+            )
+        except Exception:
+            pass
         csrf_token = self.get_csrf_token()
         query = urlencode({
             "prompt": "login",
             "ext-oai-did": self.device_id,
             "auth_session_logging_id": str(uuid.uuid4()),
-            "ext-passkey-client-capabilities": "11111",
+            "ext-passkey-client-capabilities": "0111",
             "screen_hint": "login_or_signup",
             "login_hint": str(self.payload.get("email") or "").strip(),
         })
@@ -157,7 +204,31 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
             )
         authorize_url = urljoin(signin_url, authorize_url)
         self.remember_oauth_params_from_authorize_url(authorize_url)
+        authorize_response = self.request(
+            authorize_url,
+            headers=self.headers(authorize_url, {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://chatgpt.com/",
+                "Upgrade-Insecure-Requests": "1",
+            }),
+            timeout=45,
+            allow_redirects=True,
+        )
+        if authorize_response.status >= 400:
+            raise upstream.LoginFlowError(
+                f"打开 ChatGPT 授权页面失败：HTTP {authorize_response.status}",
+                code="chatgpt_authorize_failed",
+                hint="请检查全局代理出口后重试。",
+                status=authorize_response.status,
+                retryable=True,
+            )
+        self.login_url = authorize_response.url
         return authorize_url
+
+    def bootstrap_oauth_session(self, authorize_url):
+        if self.is_chatgpt_at() and self.has_auth_session_cookie():
+            return {"ok": True, "final_url": self.login_url or authorize_url}
+        return super().bootstrap_oauth_session(authorize_url)
 
     def exchange_oauth_callback(self, callback_url):
         if not self.is_chatgpt_at():
@@ -170,11 +241,19 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         return self._chatgpt_web_session()
 
     def _chatgpt_web_session(self):
-        session = self.get_session()
-        access_token = upstream.first_text(session.get("accessToken"), session.get("access_token"))
+        session = {}
+        access_token = ""
+        for attempt in range(1, 7):
+            session = self.get_session()
+            access_token = upstream.first_text(session.get("accessToken"), session.get("access_token"))
+            if access_token:
+                break
+            if attempt < 6:
+                self.log("session", f"ChatGPT Session 暂无 AT，等待后重读（{attempt}/6）", "warning")
+                time.sleep(1.5 * attempt)
         if not access_token:
             raise upstream.LoginFlowError(
-                "ChatGPT Web Session 未返回 accessToken",
+                "ChatGPT Web Session 连续 6 次未返回 accessToken",
                 code="chatgpt_session_missing",
                 hint="登录验证已通过，但 ChatGPT Session 尚未建立；请更换代理出口后重试。",
                 retryable=True,
@@ -311,11 +390,16 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
                    "referer": bridge.safe_url(headers.get("Referer")),
                    "payload_fields": sorted(payload), "header_names": sorted(headers),
                    "sentinel_attached": bool(headers.get("openai-sentinel-token")),
-                   "impersonate": upstream.OPENAI_IMPERSONATE, "allow_redirects": False,
+                   "impersonate": upstream.OPENAI_IMPERSONATE,
+                   "allow_redirects": bool(kwargs.get("allow_redirects", False)),
                    "timeout_seconds": kwargs.get("timeout", 60)}
         bridge.emit(stage, "request_start", "OAuth 请求开始", request=request)
         try:
-            response = super().request(url, **kwargs)
+            if self.is_chatgpt_at():
+                response = self._web_session_request(url, **kwargs)
+            else:
+                kwargs.pop("allow_redirects", None)
+                response = super().request(url, **kwargs)
         except Exception as exc:
             bridge.emit(stage, "request_error", "OAuth 请求异常", request=request,
                         details={"error": bridge.redact(exc)[:500], "error_type": type(exc).__name__}, level="error")
@@ -328,6 +412,54 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         if code:
             raise bridge.DeadAccountError(code, stage, response.status, upstream.protocol_compact_error(response.json()))
         return response
+
+    def _web_session_request(self, url, **kwargs):
+        if self.web_session is None:
+            raise RuntimeError("ChatGPT Web Session 未初始化")
+        method = kwargs.get("method", "GET")
+        json_data = kwargs.get("json_data")
+        form_data = kwargs.get("form_data")
+        final_headers = dict(kwargs.get("headers") or {})
+        body = None
+        if json_data is not None:
+            body = json.dumps(json_data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            final_headers.setdefault("Content-Type", "application/json")
+        elif form_data is not None:
+            body = urlencode(form_data).encode("utf-8")
+            final_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        for header_name in (
+            "User-Agent", "sec-ch-ua", "sec-ch-ua-full-version-list", "sec-ch-ua-mobile",
+            "sec-ch-ua-platform", "sec-ch-ua-arch", "sec-ch-ua-bitness", "sec-ch-ua-model",
+            "sec-ch-ua-platform-version",
+        ):
+            final_headers.pop(header_name, None)
+        last_error = ""
+        attempts = 3 if self.proxy_url else 2
+        for attempt in range(attempts):
+            try:
+                response = self.web_session.request(
+                    method,
+                    url,
+                    headers=final_headers,
+                    data=body,
+                    timeout=kwargs.get("timeout", 60),
+                    allow_redirects=bool(kwargs.get("allow_redirects", False)),
+                    default_headers=True,
+                )
+                self._sync_web_session_cookies()
+                return upstream.ProtocolResponse(
+                    int(response.status_code),
+                    str(response.url or url),
+                    response.headers,
+                    response.text,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt + 1 < attempts:
+                    time.sleep(0.6 + attempt * 0.7)
+                    continue
+                raise RuntimeError(f"network error: {upstream.network_error_message(url, exc)}") from exc
+        raise RuntimeError(last_error or "请求失败")
 
     def resolve_db_phone_source(self, account_email):
         row = bridge.call("sms_pick", provider=str(self.payload.get("sms_provider") or ""),
@@ -420,3 +552,6 @@ def run(payload, rpc=None):
         return {"success": False, "error": bridge.redact(exc), "retryable": retryable,
                 "error_code": exc.code if typed else "login_failed", "stage": stage, "http_status": status,
                 "hint": bridge.redact(exc.hint) if typed else "", **(flow.login_details if flow else {})}
+    finally:
+        if flow is not None:
+            flow.close()

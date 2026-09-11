@@ -18,6 +18,7 @@ class ChatGPTATFlowTests(unittest.TestCase):
             "configured_login_mode": "password_totp",
             "selected_login_mode": "password_totp",
         })
+        self.addCleanup(flow.close)
         authorize_url = (
             "https://auth.openai.com/authorize?state=expected-state"
             "&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Fopenai"
@@ -27,8 +28,9 @@ class ChatGPTATFlowTests(unittest.TestCase):
         class Response:
             status = 200
 
-            def __init__(self, data=None):
+            def __init__(self, data=None, url=""):
                 self.data = data or {}
+                self.url = url
 
             def json(self):
                 return self.data
@@ -36,34 +38,39 @@ class ChatGPTATFlowTests(unittest.TestCase):
             def location(self):
                 return ""
 
-        def request(url, *, method="GET", json_data=None, form_data=None, headers=None, timeout=60):
+        def request(url, *, method="GET", json_data=None, form_data=None, headers=None, timeout=60,
+                    allow_redirects=False):
             kwargs = {
                 "method": method,
                 "json_data": json_data,
                 "form_data": form_data,
                 "headers": headers,
                 "timeout": timeout,
+                "allow_redirects": allow_redirects,
             }
             calls.append((url, kwargs))
-            return Response({"url": authorize_url} if "/api/auth/signin/openai?" in url else {})
+            data = {"url": authorize_url} if "/api/auth/signin/openai?" in url else {}
+            return Response(data, "https://auth.openai.com/log-in/password" if url == authorize_url else url)
 
         with patch.object(flow, "get_csrf_token", return_value="csrf"), \
                 patch.object(flow, "request", side_effect=request):
             self.assertEqual(flow.prepare_oauth_authorize_url(), authorize_url)
         self.assertEqual(flow.oauth_authorize_source, "chatgpt_web")
         self.assertEqual(flow.oauth_code_verifier, "")
-        self.assertEqual([urlsplit(url).path for url, _ in calls], ["/login", "/api/auth/signin/openai"])
-        signin_url, signin_kwargs = calls[-1]
+        self.assertEqual([urlsplit(url).path for url, _ in calls], ["/", "/api/auth/signin/openai", "/authorize"])
+        signin_url, signin_kwargs = calls[-2]
         query = parse_qs(urlsplit(signin_url).query)
         self.assertEqual(query["prompt"], ["login"])
         self.assertEqual(query["login_hint"], ["a@example.com"])
         self.assertEqual(query["ext-oai-did"], [flow.device_id])
         self.assertEqual(query["screen_hint"], ["login_or_signup"])
-        self.assertEqual(query["ext-passkey-client-capabilities"], ["11111"])
+        self.assertEqual(query["ext-passkey-client-capabilities"], ["0111"])
         self.assertTrue(query["auth_session_logging_id"][0])
         self.assertEqual(signin_kwargs["form_data"], {
             "callbackUrl": "https://chatgpt.com/", "csrfToken": "csrf", "json": "true",
         })
+        self.assertTrue(calls[0][1]["allow_redirects"])
+        self.assertTrue(calls[-1][1]["allow_redirects"])
 
         with patch.object(flow, "get_session", return_value={"accessToken": "web-at", "user": {"email": "a@example.com"}}), \
                 patch.object(flow, "get_session_cookie", return_value="web-session"):
@@ -84,6 +91,7 @@ class ChatGPTATFlowTests(unittest.TestCase):
             "credential_mode": "codex_rt",
             "proxy": "http://proxy.example:8080",
         })
+        self.addCleanup(flow.close)
         with patch.object(adapter.upstream.ChatGPTProtocolLogin, "login", return_value={"access_token": "codex-at"}) as login:
             self.assertEqual(flow.login(), {"access_token": "codex-at"})
         login.assert_called_once_with()
@@ -104,6 +112,9 @@ class ChatGPTATFlowTests(unittest.TestCase):
 
             def login(self):
                 return {"access_token": "web-at"}
+
+            def close(self):
+                pass
 
         with patch.object(adapter, "ProjectProtocolLogin", FakeFlow):
             result = adapter.run({
