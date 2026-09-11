@@ -1,358 +1,322 @@
+"""Offline HTTP fixtures exercise real bootstrap, cookies, PKCE, OTP and consent."""
+import ast
 import base64
 import contextlib
+import hashlib
 import io
 import json
-import types
+from pathlib import Path
+import sys
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlsplit
 
-from curl_cffi.requests import Cookies, Headers
-
-import protocol_codex_oauth as oauth
-
-
-AUTH = "https://auth.openai.com/oauth/authorize?state=test-state&code_challenge=test-challenge"
-CONSENT = "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"
-REDIRECT = "http://localhost:1455/auth/callback"
-CALLBACK = REDIRECT + "?code=test-code&state=test-state"
-WORKSPACE = "https://auth.openai.com/api/accounts/workspace/select"
-ORGANIZATION = "https://auth.openai.com/api/accounts/organization/select"
-TOKEN = "https://auth.openai.com/oauth/token"
+sys.path.insert(0, str(Path(__file__).parent / "codex_runtime"))
+from manager_oauth import upstream as core, bridge
+from manager_oauth.adapter import ProjectProtocolLogin, run
 
 
 def encoded(data):
     return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
 
 
+class Headers(dict):
+    def __init__(self, cookies=(), **kwargs):
+        super().__init__(**kwargs)
+        self.cookies = cookies
+
+    def get_list(self, name):
+        return list(self.cookies) if name.lower() == "set-cookie" else []
+
+
 class Response:
-    def __init__(self, status=200, data=None, location="", text="", url="", cookie=None):
-        self.status_code = status
-        self.data = data
-        self.text = json.dumps(data) if data is not None else text
-        self.url = url
-        self.headers = Headers({"Location": location} if location else {})
-        self.cookies = Cookies()
-        self.cookie = cookie
+    def __init__(self, url, status=200, body=None, cookies=(), location=""):
+        self.url, self.status_code = url, status
+        self.headers = Headers(cookies, Location=location)
+        self.text = body if isinstance(body, str) else json.dumps(body or {})
 
     def json(self):
-        if self.data is None:
-            raise ValueError("not JSON")
-        return self.data
+        return json.loads(self.text)
 
 
-class Session:
-    def __init__(self, routes=(), cookie=None):
-        self.routes = list(routes)
-        self.calls = []
-        self.cookies = Cookies()
-        self.session = self
-        self.closed = False
-        self.proxies = {}
-        if cookie:
-            self.set_cookie(cookie)
+class Scenario:
+    def __init__(self, **options):
+        self.o = options
+        self.calls, self.mail_calls, self.sleeps = [], [], []
+        self.state = self.challenge = ""
+        self.identifiers = self.tokens = self.phones = 0
+        self.logs = io.StringIO()
 
-    def set_cookie(self, cookie):
-        value = cookie if isinstance(cookie, str) else encoded(cookie) + ".timestamp.signature"
-        self.cookies.set("oai-client-auth-session", value, domain="auth.openai.com", path="/")
+    def callback(self):
+        return "http://localhost:1455/auth/callback?code=private-code&state=" + self.state
 
-    def get_auth_headers(self, referer):
-        return {"referer": referer, "origin": "https://auth.openai.com", "content-type": "application/json"}
+    def consent(self, url):
+        cookie = "oai-client-auth-session=" + encoded({"workspaces": [{"id": "ws-1"}]}) + "; Path=/; Secure"
+        return Response(url, body={"continue_url": "/sign-in-with-chatgpt/codex/consent"}, cookies=[cookie])
 
-    def get_auth_navigate_headers(self, referer):
-        return {"referer": referer, "accept": "text/html", "upgrade-insecure-requests": "1"}
-
-    def _attach_oai_context_headers(self, headers):
-        return headers
-
-    def request(self, method, url, **kwargs):
-        self.calls.append((method, url, kwargs))
-        if not self.routes:
-            raise AssertionError(f"unexpected request: {method} {url}")
-        expected_method, expected_url, response = self.routes.pop(0)
-        if (method, url) != (expected_method, expected_url):
-            raise AssertionError(f"expected {expected_method} {expected_url}; got {method} {url}")
-        if isinstance(response, Exception):
-            raise response
-        response.url = response.url or url
-        if response.cookie:
-            self.set_cookie(response.cookie)
-        return response
-
-    def get(self, url, **kwargs):
-        return self.request("GET", url, **kwargs)
+    def request(self, method, url, **kw):
+        path = urlsplit(url).path
+        raw = kw.get("data")
+        data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        self.calls.append({"method": method, "path": path, "body": data, **kw})
+        if path == "/backend-api/sentinel/req":
+            return Response(url, body={"token": "private-sentinel"})
+        if path == "/oauth/token":
+            self.tokens += 1
+            if self.tokens <= self.o.get("token_failures", 0):
+                return Response(url, self.o.get("token_status", 502), {"error": "temporary"})
+            assert base64.urlsafe_b64encode(hashlib.sha256(data["code_verifier"].encode()).digest()).decode().rstrip("=") == self.challenge
+            assert data["code"] == "private-code"
+            return Response(url, body={"access_token": "private-at", "refresh_token": "private-rt", "id_token": "x." + encoded({"https://api.openai.com/auth": {"chatgpt_account_id": "account-1"}}) + ".x"})
+        if path in ("/oauth/authorize", "/api/oauth/oauth2/auth"):
+            q = parse_qs(urlsplit(url).query)
+            self.state, self.challenge = q["state"][0], q["code_challenge"][0]
+            if self.o.get("network_failure"):
+                raise RuntimeError("curl: (56) Connection closed")
+            if self.o.get("both_blocked") or (path == "/oauth/authorize" and self.o.get("first_blocked")):
+                return Response(url, 403, "<html>Access denied</html>")
+            if self.o.get("bootstrap_json"):
+                return Response(url, body={"continue_url": "/log-in"})
+            return Response(url, cookies=["login_session=private-cookie; Path=/; Secure"])
+        if path == "/log-in":
+            return Response(url, cookies=["login_session=private-cookie; Path=/; Secure"])
+        if path == "/api/accounts/authorize/continue":
+            self.identifiers += 1
+            if self.o.get("invalid_auth_step") and self.identifiers == 1:
+                return Response(url, 400, {"error": {"code": "invalid_auth_step"}})
+            if self.o.get("passkey"):
+                return Response(url, body={"page": {"type": "auth_challenge"}, "continue_url": "/auth-challenge"})
+            if self.o.get("direct_consent"):
+                return self.consent(url)
+            if self.o.get("password") or self.o.get("passwordless"):
+                return Response(url, body={"page": {"type": "login_password"}, "continue_url": "/log-in/password"})
+            return Response(url, body={"page": {"type": "email_otp_verification"}, "continue_url": "/email-verification"})
+        if path == "/api/accounts/password/verify":
+            if self.o.get("totp"):
+                return Response(url, body={"page": {"type": "mfa_challenge", "payload": {"factors": [{"id": "factor-1", "factor_type": "totp"}]}}, "continue_url": "/mfa-challenge"})
+            return Response(url, body={"page": {"type": "email_otp_verification"}, "continue_url": "/email-verification"})
+        if path.endswith(("email-otp/resend", "email-otp/send", "passwordless/send-otp")):
+            return Response(url, 404 if self.o.get("resend_fallback") and path.endswith("resend") else 200)
+        if path == "/api/accounts/mfa/issue_challenge":
+            return Response(url)
+        if path.endswith(("email-otp/validate", "mfa/verify")):
+            if self.o.get("validate_error"):
+                return Response(url, self.o.get("validate_status", 403), {"error": {"code": self.o["validate_error"], "message": self.o["validate_error"]}})
+            if self.o.get("phone"):
+                return Response(url, body={"page": {"type": "add_phone"}, "continue_url": "/add-phone"})
+            return self.consent(url)
+        if path == "/add-phone":
+            return Response(url)
+        if path == "/api/accounts/add-phone/send":
+            self.phones += 1
+            if self.phones <= self.o.get("reject_phones", 0):
+                return Response(url, 400, {"error": {"code": "fraud_guard", "message": "fraud_guard"}})
+            return Response(url, body={"continue_url": "/phone-verification"})
+        if path == "/api/accounts/phone-otp/validate":
+            if self.o.get("phone_rate_limit"):
+                return Response(url, 429, {"error": {"code": "rate_limit"}})
+            return self.consent(url)
+        if path == "/sign-in-with-chatgpt/codex/consent":
+            return Response(url, body="<html>Consent</html>")
+        if path == "/api/accounts/workspace/select":
+            return Response(url, body={"data": {"orgs": [{"id": "org-1", "projects": [{"id": "project-1"}]}]}})
+        if path == "/api/accounts/organization/select":
+            return Response(url, 302, location=self.callback())
+        raise AssertionError("Unexpected HTTP request: " + method + " " + path)
 
     def post(self, url, **kwargs):
         return self.request("POST", url, **kwargs)
 
-    def close(self):
-        self.closed = True
+    def mail(self, url, **kwargs):
+        self.mail_calls.append(self.identifiers)
+        code = "111111" if not self.identifiers or self.o.get("old_code_only") else "234567"
+        return "<title>OpenAI verification code</title><p>Your code is " + code + "</p>"
+
+    def run(self, **payload):
+        with patch("curl_cffi.requests.request", side_effect=self.request), patch("curl_cffi.requests.post", side_effect=self.post), patch.object(core, "http_request_text", side_effect=self.mail), patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("unexpected real network in fixture")), patch.object(core.time, "sleep", side_effect=self.sleeps.append), contextlib.redirect_stderr(self.logs):
+            return run({"email": "fixture@example.com", "pickup_url": "https://mail.example/pickup/private", "proxy": "http://user:proxy-password@proxy.example:8080", **payload})
 
 
-class ConsentTests(unittest.TestCase):
-    def setUp(self):
-        self.events = patch.object(oauth, "emit_event").start()
-        self.addCleanup(patch.stopall)
+class FakeProvider:
+    def __init__(self):
+        self.count, self.released = 0, []
 
-    def flow(self, session):
-        return oauth.ManagerConsentFlow(session, AUTH, REDIRECT, "test-state")
+    def config_ready(self, cfg):
+        return True
 
-    def test_missing_cookie_can_redirect_directly_to_callback(self):
-        session = Session([("GET", CONSENT, Response(302, location=CALLBACK))])
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
-        self.assertEqual(len(session.calls), 1)
+    def acquire(self, cfg):
+        self.count += 1
+        return {"ok": True, "activation_id": str(self.count), "phone_number": "+1555000000" + str(self.count)}
 
-    def test_consent_get_populates_cookie_before_workspace_select(self):
-        session = Session([
-            ("GET", CONSENT, Response(cookie={"workspaces": [{"id": "team-1"}]})),
-            ("POST", WORKSPACE, Response(data={"page": {"type": "external_url"}, "continue_url": CALLBACK})),
-        ])
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
-        request = session.calls[1][2]
-        self.assertEqual(json.loads(request["data"]), {"workspace_id": "team-1"})
-        self.assertEqual(request["headers"]["referer"], CONSENT)
-        self.assertEqual(request["timeout"], 45)
-        self.assertFalse(request["allow_redirects"])
+    def fetch_code(self, row):
+        return {"found": True, "code": "456789"}
 
-    def test_existing_cookie_does_not_skip_consent_get(self):
-        session = Session([("GET", CONSENT, Response(302, location=CALLBACK))], cookie={"workspaces": [{"id": "team-1"}]})
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
-        self.assertEqual([call[0] for call in session.calls], ["GET"])
+    def release(self, row, ok):
+        self.released.append((row["id"], ok))
+        return {"ok": True}
 
-    def test_missing_cookie_reuses_authorize_and_pkce(self):
-        session = Session([
-            ("GET", CONSENT, Response()),
-            ("GET", AUTH, Response(302, location="/sign-in-with-chatgpt/codex/consent")),
-            ("GET", CONSENT, Response(303, location=CALLBACK)),
-        ])
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
-        self.assertTrue(any(call.args[1] == "authorize_fallback" for call in self.events.call_args_list))
 
-    def test_no_continue_url_starts_authorize(self):
-        session = Session([("GET", AUTH, Response(302, location=CALLBACK))])
-        self.assertEqual(self.flow(session).resolve(""), CALLBACK)
+class ProtocolFlowTests(unittest.TestCase):
+    def success(self, s, **payload):
+        result = s.run(**payload)
+        self.assertTrue(result.get("success"), result)
+        self.assertEqual(result["refresh_token"], "private-rt")
+        self.assertEqual(result["account_id"], "account-1")
 
-    def test_missing_context_reports_final_route_not_missing_cookie(self):
-        session = Session([("GET", CONSENT, Response()), ("GET", AUTH, Response())])
-        with self.assertRaisesRegex(RuntimeError, "did not return callback code"):
-            self.flow(session).resolve(CONSENT)
-        self.assertEqual(len(session.calls), 2)
+    def test_full_http_chain_headers_cookie_pkce(self):
+        s = Scenario()
+        self.success(s)
+        self.assertEqual(s.mail_calls[:2], [0, 1])
+        self.assertIn(16, s.sleeps)
+        api = [c for c in s.calls if c["path"].startswith("/api/accounts/")]
+        self.assertTrue(all("login_session=private-cookie" in c["headers"].get("Cookie", "") for c in api))
+        self.assertTrue(all(c["impersonate"] == "chrome131" for c in s.calls))
+        self.assertTrue(all(c["proxies"]["https"] == "http://user:proxy-password@proxy.example:8080" for c in s.calls))
+        self.assertTrue(all(c.get("allow_redirects") is False for c in api))
+        otp = next(c for c in api if c["path"].endswith("email-otp/validate"))
+        self.assertIn("openai-sentinel-token", otp["headers"])
+        self.assertEqual(otp["body"], {"code": "234567"})
+        self.assertEqual(next(c for c in api if c["path"].endswith("organization/select"))["body"], {"org_id": "org-1", "project_id": "project-1"})
 
-    def test_cookie_encoding_variants_match_manager(self):
-        data = {"workspaces": [{"id": "team-1"}]}
-        raw = encoded(data)
-        for value in (raw, raw + ".timestamp.signature", quote('"' + raw + '.timestamp.signature"'), "." + raw + ".signature"):
-            with self.subTest(value=value):
-                self.assertEqual(self.flow(Session(cookie=value)).session_data(), data)
+    def test_bootstrap_fallback_json_and_reinitialization(self):
+        for options in ({"first_blocked": True}, {"bootstrap_json": True}, {"invalid_auth_step": True}):
+            with self.subTest(options=options):
+                s = Scenario(**options)
+                self.success(s)
+                self.assertNotIn(900, s.sleeps)
+                if options.get("first_blocked"):
+                    self.assertEqual([c["path"] for c in s.calls[:2]], ["/oauth/authorize", "/api/oauth/oauth2/auth"])
+                if options.get("invalid_auth_step"):
+                    self.assertEqual(s.identifiers, 2)
 
-    def test_invalid_cookie_is_not_a_fatal_error(self):
-        self.assertEqual(self.flow(Session(cookie="invalid%%%value")).session_data(), {})
+    def test_both_authorize_routes_blocked_do_not_send_otp(self):
+        s = Scenario(both_blocked=True)
+        r = s.run()
+        self.assertEqual(r["error_code"], "oauth_session_missing")
+        self.assertTrue(r["retryable"])
+        self.assertEqual(r["http_status"], 403)
+        self.assertFalse(r.get("dead"))
+        self.assertEqual(s.identifiers, 0)
+        self.assertEqual(s.mail_calls, [])
 
-    def test_direct_workspace_fields(self):
-        for field in ("workspace_id", "workspaceId"):
-            session = Session([
-                ("GET", CONSENT, Response()),
-                ("POST", WORKSPACE, Response(302, location=CALLBACK)),
-            ], cookie={field: "team-1"})
-            self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
+    def test_network_retry_same_context(self):
+        s = Scenario(network_failure=True)
+        self.assertTrue(s.run()["retryable"])
+        self.assertEqual(len(s.calls), 6)
+        self.assertEqual([round(value, 2) for value in s.sleeps], [0.6, 1.3, 0.6, 1.3])
+        self.assertEqual(len({c["headers"].get("Cookie") for c in s.calls}), 1)
 
-    def test_organization_project_is_included(self):
-        org = {"id": "org-1", "projects": [{"id": "project-1"}]}
-        session = Session([
-            ("GET", CONSENT, Response()),
-            ("POST", WORKSPACE, Response(data={"data": {"orgs": [org]}})),
-            ("POST", ORGANIZATION, Response(data={"continue_url": CALLBACK})),
-        ], cookie={"workspaces": [{"id": "team-1"}]})
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
-        self.assertEqual(json.loads(session.calls[-1][2]["data"]), {"org_id": "org-1", "project_id": "project-1"})
+    def test_password_passwordless_totp_and_direct_consent(self):
+        for options, payload in [({"password": True}, {"gpt_password": "private-password"}), ({"passwordless": True, "resend_fallback": True}, {}), ({"password": True, "totp": True}, {"gpt_password": "private-password", "totp_secret": "JBSWY3DPEHPK3PXP"}), ({"direct_consent": True}, {})]:
+            with self.subTest(options=options):
+                s = Scenario(**options)
+                self.success(s, **payload)
+                if options.get("direct_consent"):
+                    self.assertEqual(s.mail_calls, [0])
+                    self.assertNotIn("/api/accounts/email-otp/validate", [c["path"] for c in s.calls])
 
-    def test_organization_can_come_from_cookie(self):
-        session = Session([
-            ("GET", CONSENT, Response()),
-            ("POST", WORKSPACE, Response(data={})),
-            ("POST", ORGANIZATION, Response(302, location=CALLBACK)),
-        ], cookie={"workspace_id": "team-1", "orgs": [{"id": "org-1"}]})
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
-        self.assertEqual(json.loads(session.calls[-1][2]["data"]), {"org_id": "org-1"})
+    def test_passkey_and_missing_totp_not_retryable(self):
+        for options, payload, code in [({"passkey": True}, {}, "passkey_or_challenge"), ({"password": True, "totp": True}, {"gpt_password": "pw"}, "totp_secret_missing")]:
+            with self.subTest(code=code):
+                result = Scenario(**options).run(**payload)
+                self.assertEqual(result["error_code"], code)
+                self.assertFalse(result["retryable"])
+                self.assertFalse(result.get("dead"))
 
-    def test_choose_account_uses_session_select(self):
-        choose = "https://auth.openai.com/choose-an-account"
-        session = Session([
-            ("GET", choose, Response(text='<input value="us_test123456789012"/>')),
-            ("POST", "https://auth.openai.com/api/accounts/session/select", Response(data={"continue_url": CALLBACK})),
-        ])
-        self.assertEqual(self.flow(session).resolve(choose), CALLBACK)
-        self.assertEqual(json.loads(session.calls[-1][2]["data"]), {"session_id": "us_test123456789012"})
+    def test_old_code_fallback_after_all_polls(self):
+        s = Scenario(old_code_only=True)
+        self.success(s)
+        self.assertEqual(len(s.mail_calls), 4)
+        self.assertEqual(s.sleeps.count(30), 3)
+        self.assertEqual(next(c for c in s.calls if c["path"].endswith("email-otp/validate"))["body"], {"code": "111111"})
 
-    def test_no_valid_organizations_uses_authorize_fallback(self):
-        session = Session([
-            ("GET", CONSENT, Response()),
-            ("POST", WORKSPACE, Response(400, data={"error": {"code": "no_valid_organizations"}})),
-            ("GET", AUTH, Response(302, location=CALLBACK)),
-        ], cookie={"workspace_id": "team-1"})
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
+    def test_dead_and_non_dead_errors(self):
+        for code in sorted(bridge.DEAD_CODES):
+            with self.subTest(code=code):
+                s = Scenario(validate_error=code)
+                result = s.run()
+                self.assertTrue(result["dead"])
+                self.assertEqual(result["error_code"], code)
+                self.assertFalse(result["retryable"])
+                self.assertEqual(s.tokens, 0)
+        for status, code in [(403, "forbidden"), (429, "rate_limit"), (400, "invalid_auth_step"), (400, "invalid_code")]:
+            with self.subTest(code=code):
+                result = Scenario(validate_error=code, validate_status=status).run()
+                self.assertFalse(result["success"])
+                self.assertFalse(result.get("dead"))
 
-    def test_relative_redirects_preserve_query(self):
-        session = Session([
-            ("GET", CONSENT, Response(307, location="/oauth/next?key=value")),
-            ("GET", "https://auth.openai.com/oauth/next?key=value", Response(308, location=CALLBACK)),
-        ])
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
+    def test_token_5xx_retry_and_4xx_stop(self):
+        s = Scenario(token_failures=2)
+        self.success(s)
+        self.assertEqual(s.tokens, 3)
+        self.assertEqual(s.sleeps.count(1.5), 2)
+        s = Scenario(token_failures=2, token_status=400)
+        self.assertFalse(s.run()["success"])
+        self.assertEqual(s.tokens, 1)
 
-    def test_callback_connection_error_is_captured(self):
-        session = Session([("GET", CONSENT, ConnectionError("Connection failed: " + CALLBACK))])
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
+    def test_sms_only_on_addphone_replaces_rejected_number(self):
+        provider = FakeProvider()
+        with patch.object(core.sp, "get_sms_provider", return_value=provider):
+            self.success(Scenario(), sms_provider="hero_sms", sms_config={"enabled": True})
+        self.assertEqual(provider.count, 0)
+        s = Scenario(phone=True, reject_phones=1)
+        with patch.object(core.sp, "get_sms_provider", return_value=provider):
+            self.success(s, sms_provider="hero_sms", sms_config={"enabled": True})
+        self.assertEqual(provider.count, 2)
+        self.assertEqual(provider.released, [("hero_sms:1", False), ("hero_sms:2", True)])
+        for c in s.calls:
+            if c["path"].endswith(("add-phone/send", "phone-otp/validate")):
+                self.assertNotIn("openai-sentinel-token", c["headers"])
 
-    def test_network_failure_is_not_swallowed(self):
-        session = Session([("GET", CONSENT, TimeoutError("network timeout"))])
-        with self.assertRaises(TimeoutError):
-            self.flow(session).resolve(CONSENT)
+    def test_sms_rate_limit_and_three_rejections_stop(self):
+        for options, count, code, retry in [({"phone_rate_limit": True}, 1, "phone_2fa_rate_limited", True), ({"reject_phones": 3}, 3, "phone_2fa_failed", False)]:
+            with self.subTest(options=options):
+                p = FakeProvider()
+                s = Scenario(phone=True, **options)
+                with patch.object(core.sp, "get_sms_provider", return_value=p):
+                    r = s.run(sms_provider="hero_sms", sms_config={"enabled": True})
+                self.assertEqual(r["error_code"], code)
+                self.assertEqual(r["retryable"], retry)
+                self.assertEqual(p.count, count)
+                self.assertEqual(s.tokens, 0)
 
-    def test_state_mismatch_stops_before_localhost_request(self):
-        session = Session([("GET", CONSENT, Response(302, location=CALLBACK.replace("test-state", "other-state")))])
+    def test_logs_have_routing_but_no_credentials(self):
+        s = Scenario(first_blocked=True)
+        self.success(s, gpt_password="private-password")
+        text = s.logs.getvalue()
+        for value in ("private-at", "private-rt", "private-cookie", "private-sentinel", "private-password", "proxy-password", "code=private-code"):
+            self.assertNotIn(value, text)
+        self.assertIn('"http_status":403', text)
+        self.assertIn("login_session", text)
+
+    def test_account_cookie_pkce_and_proxy_isolation(self):
+        a = ProjectProtocolLogin("a", {"proxy": "http://a.example:8080"})
+        b = ProjectProtocolLogin("b", {"proxy": "socks5://b.example:1080"})
+        a.prepare_oauth_authorize_url()
+        b.prepare_oauth_authorize_url()
+        a.set_cookie("login_session", "account-a", "auth.openai.com")
+        self.assertEqual(b.cookie_value("login_session"), "")
+        self.assertNotEqual(a.oauth_code_verifier, b.oauth_code_verifier)
+        self.assertNotEqual(a.oauth_state, b.oauth_state)
+        self.assertEqual(core._cffi_proxies(b.proxy_url)["https"], "socks5h://b.example:1080")
         with self.assertRaisesRegex(RuntimeError, "state mismatch"):
-            self.flow(session).resolve(CONSENT)
-        self.assertEqual(len(session.calls), 1)
+            a.exchange_oauth_callback("http://localhost:1455/auth/callback?code=x&state=wrong")
 
-    def test_callback_error_and_missing_code_stop_locally(self):
-        for value, error in ((REDIRECT + "?error=access_denied", "callback error"), (REDIRECT, "missing authorization code")):
-            with self.assertRaisesRegex(RuntimeError, error):
-                self.flow(Session()).resolve(value)
-
-    def test_unrelated_code_url_is_not_callback(self):
-        self.assertFalse(self.flow(Session()).is_callback("https://example.com/?code=wrong"))
-        self.assertFalse(self.flow(Session()).is_callback("http://localhost.example.com:1455/auth/callback?code=wrong"))
-
-    def test_final_response_callback_url_is_recognized(self):
-        session = Session([("GET", CONSENT, Response(url=CALLBACK))])
-        self.assertEqual(self.flow(session).resolve(CONSENT), CALLBACK)
-
-    def test_redirect_cycles_are_bounded(self):
-        session = Session([("GET", AUTH, Response(302, location=AUTH)) for _ in range(18)])
-        with self.assertRaisesRegex(RuntimeError, "did not return callback code"):
-            self.flow(session).resolve("")
-        self.assertEqual(len(session.calls), 18)
-
-    def test_explicit_dead_error_retains_stage_and_status(self):
-        session = Session([("GET", CONSENT, Response(403, data={"error": {"code": "account_deactivated", "message": "Account deactivated"}}))])
-        with self.assertRaises(oauth.OAuthStepError) as raised:
-            self.flow(session).resolve(CONSENT)
-        self.assertEqual(raised.exception.error_code, "account_deactivated")
-        self.assertEqual(raised.exception.stage, "consent")
-        self.assertEqual(raised.exception.http_status, 403)
-
-    def test_ordinary_errors_are_not_dead_accounts(self):
-        for status in (400, 401, 403, 429, 502):
-            with self.subTest(status=status):
-                error = oauth.OAuthStepError("consent", Response(status, data={"error": {"code": "temporary_error"}}))
-                self.assertEqual(error.error_code, "")
-
-    def test_token_error_description_is_retained(self):
-        response = Response(400, data={"error": "invalid_grant", "error_description": "Authorization code expired"})
-        error = oauth.OAuthStepError("oauth_token", response)
-        self.assertIn("Authorization code expired", str(error))
-        self.assertEqual(oauth.response_shape(response)["error_code"], "invalid_grant")
-
-    def test_response_metadata_never_contains_cookie_values(self):
-        session = Session(cookie={"workspace_id": "private-workspace"})
-        response = Response(data={"oai-client-auth-session": "secret-session", "continue_url": CALLBACK})
-        shape = oauth.response_shape(response, session)
-        self.assertTrue(shape["auth_session_cookie_present"])
-        self.assertEqual(shape["auth_session_body_type"], "str")
-        text = json.dumps(shape)
-        self.assertNotIn("secret-session", text)
-        self.assertNotIn("private-workspace", text)
-        self.assertNotIn("test-code", text)
-
-    def test_independent_sessions_do_not_share_workspaces(self):
-        def run(index):
-            wid = "team-" + str(index)
-            session = Session([
-                ("GET", CONSENT, Response(cookie={"workspace_id": wid})),
-                ("POST", WORKSPACE, Response(302, location=CALLBACK)),
-            ])
-            self.flow(session).resolve(CONSENT)
-            return json.loads(session.calls[-1][2]["data"])["workspace_id"]
-        with ThreadPoolExecutor(max_workers=4) as workers:
-            self.assertEqual(list(workers.map(run, range(12))), ["team-" + str(i) for i in range(12)])
-
-
-class FullOAuthTests(unittest.TestCase):
-    def run_flow(self, token_responses, otp_statuses=(200,), consent_response=None, phone=False):
-        routes = [("POST", "https://auth.openai.com/api/accounts/email-otp/resend", Response(data={}))]
-        for status in otp_statuses:
-            step = {"continue_url": "https://auth.openai.com/add-phone" if phone else CONSENT,
-                    "page": {"type": "add_phone" if phone else "sign_in_with_chatgpt_codex_consent"},
-                    "oai-client-auth-session": "not-a-cookie"}
-            data = step if status == 200 else {"error": {"code": "wrong_email_otp_code"}}
-            routes.append(("POST", "https://auth.openai.com/api/accounts/email-otp/validate", Response(status, data=data)))
-            if status != 200:
-                routes.append(("POST", "https://auth.openai.com/api/accounts/email-otp/resend", Response(data={})))
-        routes.append(("GET", CONSENT, consent_response or Response(302, location=CALLBACK)))
-        session = Session(routes)
-        exchanges = [Session([("POST", TOKEN, response)]) for response in token_responses]
-        co = types.SimpleNamespace(
-            _generate_pkce=lambda: ("test-verifier", "test-challenge"), _generate_state=lambda: "test-state",
-            _build_authorize_url=lambda *args, **kwargs: AUTH,
-            _bootstrap_authorize=lambda *args, **kwargs: Response(url=AUTH), human_delay=lambda *args: None,
-            _submit_email=lambda *args: Response(data={"page": {"payload": {"passwordless_disabled": False}}}),
-            _resp_json=lambda response: response.json(), _extract_continue_url_from_step=oauth.next_auth_url,
-            _needs_phone_verification=lambda *args: phone, _needs_add_phone=lambda *args: phone,
-            _do_phone_verification=lambda *args: {"continue_url": CONSENT},
-            _extract_code=lambda url, state: parse_qs(urlparse(url).query)["code"][0],
-            _parse_id_token=lambda value: {"account_id": "team-1"},
-        )
-        cfg = types.SimpleNamespace(CODEX_REDIRECT_URI=REDIRECT, CODEX_TOKEN_URL=TOKEN, CODEX_CLIENT_ID="test-client")
-        factory = types.SimpleNamespace(BrowserSession=lambda **kwargs: session)
-        with patch.dict("sys.modules", {"core.session": factory}), patch.object(oauth.requests, "Session", side_effect=exchanges), \
-                patch.object(oauth.time, "sleep"), patch.object(oauth, "emit_event"), contextlib.redirect_stderr(io.StringIO()):
-            self.session, self.exchanges = session, exchanges
-            return oauth.manager_style_oauth("test@example.com", "http://test-proxy:8080", lambda *args, **kwargs: "123456", cfg, co)
-
-    def test_exported_log_401_401_200_then_no_cookie_succeeds(self):
-        result = self.run_flow([Response(data={"access_token": "test-at", "refresh_token": "test-rt"})], (401, 401, 200))
-        self.assertTrue(result["success"])
-        self.assertEqual(result["refresh_token"], "test-rt")
-        self.assertTrue(self.session.closed)
-        self.assertTrue(self.exchanges[0].closed)
-        request = self.exchanges[0].calls[0][2]
-        self.assertEqual(request["data"]["code_verifier"], "test-verifier")
-        self.assertEqual(request["data"]["code"], "test-code")
-        self.assertEqual(self.exchanges[0].proxies["https"], "http://test-proxy:8080")
-
-    def test_phone_success_uses_returned_continue_url(self):
-        result = self.run_flow([Response(data={"access_token": "test-at", "refresh_token": "test-rt"})], phone=True)
-        self.assertTrue(result["success"])
-
-    def test_token_5xx_retries_then_succeeds(self):
-        result = self.run_flow([Response(502, data={}), Response(data={"access_token": "test-at", "refresh_token": "test-rt"})])
-        self.assertTrue(result["success"])
-        self.assertTrue(all(exchange.closed for exchange in self.exchanges))
-
-    def test_token_network_error_retries_then_succeeds(self):
-        result = self.run_flow([TimeoutError("network timeout"), Response(data={"access_token": "test-at", "refresh_token": "test-rt"})])
-        self.assertTrue(result["success"])
-        self.assertTrue(all(exchange.closed for exchange in self.exchanges))
-
-    def test_token_4xx_does_not_reuse_authorization_code(self):
-        with self.assertRaisesRegex(oauth.OAuthStepError, "oauth_token HTTP 400"):
-            self.run_flow([Response(400, data={"error": {"code": "invalid_grant"}})])
-        self.assertEqual(len(self.exchanges[0].calls), 1)
-        self.assertTrue(self.exchanges[0].closed)
-        self.assertTrue(self.session.closed)
-
-    def test_missing_refresh_token_is_not_success(self):
-        with self.assertRaises(RuntimeError):
-            self.run_flow([Response(data={"access_token": "test-at"})])
-
-    def test_dead_during_consent_returns_structured_result(self):
-        result = self.run_flow([], consent_response=Response(403, data={"error": {"code": "account_deleted"}}))
-        self.assertTrue(result["dead"])
-        self.assertEqual(result["stage"], "consent")
-        self.assertEqual(result["http_status"], 403)
-        self.assertFalse(result["success"])
-        self.assertTrue(self.session.closed)
+    def test_upstream_source_manifest(self):
+        directory = Path(core.__file__).parent
+        manifest = json.loads((directory / "parity.json").read_text(encoding="utf-8"))
+        tree = ast.parse(Path(core.__file__).read_text(encoding="utf-8"))
+        nodes = {}
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.ClassDef)):
+                nodes[n.name] = n
+                if isinstance(n, ast.ClassDef):
+                    for m in n.body:
+                        if isinstance(m, ast.FunctionDef):
+                            nodes[n.name + "." + m.name] = m
+        for name, expected in manifest["identical_ast_sha256"].items():
+            with self.subTest(method=name):
+                self.assertEqual(hashlib.sha256(ast.dump(nodes[name], include_attributes=False).encode()).hexdigest(), expected)
 
 
 if __name__ == "__main__":

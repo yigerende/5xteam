@@ -456,7 +456,10 @@ func (s *Server) adminAccountCapacity(w http.ResponseWriter, r *http.Request) {
 	// automatic rotation scheduler. The scheduler intentionally uses this
 	// locally refreshed snapshot and does not poll the upstream endpoint on
 	// every trigger.
-	_ = s.store.SaveAdminCapacitySnapshot(profile.ID, capacity)
+	if err := s.store.SaveAdminCapacitySnapshot(profile.ID, capacity); err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, "席位已读取，但数据库快照保存失败: "+err.Error())
+		return
+	}
 	writeAPI(w, http.StatusOK, capacity, "")
 }
 
@@ -474,13 +477,46 @@ func (s *Server) adminCapacitySnapshots(w http.ResponseWriter, _ *http.Request) 
 	result := make(map[string]model.AdminSeatCapacity)
 	for id, snapshot := range snapshots {
 		if _, ok := active[id]; ok {
-			inside, inFlight := s.premiumUsageForAdminWithTasks(id, accounts, tasks)
-			snapshot.Premium.Used = inside
-			snapshot.Premium.Remaining = maxInt(0, snapshot.Premium.Total-inside-inFlight)
+			standardInside, standardInFlight := seatUsageForAdminSnapshot(id, false, accounts, tasks)
+			premiumInside, premiumInFlight := seatUsageForAdminSnapshot(id, true, accounts, tasks)
+			snapshot.Standard.Used = standardInside
+			snapshot.Standard.Remaining = maxInt(0, snapshot.Standard.Total-standardInside-standardInFlight)
+			snapshot.Premium.Used = premiumInside
+			snapshot.Premium.Remaining = maxInt(0, snapshot.Premium.Total-premiumInside-premiumInFlight)
 			result[id] = snapshot
 		}
 	}
 	writeAPI(w, http.StatusOK, result, "")
+}
+
+func seatUsageForAdminSnapshot(adminID string, premium bool, accounts []model.FreeAccountProfile, tasks []model.AutoRotationTask) (inside, inFlight int) {
+	byID := make(map[string]model.FreeAccountProfile, len(accounts))
+	pending := make(map[string]struct{})
+	for _, account := range accounts {
+		byID[account.ID] = account
+		if account.AdminAccountID != adminID || isPremiumSeatType(account.SeatType) != premium || account.RemoveStatus == "completed" {
+			continue
+		}
+		if account.AcceptStatus == "completed" {
+			inside++
+			continue
+		}
+		switch account.InviteStatus {
+		case "pending", "running", "completed":
+			pending[account.ID] = struct{}{}
+		}
+	}
+	for _, task := range tasks {
+		if task.AdminAccountID != adminID || isPremiumSeatType(task.SeatType) != premium || (task.Status != "queued" && task.Status != "running") {
+			continue
+		}
+		account, ok := byID[task.AccountID]
+		if !ok || account.AcceptStatus == "completed" || account.RemoveStatus == "completed" {
+			continue
+		}
+		pending[account.ID] = struct{}{}
+	}
+	return inside, len(pending)
 }
 
 type openAIAccountInput struct {

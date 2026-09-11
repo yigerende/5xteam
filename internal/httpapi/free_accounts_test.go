@@ -388,6 +388,29 @@ func TestSuccessfulReloginClearsConsecutiveFailureState(t *testing.T) {
 	}
 }
 
+func TestQuotaRemovalDueUsesRemainingPercentageThreshold(t *testing.T) {
+	tests := []struct {
+		name      string
+		window    *model.FreeQuotaWindow
+		threshold float64
+		want      bool
+	}{
+		{name: "no quota window", threshold: 10, want: false},
+		{name: "above threshold", window: &model.FreeQuotaWindow{UsedPercent: 89}, threshold: 10, want: false},
+		{name: "equal threshold", window: &model.FreeQuotaWindow{UsedPercent: 90}, threshold: 10, want: true},
+		{name: "below threshold", window: &model.FreeQuotaWindow{UsedPercent: 95}, threshold: 10, want: true},
+		{name: "legacy exhausted only", window: &model.FreeQuotaWindow{UsedPercent: 100}, threshold: 0, want: true},
+		{name: "legacy not exhausted", window: &model.FreeQuotaWindow{UsedPercent: 99.9}, threshold: 0, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := quotaRemovalDue(test.window, test.threshold); got != test.want {
+				t.Fatalf("quotaRemovalDue()=%v want=%v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestReloginOAuthCompletionWritesNewTokensToMailAccount(t *testing.T) {
 	dataStore, err := store.Open(t.TempDir())
 	if err != nil {

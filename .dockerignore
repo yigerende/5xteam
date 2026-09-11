@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/__pycache__
+**/*.pyc
+data
+data-qa-mail
+data-pro-qa
+run-logs
+*.exe
+*.exe~
+*.log
+.env

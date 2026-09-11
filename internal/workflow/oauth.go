@@ -79,10 +79,27 @@ func ExchangeOpenAIOAuthCode(ctx context.Context, code, verifier string, setting
 }
 
 func exchangeOpenAIOAuthCodeAt(ctx context.Context, endpoint, code, verifier string, settings model.Settings) (OAuthTokenSet, error) {
-	return requestOAuthTokenAt(ctx, endpoint, url.Values{
+	form := url.Values{
 		"grant_type": {"authorization_code"}, "client_id": {openAIClientID}, "code": {strings.TrimSpace(code)},
 		"redirect_uri": {OpenAIOAuthRedirectURI}, "code_verifier": {strings.TrimSpace(verifier)},
-	}, settings, "OAuth 授权码交换")
+	}
+	// The browser-link flow already owns a PKCE session. Like the protocol
+	// manager, token exchange retries network/5xx only, on the same proxy.
+	for attempt := 1; ; attempt++ {
+		result, err := requestOAuthTokenOnce(ctx, endpoint, form, settings, "OAuth 授权码交换")
+		if err == nil || attempt == 3 || !isRetryableOAuthTokenError(err) {
+			return result, err
+		}
+		var nonRetryable nonRetryableOAuthError
+		if errors.As(err, &nonRetryable) || strings.Contains(err.Error(), "HTTP 429") {
+			return result, err
+		}
+		select {
+		case <-ctx.Done():
+			return OAuthTokenSet{}, ctx.Err()
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
 }
 
 func RefreshOAuthTokens(ctx context.Context, refreshToken string, settings model.Settings) (OAuthTokenSet, error) {

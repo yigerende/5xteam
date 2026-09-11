@@ -6,6 +6,7 @@ accounts-response.json
 __pycache__/
 internal/__pycache__/
 frontend/node_modules/
+internal/codex_runtime/manager_oauth/node_modules/
 run-logs/
 .env
 *.exe

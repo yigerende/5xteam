@@ -32,6 +32,7 @@ func (s *Store) CPASettings() (model.CPASettings, string, error) {
 	if settings.QuotaCheckIntervalSeconds < 10 {
 		settings.QuotaCheckIntervalSeconds = 120
 	}
+	normalizeQuotaRemainingThreshold(&settings.QuotaRemainingThresholdPercent)
 	key, err := s.decryptOptional(encrypted)
 	return settings, key, err
 }
@@ -49,6 +50,7 @@ func (s *Store) SaveCPASettings(settings model.CPASettings, key string) (model.C
 	if settings.QuotaCheckIntervalSeconds < 10 {
 		settings.QuotaCheckIntervalSeconds = 120
 	}
+	normalizeQuotaRemainingThreshold(&settings.QuotaRemainingThresholdPercent)
 	var encrypted string
 	_ = s.db.QueryRow("SELECT encrypted_key FROM cpa_settings WHERE id=1").Scan(&encrypted)
 	if strings.TrimSpace(key) != "" {
@@ -65,4 +67,13 @@ func (s *Store) SaveCPASettings(settings model.CPASettings, key string) (model.C
 	}
 	_, err = s.db.Exec(`INSERT INTO cpa_settings(id, profile, encrypted_key) VALUES(1, ?, ?) ON CONFLICT(id) DO UPDATE SET profile=excluded.profile, encrypted_key=excluded.encrypted_key`, string(raw), encrypted)
 	return settings, err
+}
+
+func normalizeQuotaRemainingThreshold(value *float64) {
+	if *value < 0 {
+		*value = 0
+	}
+	if *value > 100 {
+		*value = 100
+	}
 }

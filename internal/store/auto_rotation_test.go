@@ -38,8 +38,8 @@ func TestAdminCapacitySnapshotPersistence(t *testing.T) {
 	defer s.Close()
 	fetched := time.Now().Add(-time.Minute).UTC().Truncate(time.Millisecond)
 	want := model.AdminSeatCapacity{
-		Premium:   model.AdminSeatBucket{Total: 9, Used: 8, Remaining: 1},
-		Standard:  model.AdminSeatBucket{Total: 2, Used: 1, Remaining: 1},
+		Premium:   model.AdminSeatBucket{Total: 9, Used: 8, Remaining: 1, Held: 3},
+		Standard:  model.AdminSeatBucket{Total: 2, Used: 1, Remaining: 1, Held: 1},
 		FetchedAt: fetched,
 	}
 	if err := s.SaveAdminCapacitySnapshot("admin-1", want); err != nil {
@@ -49,7 +49,7 @@ func TestAdminCapacitySnapshotPersistence(t *testing.T) {
 	if !ok {
 		t.Fatal("snapshot not found")
 	}
-	if got.Premium.Total != want.Premium.Total || got.Standard.Total != want.Standard.Total || got.Premium.Used != 0 || got.Premium.Remaining != 0 || got.Standard.Used != 0 || got.Standard.Remaining != 0 || !got.FetchedAt.Equal(want.FetchedAt) {
+	if got.Premium.Total != want.Premium.Total || got.Standard.Total != want.Standard.Total || got.Premium.Used != 0 || got.Premium.Remaining != 0 || got.Premium.Held != 0 || got.Standard.Used != 0 || got.Standard.Remaining != 0 || got.Standard.Held != 0 || !got.FetchedAt.Equal(want.FetchedAt) {
 		t.Fatalf("snapshot mismatch: got=%+v want=%+v", got, want)
 	}
 	all := s.AdminCapacitySnapshots()

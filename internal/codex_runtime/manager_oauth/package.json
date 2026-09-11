@@ -1,0 +1,8 @@
+{
+  "name": "space-merge-oauth-sentinel",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "undici": "6.21.3"
+  }
+}

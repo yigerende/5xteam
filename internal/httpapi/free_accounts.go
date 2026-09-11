@@ -1,8 +1,6 @@
 package httpapi
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -788,7 +786,7 @@ func (s *Server) executeCodexOAuth(email string, progress func(string), diagnost
 				continue
 			}
 			if progress != nil {
-				progress(fmt.Sprintf("OAuth 出口质检通过：%s（HTTP %d，IP %s）", proxyURL, probe.AuthStatus, probe.ExitIP))
+				progress(fmt.Sprintf("OAuth 出口质检通过：%s（HTTP %d，IP %s）", lease.label, probe.AuthStatus, probe.ExitIP))
 			}
 			result, runErr := s.executeCodexOAuthWithProxy(email, proxyURL, lease.label, lease.activeCount, progress, diagnostic)
 			lease.Release()
@@ -837,6 +835,16 @@ func oauthErrorText(result map[string]any, runErr error) string {
 }
 
 func isRetryableOAuthNetworkResult(result map[string]any, runErr error) bool {
+	if result != nil {
+		if dead, _ := result["dead"].(bool); dead {
+			return false
+		}
+		// The vendored protocol distinguishes typed retryable failures from
+		// business failures. Respect both true and false before legacy matching.
+		if retryable, ok := result["retryable"].(bool); ok {
+			return retryable
+		}
+	}
 	text := strings.ToLower(oauthErrorText(result, runErr))
 	if text == "" {
 		return false
@@ -862,8 +870,8 @@ func isRetryableOAuthNetworkResult(result map[string]any, runErr error) bool {
 // this complete OAuth attempt.
 func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, activeCount int, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
 	_, mailCreds, err := s.store.MailAccountCredential(email)
-	if err != nil || strings.TrimSpace(mailCreds.PickupURL) == "" {
-		return nil, errors.New("邮箱未配置取件链接")
+	if err != nil {
+		return nil, errors.New("邮箱账号不存在")
 	}
 	if progress != nil {
 		progress(fmt.Sprintf("已分配 OAuth 代理：%s（当前任务 %d）", proxyLabel, activeCount))
@@ -922,7 +930,9 @@ func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, 
 			}
 		}
 	}
-	payload, _ := json.Marshal(map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword, "proxy": proxyURL, "sms_provider": provider, "sms_config": smsCfg})
+	payload := map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword,
+		"totp_secret": mailCreds.TotpSecret, "proxy": proxyURL, "sms_provider": provider, "sms_config": smsCfg,
+		"allow_sms": settings.AllowSMS, "stdio_rpc": true}
 	python := workflow.FindPython()
 	if python == "" {
 		return nil, errors.New("未找到 Python 运行环境")
@@ -933,49 +943,24 @@ func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, 
 	cmd := exec.CommandContext(ctx, python, script)
 	cmd.Dir, _ = os.Getwd()
 	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1", "PYTHONPATH="+filepath.Join(cmd.Dir, "internal", "codex_runtime"))
-	cmd.Stdin = bytes.NewReader(payload)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	errPipe, e := cmd.StderrPipe()
-	if e != nil {
-		return nil, e
-	}
-	if e = cmd.Start(); e != nil {
-		return nil, e
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		sc := bufio.NewScanner(errPipe)
-		for sc.Scan() {
-			rawLine := strings.TrimSpace(sc.Text())
-			if event, ok := parseProtocolOAuthDiagnostic(rawLine); ok {
-				emitDiagnostic(event)
-				continue
-			}
-			line := strings.TrimSpace(strings.TrimPrefix(rawLine, "[protocol]"))
-			if strings.HasPrefix(line, "<") || strings.Contains(strings.ToLower(line), "<style") {
-				line = "OpenAI 返回 HTML 拒绝页（HTTP 403），请更换代理出口后重试"
-			}
-			if len([]rune(line)) > 300 {
-				line = string([]rune(line)[:300]) + "..."
-			}
-			if line != "" && progress != nil {
-				progress(line)
-			}
+	localRPC := &oauthProtocolRPC{server: s, ctx: ctx, email: email}
+	defer localRPC.close()
+	result, err := runOAuthChild(ctx, cmd, payload, localRPC.call, func(rawLine string) {
+		rawLine = strings.TrimSpace(rawLine)
+		if event, ok := parseProtocolOAuthDiagnostic(rawLine); ok {
+			emitDiagnostic(event)
+			return
 		}
-	}()
-	waitErr := cmd.Wait()
-	<-done
-	if ctx.Err() != nil {
-		waitErr = ctx.Err()
-	}
-	if waitErr != nil {
-		return nil, fmt.Errorf("Codex OAuth 执行失败: %w", waitErr)
-	}
-	var result map[string]any
-	if e := json.Unmarshal(out.Bytes(), &result); e != nil {
-		return nil, fmt.Errorf("解析 Codex OAuth 结果失败: %w", e)
+		line := strings.TrimSpace(strings.TrimPrefix(rawLine, "[protocol]"))
+		if len([]rune(line)) > 500 {
+			line = string([]rune(line)[:500]) + "..."
+		}
+		if line != "" && progress != nil {
+			progress(line)
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("Codex OAuth 执行失败: %w", err)
 	}
 	return result, nil
 }
@@ -1219,10 +1204,13 @@ func (s *Server) performFreeAccountQuota(ctx context.Context, id string, allowAu
 	if err != nil {
 		return model.FreeAccountProfile{}, false, err
 	}
+	requestedAutoRemove := allowAutoRemove
 	allowRelogin := settings.Enable401Check
+	allowAutoRemove = requestedAutoRemove && settings.QuotaEnabled
 	if strings.EqualFold(settings.Provider, "cpa") {
 		if cpaSettings, _, cpaErr := s.store.CPASettings(); cpaErr == nil {
 			allowRelogin = cpaSettings.Enable401Check
+			allowAutoRemove = requestedAutoRemove && cpaSettings.QuotaEnabled
 		}
 	}
 	return s.performFreeAccountQuotaInternal(ctx, id, allowAutoRemove, allowRelogin)
@@ -1253,11 +1241,13 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	var window5H, window7D *model.FreeQuotaWindow
 	var totalCost *float64
 	var costErr error
+	quotaRemovalThreshold := settings.QuotaRemainingThresholdPercent
 	if strings.EqualFold(settings.Provider, "cpa") {
 		cpaSettings, cpaKey, cpaErr := s.store.CPASettings()
 		if cpaErr != nil {
 			err = cpaErr
 		} else {
+			quotaRemovalThreshold = cpaSettings.QuotaRemainingThresholdPercent
 			var five, seven model.FreeQuotaWindow
 			five, seven, err = s.cpa.Quota(ctx, cpaSettings, cpaKey, profile.CPAAuthFileName)
 			if err == nil {
@@ -1357,11 +1347,28 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	if profile.ExhaustionPolicy == "5h" {
 		selected = profile.Quota5H
 	}
-	if selected == nil || selected.UsedPercent < 100 {
+	if !quotaRemovalDue(selected, quotaRemovalThreshold) {
 		return profile, false, nil
 	}
 	profile, err = s.performFreeAccountRemove(ctx, profile.ID)
 	return profile, err == nil, err
+}
+
+func quotaRemovalDue(selected *model.FreeQuotaWindow, remainingThresholdPercent float64) bool {
+	if selected == nil {
+		return false
+	}
+	if remainingThresholdPercent < 0 {
+		remainingThresholdPercent = 0
+	}
+	if remainingThresholdPercent > 100 {
+		remainingThresholdPercent = 100
+	}
+	remainingPercent := 100 - selected.UsedPercent
+	if remainingPercent < 0 {
+		remainingPercent = 0
+	}
+	return remainingPercent <= remainingThresholdPercent
 }
 
 func (s *Server) saveSub2CostSnapshot(accountID, adminID string, downstreamID int64, downstreamTotal float64) (model.FreeAccountProfile, error) {
@@ -2128,15 +2135,17 @@ func (s *Server) getPushSettings(w http.ResponseWriter, _ *http.Request) {
 }
 
 type cpaSettingsInput struct {
-	URL                        string   `json:"url"`
-	Key                        string   `json:"key"`
-	Websockets                 *bool    `json:"websockets"`
-	Enable401Check             *bool    `json:"enable_401_check"`
-	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
-	ReloginFailureLimit        int      `json:"relogin_failure_limit"`
-	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
-	GroupIDs                   []int64  `json:"group_ids"`
-	GroupNames                 []string `json:"group_names"`
+	URL                            string   `json:"url"`
+	Key                            string   `json:"key"`
+	Websockets                     *bool    `json:"websockets"`
+	Enable401Check                 *bool    `json:"enable_401_check"`
+	StatusCheckIntervalSeconds     int      `json:"status_check_interval_seconds"`
+	ReloginFailureLimit            int      `json:"relogin_failure_limit"`
+	QuotaEnabled                   *bool    `json:"quota_enabled"`
+	QuotaCheckIntervalSeconds      int      `json:"quota_check_interval_seconds"`
+	QuotaRemainingThresholdPercent *float64 `json:"quota_remaining_threshold_percent"`
+	GroupIDs                       []int64  `json:"group_ids"`
+	GroupNames                     []string `json:"group_names"`
 }
 
 type pushSettingsInput struct {
@@ -2211,13 +2220,23 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.QuotaCheckIntervalSeconds == 0 {
 			v.QuotaCheckIntervalSeconds = sub.QuotaCheckIntervalSeconds
 		}
+		if v.QuotaEnabled == nil {
+			v.QuotaEnabled = &sub.QuotaEnabled
+		}
+		if v.QuotaRemainingThresholdPercent == nil {
+			v.QuotaRemainingThresholdPercent = &sub.QuotaRemainingThresholdPercent
+		}
+		if *v.QuotaRemainingThresholdPercent < 0 || *v.QuotaRemainingThresholdPercent > 100 {
+			writeAPI(w, http.StatusBadRequest, nil, "自动移出剩余额度阈值必须在 0 到 100 之间")
+			return
+		}
 		if v.Enable401Check == nil {
 			v.Enable401Check = &sub.Enable401Check
 		}
 		if v.CpaWS == nil {
 			v.CpaWS = &sub.CpaWS
 		}
-		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: v.ReloginFailureLimit, QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds}, v.Password)
+		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent}, v.Password)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -2259,7 +2278,17 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.QuotaCheckIntervalSeconds == 0 {
 			v.QuotaCheckIntervalSeconds = cpaSettings.QuotaCheckIntervalSeconds
 		}
-		cpaSettings, err = s.store.SaveCPASettings(model.CPASettings{URL: v.URL, Websockets: boolValue(v.Websockets), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: v.ReloginFailureLimit, QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, GroupIDs: uniquePositiveInt64s(v.GroupIDs), GroupNames: uniqueNonEmptyStrings(v.GroupNames)}, v.Key)
+		if v.QuotaEnabled == nil {
+			v.QuotaEnabled = &cpaSettings.QuotaEnabled
+		}
+		if v.QuotaRemainingThresholdPercent == nil {
+			v.QuotaRemainingThresholdPercent = &cpaSettings.QuotaRemainingThresholdPercent
+		}
+		if *v.QuotaRemainingThresholdPercent < 0 || *v.QuotaRemainingThresholdPercent > 100 {
+			writeAPI(w, http.StatusBadRequest, nil, "自动移出剩余额度阈值必须在 0 到 100 之间")
+			return
+		}
+		cpaSettings, err = s.store.SaveCPASettings(model.CPASettings{URL: v.URL, Websockets: boolValue(v.Websockets), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent, GroupIDs: uniquePositiveInt64s(v.GroupIDs), GroupNames: uniqueNonEmptyStrings(v.GroupNames)}, v.Key)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -2331,21 +2360,23 @@ func (s *Server) getCPAGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type sub2SettingsInput struct {
-	URL                        string   `json:"url"`
-	Email                      string   `json:"email"`
-	Password                   string   `json:"password"`
-	GroupID                    int64    `json:"group_id"`
-	GroupName                  string   `json:"group_name"`
-	GroupIDs                   []int64  `json:"group_ids"`
-	GroupNames                 []string `json:"group_names"`
-	Models                     []string `json:"models"`
-	AccountConcurrency         int      `json:"account_concurrency"`
-	Priority                   int      `json:"priority"`
-	CpaWS                      *bool    `json:"cpa_ws"`
-	Enable401Check             *bool    `json:"enable_401_check"`
-	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
-	ReloginFailureLimit        int      `json:"relogin_failure_limit"`
-	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
+	URL                            string   `json:"url"`
+	Email                          string   `json:"email"`
+	Password                       string   `json:"password"`
+	GroupID                        int64    `json:"group_id"`
+	GroupName                      string   `json:"group_name"`
+	GroupIDs                       []int64  `json:"group_ids"`
+	GroupNames                     []string `json:"group_names"`
+	Models                         []string `json:"models"`
+	AccountConcurrency             int      `json:"account_concurrency"`
+	Priority                       int      `json:"priority"`
+	CpaWS                          *bool    `json:"cpa_ws"`
+	Enable401Check                 *bool    `json:"enable_401_check"`
+	StatusCheckIntervalSeconds     int      `json:"status_check_interval_seconds"`
+	ReloginFailureLimit            int      `json:"relogin_failure_limit"`
+	QuotaEnabled                   *bool    `json:"quota_enabled"`
+	QuotaCheckIntervalSeconds      int      `json:"quota_check_interval_seconds"`
+	QuotaRemainingThresholdPercent *float64 `json:"quota_remaining_threshold_percent"`
 }
 
 func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
@@ -2410,6 +2441,18 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, "额度查询间隔必须在 10 到 86400 秒之间")
 		return
 	}
+	quotaEnabled := current.QuotaEnabled
+	if input.QuotaEnabled != nil {
+		quotaEnabled = *input.QuotaEnabled
+	}
+	quotaRemainingThresholdPercent := current.QuotaRemainingThresholdPercent
+	if input.QuotaRemainingThresholdPercent != nil {
+		quotaRemainingThresholdPercent = *input.QuotaRemainingThresholdPercent
+	}
+	if quotaRemainingThresholdPercent < 0 || quotaRemainingThresholdPercent > 100 {
+		writeAPI(w, http.StatusBadRequest, nil, "自动移出剩余额度阈值必须在 0 到 100 之间")
+		return
+	}
 	input.GroupIDs = uniquePositiveInt64s(input.GroupIDs)
 	if len(input.GroupIDs) == 0 && input.GroupID > 0 {
 		input.GroupIDs = []int64{input.GroupID}
@@ -2422,7 +2465,7 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.store.SaveSub2Settings(model.Sub2Settings{
 		Provider: current.Provider, URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
 		GroupIDs: input.GroupIDs, GroupNames: input.GroupNames, Models: input.Models, AccountConcurrency: input.AccountConcurrency, Priority: input.Priority,
-		CpaWS: cpaWS, Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, ReloginFailureLimit: input.ReloginFailureLimit, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds,
+		CpaWS: cpaWS, Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, ReloginFailureLimit: input.ReloginFailureLimit, QuotaEnabled: quotaEnabled, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: quotaRemainingThresholdPercent,
 	}, input.Password)
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
@@ -2565,11 +2608,13 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 				continue
 			}
 			monitor401Enabled := settings.Enable401Check
+			quotaEnabled := settings.QuotaEnabled
 			statusInterval := time.Duration(settings.StatusCheckIntervalSeconds) * time.Second
 			quotaInterval := time.Duration(settings.QuotaCheckIntervalSeconds) * time.Second
 			if strings.EqualFold(settings.Provider, "cpa") {
 				if cpaSettings, _, cpaErr := s.store.CPASettings(); cpaErr == nil {
 					monitor401Enabled = cpaSettings.Enable401Check
+					quotaEnabled = cpaSettings.QuotaEnabled
 					statusInterval = time.Duration(cpaSettings.StatusCheckIntervalSeconds) * time.Second
 					quotaInterval = time.Duration(cpaSettings.QuotaCheckIntervalSeconds) * time.Second
 				}
@@ -2601,7 +2646,7 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 					continue
 				}
 				statusDue := monitor401Enabled && (account.StatusCheckedAt == nil || now.Sub(*account.StatusCheckedAt) >= statusInterval)
-				quotaDue := account.QuotaCheckedAt == nil || now.Sub(*account.QuotaCheckedAt) >= quotaInterval
+				quotaDue := quotaEnabled && (account.QuotaCheckedAt == nil || now.Sub(*account.QuotaCheckedAt) >= quotaInterval)
 				if statusDue || quotaDue {
 					jobs = append(jobs, monitorJob{account: account, statusDue: statusDue, quotaDue: quotaDue})
 				}
@@ -2631,7 +2676,7 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 						}
 						if job.quotaDue && !reloggedIn {
 							s.auditAccountEvent(ctx, job.account.ID, "quota", "quota", "monitor_quota", provider, "开始批量额度检测", nil)
-							_, _, _ = s.performFreeAccountQuotaInternal(ctx, job.account.ID, true, monitor401Enabled)
+							_, _, _ = s.performFreeAccountQuotaInternal(ctx, job.account.ID, quotaEnabled, monitor401Enabled)
 							s.auditAccountEvent(ctx, job.account.ID, "quota", "quota", "monitor_quota", provider, "批量额度检测完成", nil)
 						}
 						unlock()

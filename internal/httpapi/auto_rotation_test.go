@@ -77,6 +77,29 @@ func TestAverageFreeQuotaReturnsUnknownWithoutQuota(t *testing.T) {
 	}
 }
 
+func TestSeatUsageForAdminSnapshotCountsInsideAndPendingOnce(t *testing.T) {
+	accounts := []model.FreeAccountProfile{
+		{ID: "standard-inside", AdminAccountID: "admin-1", SeatType: "default", AcceptStatus: "completed"},
+		{ID: "standard-pending", AdminAccountID: "admin-1", SeatType: "default", InviteStatus: "completed"},
+		{ID: "premium-inside", AdminAccountID: "admin-1", SeatType: "prolite", AcceptStatus: "completed"},
+		{ID: "premium-pending", AdminAccountID: "admin-1", SeatType: "prolite", InviteStatus: "running"},
+		{ID: "premium-queued", SeatType: "prolite"},
+		{ID: "removed", AdminAccountID: "admin-1", SeatType: "prolite", AcceptStatus: "completed", RemoveStatus: "completed"},
+	}
+	tasks := []model.AutoRotationTask{
+		{AccountID: "premium-pending", AdminAccountID: "admin-1", SeatType: "prolite", Status: "running"},
+		{AccountID: "premium-queued", AdminAccountID: "admin-1", SeatType: "prolite", Status: "queued"},
+	}
+	standardInside, standardPending := seatUsageForAdminSnapshot("admin-1", false, accounts, tasks)
+	if standardInside != 1 || standardPending != 1 {
+		t.Fatalf("standard usage=%d/%d want=1/1", standardInside, standardPending)
+	}
+	premiumInside, premiumPending := seatUsageForAdminSnapshot("admin-1", true, accounts, tasks)
+	if premiumInside != 1 || premiumPending != 2 {
+		t.Fatalf("premium usage=%d/%d want=1/2", premiumInside, premiumPending)
+	}
+}
+
 func TestAutoRotationPlanLimitsByMaxSeatsAndCandidates(t *testing.T) {
 	cases := []struct {
 		name                                    string

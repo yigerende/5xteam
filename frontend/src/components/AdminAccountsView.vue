@@ -38,25 +38,35 @@ function setPage(value) { page.value = value; loadPage() }
 function setPageSize(value) { pageSize.value = value; page.value = 1; loadPage() }
 
 const capacitySummary = computed(() => {
-  const summary = { standard: { total: 0, remaining: 0 }, premium: { total: 0, remaining: 0 }, loaded: 0 }
+  const summary = { standard: { total: 0, remaining: 0 }, premium: { total: 0, remaining: 0 }, loaded: 0, live: 0, remainingLoaded: false }
   for (const value of capacities.value.values()) {
-	if (value?.standard || value?.premium) summary.loaded += 1
+    if (value?.standard || value?.premium) summary.loaded += 1
+    if (!value?.snapshotOnly && !value?.error) summary.live += 1
     for (const key of ['standard', 'premium']) {
       summary[key].total += Number(value?.[key]?.total || 0)
-      summary[key].remaining += Number(value?.[key]?.remaining || 0)
+      if (!value?.snapshotOnly && !value?.error) summary[key].remaining += Number(value?.[key]?.remaining || 0)
     }
   }
+  summary.remainingLoaded = props.accounts.length > 0 && summary.live === props.accounts.length
   return summary
 })
 const teamRotationChildSummary = computed(() => Number(listSummary.child_entries || 0))
+
+async function loadCapacitySnapshots() {
+  const data = await api('/api/admin-capacity-snapshots', { cache: 'no-store' })
+  capacities.value = new Map(Object.entries(data || {}).map(([id, value]) => [/^\d+$/.test(id) ? Number(id) : id, { ...value, snapshotOnly: true }]))
+}
 
 async function loadCapacity(account) {
   const nextBusy = new Set(capacityBusy.value); nextBusy.add(account.id); capacityBusy.value = nextBusy
   try {
     const result = await api(`/api/admin-accounts/${encodeURIComponent(account.id)}/capacity`)
-    const next = new Map(capacities.value); next.set(account.id, result); capacities.value = next
+    const next = new Map(capacities.value); next.set(account.id, { ...result, snapshotOnly: false }); capacities.value = next
+    return true
   } catch (error) {
-    const next = new Map(capacities.value); next.set(account.id, { error: error.message }); capacities.value = next
+    const previous = capacities.value.get(account.id)
+    const next = new Map(capacities.value); next.set(account.id, previous ? { ...previous, error: error.message, snapshotOnly: true } : { error: error.message, snapshotOnly: true }); capacities.value = next
+    return false
   } finally { const next = new Set(capacityBusy.value); next.delete(account.id); capacityBusy.value = next }
 }
 
@@ -64,22 +74,36 @@ async function loadCapacities() {
   if (capacityAllBusy.value || !props.accounts.length) return
   capacityAllBusy.value = true
   try {
-    await Promise.all(props.accounts.map(loadCapacity))
-    setMessage('全部母号席位已刷新', 'success')
-  } finally { capacityAllBusy.value = false }
+    const results = await Promise.all(props.accounts.map(loadCapacity))
+    const succeeded = results.filter(Boolean).length
+    const failed = results.length - succeeded
+    setMessage(failed ? `母号席位刷新完成：成功 ${succeeded}，失败 ${failed}` : '全部母号席位已刷新并保存到数据库', failed ? 'error' : 'success')
+  } catch (error) { setMessage(`席位刷新失败：${error.message}`, 'error') }
+  finally { capacityAllBusy.value = false }
 }
 watch(() => props.accounts.map(account => account.id).join(','), () => {
   const ids = new Set(props.accounts.map(account => account.id))
   capacities.value = new Map([...capacities.value.entries()].filter(([id]) => ids.has(id)))
 })
-function seatText(account, key) { const bucket = capacities.value.get(account.id)?.[key]; return bucket ? `${bucket.remaining} / ${bucket.total}` : '—' }
+function seatText(account, key) {
+  const capacity = capacities.value.get(account.id)
+  const bucket = capacity?.[key]
+  if (!bucket) return '—'
+  return capacity.snapshotOnly ? `— / ${bucket.total}` : `${bucket.remaining} / ${bucket.total}`
+}
 function heldText(account) {
   const capacity = capacities.value.get(account.id)
-  if (!capacity || capacity.error) return '—'
+  if (!capacity || capacity.error || capacity.snapshotOnly) return '—'
   return `普通 ${Number(capacity.standard?.held || 0)} / 5x ${Number(capacity.premium?.held || 0)}`
 }
 function seatError(account) { return capacities.value.get(account.id)?.error || '' }
-function seatTitle(account, key) { const bucket = capacities.value.get(account.id)?.[key]; return bucket ? `剩余 ${bucket.remaining}，总计 ${bucket.total}` : seatError(account) || '点击刷新席位数据' }
+function seatTitle(account, key) {
+  const capacity = capacities.value.get(account.id)
+  const bucket = capacity?.[key]
+  if (!bucket) return seatError(account) || '点击刷新席位数据'
+  if (capacity.snapshotOnly) return `数据库快照总计 ${bucket.total}；剩余和临停请点击刷新席位实时获取`
+  return `实时剩余 ${bucket.remaining}，总计 ${bucket.total}`
+}
 function proxyName(proxyID) { return props.proxies.find(proxy => proxy.id === proxyID)?.name || '跟随全局代理' }
 async function saveProxy(account, proxyID) {
   const nextBusy = new Set(proxySaving.value); nextBusy.add(account.id); proxySaving.value = nextBusy
@@ -226,14 +250,17 @@ async function remove(account) {
     setMessage(`${account.label} 已删除`, 'success')
   } catch (error) { setMessage(error.message, 'error') }
 }
-onMounted(loadPage)
+onMounted(async () => {
+  try { await Promise.all([loadPage(), loadCapacitySnapshots()]) }
+  catch (error) { setMessage(`母号席位快照读取失败：${error.message}`, 'error') }
+})
 </script>
 
 <template>
   <section class="view-stack">
     <header class="page-heading"><div><span class="overline">CREDENTIAL VAULT</span><h1>母号管理</h1><p>维护团队管理员凭据与自动续期状态</p></div><StatusPill tone="success">{{ total }} 个母号</StatusPill></header>
     <nav class="admin-subnav" aria-label="母号管理菜单"><button type="button" :class="{ active: adminMenu === 'add' }" @click="adminMenu = 'add'"><FileJson :size="14" />添加母号</button><button type="button" :class="{ active: adminMenu === 'list' }" @click="adminMenu = 'list'"><CheckCircle2 :size="14" />母号列表 <span>{{ total }}</span></button><button type="button" :class="{ active: adminMenu === 'proxy' }" @click="adminMenu = 'proxy'"><Network :size="14" />母号代理 <span>{{ props.proxies.length }}</span></button></nav>
-    <section class="metric-grid seat-summary"><article class="metric-card"><span>普通席位总量</span><strong>{{ capacitySummary.loaded ? capacitySummary.standard.total : '—' }}</strong><small>剩余 {{ capacitySummary.loaded ? capacitySummary.standard.remaining : '—' }}</small></article><article class="metric-card"><span>高级席位 5x 总量</span><strong>{{ capacitySummary.loaded ? capacitySummary.premium.total : '—' }}</strong><small>剩余 {{ capacitySummary.loaded ? capacitySummary.premium.remaining : '—' }}</small></article><article class="metric-card"><span>普通席位剩余</span><strong>{{ capacitySummary.loaded ? capacitySummary.standard.remaining : '—' }}</strong><small>跨母号汇总</small></article><article class="metric-card"><span>高级席位 5x 剩余</span><strong>{{ capacitySummary.loaded ? capacitySummary.premium.remaining : '—' }}</strong><small>跨母号汇总</small></article><article class="metric-card"><span>累计进入子号总数</span><strong>{{ teamRotationChildSummary }}</strong><small>所有母号累计汇总</small></article></section>
+    <section class="metric-grid seat-summary"><article class="metric-card"><span>普通席位总量</span><strong>{{ capacitySummary.loaded ? capacitySummary.standard.total : '—' }}</strong><small>剩余 {{ capacitySummary.remainingLoaded ? capacitySummary.standard.remaining : '—' }}</small></article><article class="metric-card"><span>高级席位 5x 总量</span><strong>{{ capacitySummary.loaded ? capacitySummary.premium.total : '—' }}</strong><small>剩余 {{ capacitySummary.remainingLoaded ? capacitySummary.premium.remaining : '—' }}</small></article><article class="metric-card"><span>普通席位剩余</span><strong>{{ capacitySummary.remainingLoaded ? capacitySummary.standard.remaining : '—' }}</strong><small>刷新全部后显示实时汇总</small></article><article class="metric-card"><span>高级席位 5x 剩余</span><strong>{{ capacitySummary.remainingLoaded ? capacitySummary.premium.remaining : '—' }}</strong><small>刷新全部后显示实时汇总</small></article><article class="metric-card"><span>累计进入子号总数</span><strong>{{ teamRotationChildSummary }}</strong><small>所有母号累计汇总</small></article></section>
     <div :class="['management-grid', { 'list-only': adminMenu === 'list' || adminMenu === 'proxy' }]">
       <form v-if="adminMenu === 'add'" class="panel editor-panel" @submit.prevent="save">
         <div class="panel-title"><div><span>{{ form.id ? 'EDIT' : 'NEW' }}</span><h2>{{ form.id ? '编辑母号' : '添加母号' }}</h2></div><button v-if="form.id" class="btn ghost" type="button" @click="reset"><X :size="15" />取消</button></div>

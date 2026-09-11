@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from curl_cffi import requests
 
 
-IMPERSONATE = "chrome136"
+IMPERSONATE = "chrome131"
 
 
 def proxy_shape(proxy: str) -> dict:
@@ -101,11 +101,6 @@ def main() -> None:
         )
         first_ip = first["ip"]
         result["egress_first"] = first
-        if not first_ip:
-            result["error_code"] = "proxy_ip_missing"
-            result["error"] = "代理出口检测没有返回 IP"
-            print(json.dumps(result, ensure_ascii=False))
-            return
         result.update({
             "ok": True,
             "retryable": False,
@@ -117,8 +112,10 @@ def main() -> None:
         })
         print(json.dumps(result, ensure_ascii=False))
     except Exception as exc:
-        result["error"] = str(exc)[:300]
-        result["error_code"] = "proxy_egress_failed"
+        # Match the manager: the optional IP trace is diagnostic only. An
+        # unavailable trace must not reject an otherwise reachable auth route.
+        result.update({"ok": True, "retryable": False, "error": "", "error_code": "",
+                       "trace_error": str(exc)[:300]})
         print(json.dumps(result, ensure_ascii=False))
 
 

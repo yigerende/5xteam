@@ -1,8 +1,11 @@
 import base64
 import json
 import sys
+from pathlib import Path
 
 from curl_cffi import requests
+sys.path.insert(0, str(Path(__file__).resolve().parent / "codex_runtime"))
+from manager_oauth.upstream import OPENAI_IMPERSONATE, CPA_PROBE_USER_AGENT, _cffi_proxies
 
 
 def main() -> None:
@@ -12,17 +15,18 @@ def main() -> None:
     form = payload.get("form") if isinstance(payload.get("form"), dict) else {}
     if not endpoint:
         raise RuntimeError("OAuth token endpoint 不能为空")
-    session = requests.Session(impersonate="chrome136")
-    if proxy:
-        session.proxies = {"http": proxy, "https": proxy}
-    response = session.post(
+    if not proxy:
+        raise RuntimeError("OAuth proxy required")
+    response = requests.post(
         endpoint,
         headers={
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "codex_cli_rs",
+            "User-Agent": CPA_PROBE_USER_AGENT,
         },
         data={str(key): str(value) for key, value in form.items()},
+        proxies=_cffi_proxies(proxy),
+        impersonate=OPENAI_IMPERSONATE,
         timeout=int(payload.get("timeout") or 60),
     )
     print(json.dumps({

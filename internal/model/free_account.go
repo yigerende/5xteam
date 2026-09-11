@@ -6,26 +6,28 @@ import "time"
 // The password is encrypted separately by the store.
 type Sub2Settings struct {
 	// Provider selects the active downstream: sub2 (default) or cpa.
-	Provider                   string   `json:"provider"`
-	URL                        string   `json:"url"`
-	Email                      string   `json:"email"`
-	PasswordPresent            bool     `json:"password_present"`
-	GroupID                    int64    `json:"group_id,omitempty"`
-	GroupName                  string   `json:"group_name,omitempty"`
-	GroupIDs                   []int64  `json:"group_ids,omitempty"`
-	GroupNames                 []string `json:"group_names,omitempty"`
-	Models                     []string `json:"models,omitempty"`
-	AccountConcurrency         int      `json:"account_concurrency"`
-	Priority                   int      `json:"priority"`
-	CpaWS                      bool     `json:"cpa_ws"`
-	Enable401Check             bool     `json:"enable_401_check"`
-	StatusCheckIntervalSeconds int      `json:"status_check_interval_seconds"`
-	ReloginFailureLimit        int      `json:"relogin_failure_limit"`
-	QuotaCheckIntervalSeconds  int      `json:"quota_check_interval_seconds"`
+	Provider                       string   `json:"provider"`
+	URL                            string   `json:"url"`
+	Email                          string   `json:"email"`
+	PasswordPresent                bool     `json:"password_present"`
+	GroupID                        int64    `json:"group_id,omitempty"`
+	GroupName                      string   `json:"group_name,omitempty"`
+	GroupIDs                       []int64  `json:"group_ids,omitempty"`
+	GroupNames                     []string `json:"group_names,omitempty"`
+	Models                         []string `json:"models,omitempty"`
+	AccountConcurrency             int      `json:"account_concurrency"`
+	Priority                       int      `json:"priority"`
+	CpaWS                          bool     `json:"cpa_ws"`
+	Enable401Check                 bool     `json:"enable_401_check"`
+	StatusCheckIntervalSeconds     int      `json:"status_check_interval_seconds"`
+	ReloginFailureLimit            int      `json:"relogin_failure_limit"`
+	QuotaEnabled                   bool     `json:"quota_enabled"`
+	QuotaCheckIntervalSeconds      int      `json:"quota_check_interval_seconds"`
+	QuotaRemainingThresholdPercent float64  `json:"quota_remaining_threshold_percent"`
 }
 
 func DefaultSub2Settings() Sub2Settings {
-	return Sub2Settings{Provider: "sub2", AccountConcurrency: 10, Priority: 1, Enable401Check: true, StatusCheckIntervalSeconds: 120, ReloginFailureLimit: 2, QuotaCheckIntervalSeconds: 120}
+	return Sub2Settings{Provider: "sub2", AccountConcurrency: 10, Priority: 1, Enable401Check: true, StatusCheckIntervalSeconds: 120, ReloginFailureLimit: 2, QuotaEnabled: true, QuotaCheckIntervalSeconds: 120}
 }
 
 type FreeQuotaWindow struct {

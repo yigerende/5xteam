@@ -337,6 +337,12 @@ func normalizeSub2Settings(settings *model.Sub2Settings) {
 	if settings.QuotaCheckIntervalSeconds < 10 {
 		settings.QuotaCheckIntervalSeconds = 120
 	}
+	if settings.QuotaRemainingThresholdPercent < 0 {
+		settings.QuotaRemainingThresholdPercent = 0
+	}
+	if settings.QuotaRemainingThresholdPercent > 100 {
+		settings.QuotaRemainingThresholdPercent = 100
+	}
 	// Older profiles used quota_check_interval_seconds for both checks. When
 	// loading one of those profiles, keep the existing interval for the new
 	// status check so upgrading does not silently change its cadence.

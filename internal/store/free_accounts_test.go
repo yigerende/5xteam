@@ -82,7 +82,7 @@ func TestSub2PasswordIsEncryptedAndCanBeRetained(t *testing.T) {
 	}
 	const password = "sub2-admin-password-secret"
 	settings, err := dataStore.SaveSub2Settings(model.Sub2Settings{
-		URL: "https://sub2.example.com", Email: "admin@example.com", GroupIDs: []int64{44, 46}, GroupNames: []string{"Free pool", "Reserve"}, Models: []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}, AccountConcurrency: 10, ReloginFailureLimit: 4,
+		URL: "https://sub2.example.com", Email: "admin@example.com", GroupIDs: []int64{44, 46}, GroupNames: []string{"Free pool", "Reserve"}, Models: []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}, AccountConcurrency: 10, ReloginFailureLimit: 4, QuotaEnabled: true, QuotaRemainingThresholdPercent: 12.5,
 	}, password)
 	if err != nil {
 		t.Fatal(err)
@@ -110,8 +110,38 @@ func TestSub2PasswordIsEncryptedAndCanBeRetained(t *testing.T) {
 	}
 	defer reopened.Close()
 	got, gotPassword, err := reopened.Sub2Settings()
-	if err != nil || gotPassword != password || got.ReloginFailureLimit != 4 || !slices.Equal(got.GroupIDs, []int64{45, 47}) || !slices.Equal(got.GroupNames, []string{"Next pool", "Second pool"}) || !slices.Equal(got.Models, []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}) {
+	if err != nil || gotPassword != password || got.ReloginFailureLimit != 4 || !got.QuotaEnabled || got.QuotaRemainingThresholdPercent != 12.5 || !slices.Equal(got.GroupIDs, []int64{45, 47}) || !slices.Equal(got.GroupNames, []string{"Next pool", "Second pool"}) || !slices.Equal(got.Models, []string{"gpt-5.2-codex", "gpt-5.1-codex-mini"}) {
 		t.Fatalf("Sub2 settings did not persist: %+v password=%q err=%v", got, gotPassword, err)
+	}
+}
+
+func TestLegacyQuotaSettingsKeepAutomaticMonitoringEnabled(t *testing.T) {
+	dataStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	if _, err := dataStore.db.Exec(`INSERT INTO sub2_settings(id,profile,encrypted_password) VALUES(1,?, '')`, `{"provider":"sub2","quota_check_interval_seconds":300}`); err != nil {
+		t.Fatal(err)
+	}
+	settings, _, err := dataStore.Sub2Settings()
+	if err != nil || !settings.QuotaEnabled || settings.QuotaRemainingThresholdPercent != 0 {
+		t.Fatalf("legacy quota settings were not normalized: %+v err=%v", settings, err)
+	}
+}
+
+func TestCPAQuotaSettingsPersist(t *testing.T) {
+	dataStore, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	if _, err := dataStore.SaveCPASettings(model.CPASettings{URL: "https://cpa.example.com", QuotaEnabled: false, QuotaRemainingThresholdPercent: 8.5}, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	settings, key, err := dataStore.CPASettings()
+	if err != nil || key != "secret" || settings.QuotaEnabled || settings.QuotaRemainingThresholdPercent != 8.5 {
+		t.Fatalf("CPA quota settings did not persist: %+v key=%q err=%v", settings, key, err)
 	}
 }
 
