@@ -1213,13 +1213,6 @@ func (s *Store) SaveOpenAIAccount(profile model.OpenAIAccountProfile, accessToke
 	now := time.Now()
 	var encrypted, encryptedRefresh string
 	if profile.ID == "" {
-		var count int
-		if err := s.db.QueryRow("SELECT COUNT(*) FROM openai_accounts").Scan(&count); err != nil {
-			return model.OpenAIAccountProfile{}, err
-		}
-		if count >= 500 {
-			return model.OpenAIAccountProfile{}, errors.New("最多保存 500 个 OpenAI 账号")
-		}
 		if accessToken == "" {
 			return model.OpenAIAccountProfile{}, errors.New("Access Token 不能为空")
 		}
