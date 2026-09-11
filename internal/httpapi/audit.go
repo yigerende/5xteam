@@ -16,6 +16,7 @@ var (
 	jwtValuePattern            = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?`)
 	oauthTokenValuePattern     = regexp.MustCompile(`\b(?:rt_|ac_)[A-Za-z0-9._~-]{10,}`)
 	otpValuePattern            = regexp.MustCompile(`(?i)(otp|verification[ _-]?code|验证码)(\s*[:=：]?\s*)\d{6}\b`)
+	exactOTPValuePattern       = regexp.MustCompile(`^\d{6}$`)
 	phoneValuePattern          = regexp.MustCompile(`\+\d[\d -]{7,16}\d`)
 )
 
@@ -128,6 +129,12 @@ func redactMap(input map[string]any) map[string]any {
 		if strings.Contains(lower, "token") || strings.Contains(lower, "cookie") || strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "authorization") || strings.Contains(lower, "management-key") || strings.Contains(lower, "management_key") {
 			out[key] = "***"
 			continue
+		}
+		if lower == "code" || strings.Contains(lower, "otp") || strings.Contains(lower, "verification_code") || strings.Contains(lower, "verification-code") {
+			if text, ok := value.(string); ok && exactOTPValuePattern.MatchString(strings.TrimSpace(text)) {
+				out[key] = "***"
+				continue
+			}
 		}
 		out[key] = redactValue(value)
 	}

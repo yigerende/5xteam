@@ -358,10 +358,11 @@ type AutoRotationSettings struct {
 	MaxPerRun        int     `json:"max_per_run"`
 	RetryCount       int     `json:"retry_count"`
 	RemoveMethod     string  `json:"remove_method"`
+	OAuthLoginMode   string  `json:"oauth_login_mode"`
 }
 
 func DefaultAutoRotationSettings() AutoRotationSettings {
-	return AutoRotationSettings{ThresholdPercent: 50, IntervalSeconds: 300, Concurrency: 2, MaxPerRun: 0, RetryCount: 1, RemoveMethod: "mother_kick"}
+	return AutoRotationSettings{ThresholdPercent: 50, IntervalSeconds: 300, Concurrency: 2, MaxPerRun: 0, RetryCount: 1, RemoveMethod: "mother_kick", OAuthLoginMode: "email_otp"}
 }
 
 type AutoRotationRun struct {

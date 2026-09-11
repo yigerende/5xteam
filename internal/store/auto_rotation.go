@@ -46,6 +46,9 @@ func (s *Store) AutoRotationSettings() model.AutoRotationSettings {
 	if settings.RemoveMethod != "child_leave" {
 		settings.RemoveMethod = "mother_kick"
 	}
+	if settings.OAuthLoginMode != "password_totp" {
+		settings.OAuthLoginMode = "email_otp"
+	}
 	return settings
 }
 
@@ -72,6 +75,12 @@ func (s *Store) SaveAutoRotationSettings(settings model.AutoRotationSettings) (m
 	}
 	if settings.RemoveMethod != "mother_kick" && settings.RemoveMethod != "child_leave" {
 		return settings, errors.New("移出方式无效")
+	}
+	if settings.OAuthLoginMode == "" {
+		settings.OAuthLoginMode = "email_otp"
+	}
+	if settings.OAuthLoginMode != "email_otp" && settings.OAuthLoginMode != "password_totp" {
+		return settings, errors.New("OAuth 登录方式无效")
 	}
 	b, _ := json.Marshal(settings)
 	_, err := s.db.Exec("INSERT INTO auto_rotation_settings(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", string(b))

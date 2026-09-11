@@ -32,9 +32,63 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         super().__init__(job_id, payload)
         self.last_stage = "oauth_init"
         self.last_status = 0
+        self.login_details = {
+            "configured_login_mode": payload.get("configured_login_mode", "email_otp"),
+            "selected_login_mode": payload.get("selected_login_mode", "email_otp"),
+            "login_fallback_reason": payload.get("login_fallback_reason", ""),
+            "login_method_reason": payload.get("login_method_reason", ""),
+            "login_method": "not_started", "login_method_label": "尚未执行登录",
+            "login_auth_status": "not_started",
+        }
+        bridge.set_login_details(self.login_details)
+
+    def set_login_method(self, method, label):
+        self.login_details.update(login_method=method, login_method_label=label, login_auth_status="running")
+        bridge.set_login_details(self.login_details)
+
+    def complete_modern_login(self, step, password, issued_after):
+        # Observe authentication only; the reference owns the entire protocol.
+        try:
+            result = super().complete_modern_login(step, password, issued_after)
+        except BaseException:
+            self.login_details["login_auth_status"] = "failed"
+            bridge.set_login_details(self.login_details)
+            raise
+        if self.login_details["login_method"] == "not_started":
+            self.set_login_method("existing_session", "已有认证会话（无需验证码）")
+        elif self.login_details["login_method"] == "password":
+            self.login_details["login_method_label"] = "ChatGPT 密码登录（本次未触发 2FA）"
+        self.login_details["login_auth_status"] = "succeeded"
+        bridge.set_login_details(self.login_details)
+        self.log("login_method", "登录验证通过：" + self.login_details["login_method_label"])
+        return result
+
+    def submit_modern_password(self, password):
+        self.set_login_method("password", "ChatGPT 密码登录")
+        self.log("password", "正在提交 ChatGPT 密码")
+        return super().submit_modern_password(password)
+
+    def complete_totp_challenge(self, step, secret):
+        self.set_login_method("password_totp", "ChatGPT 密码 + OpenAI TOTP 登录")
+        self.log("totp", "OpenAI 要求 TOTP，开始验证器验证")
+        return super().complete_totp_challenge(step, secret)
+
+    def submit_mfa_verify(self, factor_id, code):
+        bridge.protect_code(code)
+        self.log("totp", "正在提交 OpenAI TOTP 动态验证码")
+        return super().submit_mfa_verify(factor_id, code)
+
+    def submit_modern_code(self, code):
+        bridge.protect_code(code)
+        return super().submit_modern_code(code)
 
     def log(self, step, message, level="info"):
         self.last_stage = step
+        if step in {"waiting_code", "send_code"}:
+            if self.login_details["login_method"] in {"password", "password_email_otp"}:
+                self.set_login_method("password_email_otp", "ChatGPT 密码 + 邮箱验证码登录")
+            else:
+                self.set_login_method("email_otp", "邮箱验证码登录")
         super().log(step, message, level)
 
     def request(self, url, **kwargs):
@@ -105,8 +159,15 @@ def run(payload, rpc=None):
     email = str(payload.get("email") or "").strip()
     pickup = str(payload.get("pickup_url") or "").strip()
     provider = str(payload.get("sms_provider") or "").strip()
-    local = {"email": email, "password": str(payload.get("gpt_password") or ""),
-             "_totp_secret": str(payload.get("totp_secret") or ""), "proxy": payload.get("proxy"),
+    mode = "password_totp" if payload.get("login_mode") == "password_totp" else "email_otp"
+    local = {"email": email, "password": str(payload.get("gpt_password") or "") if mode == "password_totp" else "",
+             "_totp_secret": str(payload.get("totp_secret") or "") if mode == "password_totp" else "",
+             "force_email_code": mode == "email_otp", "email_code_login": mode == "email_otp",
+             "configured_login_mode": payload.get("configured_login_mode") or mode,
+             "selected_login_mode": mode,
+             "login_fallback_reason": payload.get("login_fallback_reason") or "",
+             "login_method_reason": payload.get("login_method_reason") or "",
+             "proxy": payload.get("proxy"),
              "job_id": "local", "allow_sms": bool(payload.get("allow_sms", True)),
              "sms_config": payload.get("sms_config") or {}, "credential_mode": "codex_rt",
              "sms_realtime_provider": provider if provider in {"hero_sms", "nextpro", "congou", "chatai"} else "",
@@ -117,13 +178,17 @@ def run(payload, rpc=None):
     flow = None
     try:
         flow = ProjectProtocolLogin("local", local)
+        bridge.emit("login_method", "login_start", "开始本次 OAuth 登录")
         session = flow.login()
         token = upstream.jwt_payload(session.get("id_token") or session.get("access_token") or "")
         auth = token.get("https://api.openai.com/auth") or {}
-        return {**session, "success": True, "account_id": auth.get("chatgpt_account_id", "")}
+        return {**session, "success": True, "account_id": auth.get("chatgpt_account_id", ""), **flow.login_details}
     except bridge.DeadAccountError as exc:
+        bridge.emit(exc.stage, "dead_account", "OpenAI 返回明确死号状态", http_status=exc.status,
+                    details={"error_code": exc.code}, level="error")
         return {"success": False, "dead": True, "status": "deactivated", "retryable": False,
-                "error_code": exc.code, "stage": exc.stage, "http_status": exc.status, "error": bridge.redact(exc)}
+                "error_code": exc.code, "stage": exc.stage, "http_status": exc.status, "error": bridge.redact(exc),
+                **(flow.login_details if flow else {})}
     except Exception as exc:
         typed = isinstance(exc, upstream.LoginFlowError)
         retryable = bool(exc.retryable) if typed else upstream._is_transient_login_error(str(exc))
@@ -134,4 +199,4 @@ def run(payload, rpc=None):
                              "retryable": retryable, "cookie_jar": cookie_snapshot(flow) if flow else []}, level="error")
         return {"success": False, "error": bridge.redact(exc), "retryable": retryable,
                 "error_code": exc.code if typed else "login_failed", "stage": stage, "http_status": status,
-                "hint": bridge.redact(exc.hint) if typed else ""}
+                "hint": bridge.redact(exc.hint) if typed else "", **(flow.login_details if flow else {})}

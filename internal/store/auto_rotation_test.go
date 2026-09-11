@@ -8,6 +8,52 @@ import (
 	"chatgpt-space-merge/internal/model"
 )
 
+func TestOAuthLoginModeDefaultsValidationAndPersistence(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if s.AutoRotationSettings().OAuthLoginMode != "email_otp" {
+		t.Fatal("fresh database must default to email OTP")
+	}
+	settings := model.DefaultAutoRotationSettings()
+	settings.OAuthLoginMode = "password_totp"
+	if _, err := s.SaveAutoRotationSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.AutoRotationSettings().OAuthLoginMode != "password_totp" {
+		t.Fatal("login mode did not survive reopening database")
+	}
+	settings.OAuthLoginMode = "unsupported"
+	if _, err := s.SaveAutoRotationSettings(settings); err == nil {
+		t.Fatal("invalid mode was accepted")
+	}
+	if s.AutoRotationSettings().OAuthLoginMode != "password_totp" {
+		t.Fatal("invalid save changed persisted mode")
+	}
+	for _, raw := range []string{`{"enabled":false}`, `{"oauth_login_mode":""}`, `{"oauth_login_mode":"invalid"}`} {
+		if _, err := s.db.Exec("UPDATE auto_rotation_settings SET payload=? WHERE id=1", raw); err != nil {
+			t.Fatal(err)
+		}
+		if s.AutoRotationSettings().OAuthLoginMode != "email_otp" {
+			t.Fatalf("legacy/invalid configuration must default to email OTP: %s", raw)
+		}
+	}
+	settings.OAuthLoginMode = ""
+	if saved, err := s.SaveAutoRotationSettings(settings); err != nil || saved.OAuthLoginMode != "email_otp" {
+		t.Fatalf("legacy client default: %+v, %v", saved, err)
+	}
+}
+
 func TestAutoRotationSettingsAndRunPersistence(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {

@@ -29,6 +29,7 @@ func (s *Server) importTurbRegistration(w http.ResponseWriter, r *http.Request) 
 		ClientID         string          `json:"client_id"`
 		MailRefreshToken string          `json:"mail_refresh_token"`
 		PickupURL        string          `json:"pickup_url"`
+		TotpSecret       string          `json:"totp_secret"`
 		ChatGPTSession   json.RawMessage `json:"chatgpt_session"`
 	}
 	if err := decodeJSON(w, r, &input, 2<<20); err != nil {
@@ -60,7 +61,7 @@ func (s *Server) importTurbRegistration(w http.ResponseWriter, r *http.Request) 
 	}
 	mailSaved := false
 	if email != "" {
-		mailCreds := model.MailAccountCredentials{Email: email, MailPassword: strings.TrimSpace(input.MailPassword), ClientID: strings.TrimSpace(input.ClientID), MailRefreshToken: strings.TrimSpace(input.MailRefreshToken), PickupURL: strings.TrimSpace(input.PickupURL), GptPassword: strings.TrimSpace(input.GptPassword), AccessToken: token, ChatGPTSession: chatgptSession}
+		mailCreds := model.MailAccountCredentials{Email: email, MailPassword: strings.TrimSpace(input.MailPassword), ClientID: strings.TrimSpace(input.ClientID), MailRefreshToken: strings.TrimSpace(input.MailRefreshToken), PickupURL: strings.TrimSpace(input.PickupURL), GptPassword: strings.TrimSpace(input.GptPassword), TotpSecret: strings.TrimSpace(input.TotpSecret), AccessToken: token, ChatGPTSession: chatgptSession}
 		if _, old, oldErr := s.store.MailAccountCredential(email); oldErr == nil {
 			if mailCreds.MailPassword == "" {
 				mailCreds.MailPassword = old.MailPassword
@@ -76,6 +77,9 @@ func (s *Server) importTurbRegistration(w http.ResponseWriter, r *http.Request) 
 			}
 			if mailCreds.GptPassword == "" {
 				mailCreds.GptPassword = old.GptPassword
+			}
+			if mailCreds.TotpSecret == "" {
+				mailCreds.TotpSecret = old.TotpSecret
 			}
 			if mailCreds.ChatGPTSession == "" {
 				mailCreds.ChatGPTSession = old.ChatGPTSession

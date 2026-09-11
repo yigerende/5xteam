@@ -182,6 +182,21 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不能再次进入空间")
 		return
 	}
+	// Once an invitation or acceptance has started, the child is bound to the
+	// original Team.  Reassigning AdminAccountID here would let a second manual
+	// or automatic task invite the same child into another Team while the first
+	// invitation is still in flight.
+	if activeTeamMembership(profile) && profile.AdminAccountID != input.AdminAccountID {
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, input.AdminAccountID, "rejected_admin_reassignment", map[string]any{
+			"existing_admin_account_id":  profile.AdminAccountID,
+			"existing_team_account_id":   profile.TeamAccountID,
+			"requested_admin_account_id": input.AdminAccountID,
+			"invite_status":              profile.InviteStatus,
+			"accept_status":              profile.AcceptStatus,
+		})
+		writeAPI(w, http.StatusConflict, nil, "该子号已经绑定其他母号的邀请/空间流程，不能再次邀请到另一个母号")
+		return
+	}
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, input.AdminAccountID, "loaded", map[string]any{
 		"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus,
 		"remove_status": profile.RemoveStatus,
@@ -235,6 +250,11 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
+	// OpenAI rate-limits membership mutations per Team. Hold the same Team
+	// mutex used by removal so invite + accept cannot overlap with another
+	// child invite or a removal for this mother account.
+	unlockTeam := s.lockTeamAccountRemove(admin.TeamAccountID)
+	defer unlockTeam()
 	inviteProxy := s.adminProxyLogDetails(adminSettings, admin)
 	acceptProxy := s.proxyLogDetails(s.store.Settings(), "global")
 	if runInvite {
@@ -285,6 +305,14 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "joined", map[string]any{"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus})
 	s.auditAccountEvent(r.Context(), profile.ID, "join", "accept", "manual_single", "", "邀请并进入空间成功", map[string]any{"admin_account_id": admin.ID, "team_account_id": admin.TeamAccountID})
 	writeAPI(w, http.StatusOK, profile, "")
+}
+
+func activeTeamMembership(profile model.FreeAccountProfile) bool {
+	if strings.TrimSpace(profile.AdminAccountID) == "" || strings.TrimSpace(profile.TeamAccountID) == "" || profile.RemoveStatus == "completed" {
+		return false
+	}
+	return profile.InviteStatus == "running" || profile.InviteStatus == "completed" ||
+		profile.AcceptStatus == "running" || profile.AcceptStatus == "completed"
 }
 
 // recordJoinTrace adds diagnostic-only events around the combined invite and
@@ -520,6 +548,11 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 	}
 	details := map[string]any{"job_id": jobID, "status": status}
 	if result != nil {
+		for _, key := range oauthLoginDetailKeys {
+			if value, ok := result[key]; ok {
+				details[key] = value
+			}
+		}
 		for _, key := range []string{"status", "error_code", "stage", "http_status", "dead"} {
 			if value, ok := result[key]; ok {
 				details[key] = value
@@ -540,7 +573,7 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 			response[key] = value
 		}
 	}
-	s.auditAccountEventWithIO(context.Background(), accountID, "oauth", "oauth", "oauth", provider, "OAuth "+map[bool]string{true: "成功", false: "失败"}[status == "success"], details, request, response)
+	s.auditAccountEventWithIO(context.Background(), accountID, "oauth", "oauth", trigger, provider, "OAuth "+map[bool]string{true: "成功", false: "失败"}[status == "success"], details, request, response)
 }
 
 func isDeadOAuthResult(result map[string]any, message string) bool {
@@ -726,7 +759,55 @@ func (s *Server) auditOAuthProtocolDiagnostic(accountID, jobID, trigger string, 
 // Every Team, mailbox, automatic-rotation, and 401 relogin OAuth entry point
 // reaches this function, so they all share the same gpt-account-manager style
 // proxy behavior.
-func (s *Server) executeCodexOAuth(email string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
+func (s *Server) executeCodexOAuth(email string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (result map[string]any, runErr error) {
+	_, credentials, err := s.store.MailAccountCredential(email)
+	if err != nil {
+		return nil, err
+	}
+	login := selectOAuthLogin(s.store.AutoRotationSettings().OAuthLoginMode, credentials)
+	loginDetails := login.details()
+	loginDetails["login_method"], loginDetails["login_method_label"], loginDetails["login_auth_status"] = "not_started", "尚未执行登录", "not_started"
+	emit := diagnostic
+	diagnostic = func(event protocolOAuthDiagnostic) {
+		for _, key := range oauthLoginDetailKeys {
+			if value, ok := event.Details[key]; ok {
+				loginDetails[key] = value
+			}
+		}
+		if event.Details == nil {
+			event.Details = map[string]any{}
+		}
+		for key, value := range loginDetails {
+			event.Details[key] = value
+		}
+		if emit != nil {
+			emit(event)
+		}
+	}
+	message := "OAuth 登录方式：邮箱验证码"
+	if login.selected == "password_totp" {
+		message = "OAuth 登录方式：ChatGPT 密码 + OpenAI TOTP"
+	} else if login.reason != "" {
+		message = "OAuth 登录方式：" + login.reason
+	}
+	if progress != nil {
+		progress(message)
+	}
+	diagnostic(protocolOAuthDiagnostic{SchemaVersion: 1, Stage: "login_method", Event: "login_selected", Message: message})
+	defer func() {
+		if result == nil {
+			result = map[string]any{"success": false}
+		}
+		for key, value := range loginDetails {
+			result[key] = value
+		}
+		ok := runErr == nil && result["success"] == true
+		diagnostic(protocolOAuthDiagnostic{SchemaVersion: 1, Stage: "oauth", Event: "login_result",
+			Message: "OAuth " + map[bool]string{true: "成功", false: "失败"}[ok],
+			Level:   map[bool]string{true: "info", false: "error"}[ok],
+			Details: map[string]any{"oauth_success": ok},
+		})
+	}()
 	const (
 		qualityAttempts = 4
 		roundAttempts   = 3
@@ -776,7 +857,7 @@ func (s *Server) executeCodexOAuth(email string, progress func(string), diagnost
 			if progress != nil {
 				progress(fmt.Sprintf("OAuth 出口质检通过：%s（HTTP %d，IP %s）", lease.label, probe.AuthStatus, probe.ExitIP))
 			}
-			result, runErr := s.executeCodexOAuthWithProxy(email, proxyURL, lease.label, lease.activeCount, progress, diagnostic)
+			result, runErr := s.executeCodexOAuthWithProxy(email, proxyURL, lease.label, lease.activeCount, login, progress, diagnostic)
 			lease.Release()
 			lastResult, lastErr = result, runErr
 			if runErr == nil && result != nil && result["success"] == true {
@@ -856,11 +937,7 @@ func isRetryableOAuthNetworkResult(result map[string]any, runErr error) bool {
 // executeCodexOAuthWithProxy owns the protocol process only. The proxy is
 // selected and quality-checked by executeCodexOAuth and remains unchanged for
 // this complete OAuth attempt.
-func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, activeCount int, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
-	_, mailCreds, err := s.store.MailAccountCredential(email)
-	if err != nil {
-		return nil, errors.New("邮箱账号不存在")
-	}
+func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, activeCount int, login oauthLoginSelection, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
 	if progress != nil {
 		progress(fmt.Sprintf("已分配 OAuth 代理：%s（当前任务 %d）", proxyLabel, activeCount))
 	}
@@ -918,9 +995,10 @@ func (s *Server) executeCodexOAuthWithProxy(email, proxyURL, proxyLabel string, 
 			}
 		}
 	}
-	payload := map[string]any{"email": email, "pickup_url": mailCreds.PickupURL, "gpt_password": mailCreds.GptPassword,
-		"totp_secret": mailCreds.TotpSecret, "proxy": proxyURL, "sms_provider": provider, "sms_config": smsCfg,
+	payload := map[string]any{"email": email, "pickup_url": login.credentials.PickupURL,
+		"proxy": proxyURL, "sms_provider": provider, "sms_config": smsCfg,
 		"allow_sms": settings.AllowSMS, "stdio_rpc": true}
+	login.apply(payload)
 	python := workflow.FindPython()
 	if python == "" {
 		return nil, errors.New("未找到 Python 运行环境")

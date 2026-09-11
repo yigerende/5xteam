@@ -1,12 +1,61 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"chatgpt-space-merge/internal/model"
 	"chatgpt-space-merge/internal/store"
 )
+
+func TestOAuthLoginMethodSurvivesAsyncPersistenceAndAccountExport(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	account, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "method@example.com", UserID: "method-user"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	details := selectOAuthLogin("password_totp", model.MailAccountCredentials{TotpSecret: "JBSWY3DPEHPK3PXP"}).details()
+	details["login_method"], details["login_auth_status"] = "email_otp", "succeeded"
+	server.auditOAuthProtocolDiagnostic(account.ID, "job-mode", "relogin", protocolOAuthDiagnostic{
+		SchemaVersion: 1, Stage: "login_method", Event: "login_result", Message: "邮箱验证码登录成功", Details: details,
+		Request: map[string]any{"password": "private-password", "totp_secret": "private-secret", "code": "765432"},
+	})
+	server.Close() // Drain the existing asynchronous writer.
+	request := httptest.NewRequest(http.MethodGet, "/api/free-accounts/"+account.ID+"/events/export", nil)
+	request.SetPathValue("id", account.ID)
+	recorder := httptest.NewRecorder()
+	server.exportFreeAccountEvents(recorder, request)
+	if recorder.Code != 200 {
+		t.Fatalf("export returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var exported executionLogExport
+	if err := json.Unmarshal(recorder.Body.Bytes(), &exported); err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Events) != 1 {
+		t.Fatalf("unexpected event count: %d", len(exported.Events))
+	}
+	event := exported.Events[0]
+	if event.Source != "relogin" || event.Details["configured_login_mode"] != "password_totp" || event.Details["login_method"] != "email_otp" || event.Details["login_fallback_reason"] != "missing_password" || event.Details["login_auth_status"] != "succeeded" {
+		t.Fatalf("login metadata lost: %+v", event)
+	}
+	for _, secret := range []string{"private-password", "private-secret", "765432"} {
+		if strings.Contains(recorder.Body.String(), secret) {
+			t.Fatalf("export leaked %s", secret)
+		}
+	}
+}
 
 func TestParseProtocolOAuthDiagnostic(t *testing.T) {
 	line := `[protocol-event] {"schema_version":1,"stage":"email_otp_validate","event":"request_complete","message":"OTP returned","http_status":200,"attempt":2,"level":"info","request":{"method":"POST"},"response":{"page_type":"consent"},"details":{"needs_add_phone":false}}`

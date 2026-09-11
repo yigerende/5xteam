@@ -12,12 +12,14 @@ from datetime import datetime, timezone
 _payload = {}
 _rpc = None
 _secrets = []
+_login_details = {}
 
 
 def configure(payload, rpc=None):
-    global _payload, _rpc, _secrets
+    global _payload, _rpc, _secrets, _login_details
     _payload, _rpc = payload, rpc
     _secrets = []
+    _login_details = {}
     def collect(value, key=""):
         if isinstance(value, dict):
             for k, v in value.items():
@@ -25,12 +27,22 @@ def configure(payload, rpc=None):
         elif isinstance(value, list):
             for v in value:
                 collect(v, key)
-        elif isinstance(value, str) and len(value) >= 4 and any(
+        elif isinstance(value, str) and value and any(
             word in key.lower() for word in ("password", "secret", "token", "api_key", "cdk", "pickup_url", "proxy")
         ):
             _secrets.append(value)
     collect(payload)
     _secrets.sort(key=len, reverse=True)
+
+
+def set_login_details(details):
+    # Each Go OAuth job owns a separate Python process. Reset in configure().
+    _login_details.update(details)
+
+
+def protect_code(code):
+    if code:
+        _secrets.append(str(code))
 
 
 def redact(value):
@@ -53,7 +65,7 @@ def safe_url(value):
 def emit(stage, event, message, *, http_status=0, request=None, response=None, details=None, level="info"):
     item = {"schema_version": 1, "stage": stage, "event": event, "message": redact(message),
             "http_status": http_status, "level": level, "request": request or {},
-            "response": response or {}, "details": details or {}}
+            "response": response or {}, "details": {**_login_details, **(details or {})}}
     print("[protocol-event] " + json.dumps(item, ensure_ascii=False, separators=(",", ":")), file=sys.stderr, flush=True)
 
 
