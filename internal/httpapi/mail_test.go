@@ -271,6 +271,50 @@ func TestMailOAuthDeadResultMarksMailboxWithoutTeamRemoval(t *testing.T) {
 	}
 }
 
+func TestTemporaryATDeadResultDeletesMailbox(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	const email = "temporary-at-dead@example.com"
+	if _, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: email}, model.MailAccountCredentials{
+		Email: email, PickupURL: "https://mail.example/pickup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: dataStore}
+	if !server.deleteMailAccountOnDeadLogin(email, map[string]any{
+		"success": false, "dead": true, "error_code": "account_deactivated",
+	}, "You do not have an account because it has been deleted or deactivated") {
+		t.Fatal("explicitly deactivated temporary-AT account was not deleted")
+	}
+	if _, _, err = dataStore.MailAccountCredential(email); err == nil {
+		t.Fatal("deleted temporary-AT account is still present")
+	}
+}
+
+func TestTemporaryATTransientFailureKeepsMailbox(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	const email = "temporary-at-rate-limit@example.com"
+	if _, err = dataStore.SaveMailAccount(model.MailAccountProfile{Email: email}, model.MailAccountCredentials{
+		Email: email, PickupURL: "https://mail.example/pickup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: dataStore}
+	if server.deleteMailAccountOnDeadLogin(email, nil, "HTTP 429: rate_limit_exceeded") {
+		t.Fatal("transient rate limit must not delete the mailbox")
+	}
+	if _, _, err = dataStore.MailAccountCredential(email); err != nil {
+		t.Fatalf("transient failure removed mailbox: %v", err)
+	}
+}
+
 func TestBuildCPACredentialExportMatchesGPTAccountManagerShape(t *testing.T) {
 	expiresAt := time.Unix(1_800_000_000, 0).UTC()
 	exportedAt := time.Unix(1_700_000_000, 0).UTC()

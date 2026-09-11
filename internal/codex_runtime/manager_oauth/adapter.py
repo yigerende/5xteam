@@ -2,7 +2,8 @@
 import json
 import re
 import time
-from urllib.parse import parse_qs, urlsplit
+import uuid
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 from . import bridge, upstream
 
@@ -46,13 +47,115 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
     def is_chatgpt_at(self):
         return self.payload.get("credential_mode") == "chatgpt_at"
 
+    def login(self):
+        if not self.is_chatgpt_at():
+            return super().login()
+
+        email_addr = upstream.coerce_text(self.payload.get("email"))
+        password = upstream.coerce_text(self.payload.get("password"))
+        force_email_code = str(upstream.first_text(
+            self.payload.get("force_email_code"),
+            self.payload.get("forceEmailCode"),
+            self.payload.get("email_code_login"),
+            self.payload.get("emailCodeLogin"),
+        )).lower() in {"1", "true", "yes", "on"}
+        if force_email_code:
+            password = ""
+        if not email_addr:
+            raise RuntimeError("protocol login needs email")
+
+        self.device_id = self.device_id or uuid.uuid4().hex
+        self.set_cookie("oai-did", self.device_id, "auth.openai.com")
+        self.set_cookie("oai-did", self.device_id, ".auth.openai.com")
+        self.set_cookie("oai-did", self.device_id, "chatgpt.com")
+        self.set_cookie("oai-did", self.device_id, ".chatgpt.com")
+
+        self.log("oauth_init", "后端协议：开始 ChatGPT 临时 AT 登录")
+        self.auth_url = self.prepare_oauth_authorize_url()
+        self.log("authorize", "后端协议：打开 ChatGPT 登录入口并建立 login_session")
+        login_state = self.bootstrap_oauth_session(self.auth_url)
+        if not login_state.get("ok"):
+            raw_error = login_state.get("error") or "ChatGPT 登录入口没有建立 auth.openai.com 登录会话。"
+            raw_hint = login_state.get("hint") or "协议链路没有拿到 auth.openai.com 的 login_session；请检查代理出口后重试。"
+            raise upstream.LoginFlowError(
+                raw_error,
+                code="oauth_session_missing",
+                hint=raw_hint,
+                status=login_state.get("status") if isinstance(login_state.get("status"), int) else None,
+                retryable=True,
+            )
+
+        issued_after = time.time()
+        self.log("sentinel", "Protocol login: generate Sentinel token")
+        self.sentinel_token = upstream.generate_openai_sentinel_token(
+            self.device_id, "authorize_continue", self.proxy_url)
+        if not self.sentinel_token:
+            self.log("sentinel", "Sentinel token helper returned empty token; continuing once", "warning")
+
+        if upstream.login_payload_has_directurl(self.payload):
+            baseline = upstream.prime_directurl_baseline(self.payload)
+            self.payload["_directurl_baseline_codes"] = sorted(baseline)
+            self.log("mail_code_baseline", f"接码链接基线已记录 {len(baseline)} 个旧验证码（已在发码前采集，只接受新码）")
+
+        self.log("identifier", "Protocol login: submit email")
+        step = self.authorize_continue(email_addr)
+        continue_url = self.complete_modern_login(step, password, issued_after)
+        session = self._finish_chatgpt_login(continue_url)
+        email_from_token = upstream.access_token_email(session.get("access_token", ""))
+        session["email"] = email_from_token or email_addr
+        session["user"] = {
+            **(session.get("user") if isinstance(session.get("user"), dict) else {}),
+            "email": session["email"],
+        }
+        if self.changed_password:
+            session["changed_password"] = self.changed_password
+        self.log("success", "Protocol login succeeded", "success")
+        return session
+
     def prepare_oauth_authorize_url(self):
         if not self.is_chatgpt_at():
             return super().prepare_oauth_authorize_url()
         self.oauth_authorize_source = "chatgpt_web"
         self.log("oauth_init", "后端协议：生成 ChatGPT Web 登录会话")
+        self.device_id = self.device_id or uuid.uuid4().hex
+        self.request(
+            "https://chatgpt.com/login",
+            headers=self.headers("https://chatgpt.com/login", {"Referer": "https://chatgpt.com/"}),
+        )
         csrf_token = self.get_csrf_token()
-        authorize_url = self.signin_openai(csrf_token)
+        query = urlencode({
+            "prompt": "login",
+            "ext-oai-did": self.device_id,
+            "auth_session_logging_id": str(uuid.uuid4()),
+            "ext-passkey-client-capabilities": "11111",
+            "screen_hint": "login_or_signup",
+            "login_hint": str(self.payload.get("email") or "").strip(),
+        })
+        signin_url = "https://chatgpt.com/api/auth/signin/openai?" + query
+        response = self.request(
+            signin_url,
+            method="POST",
+            form_data={"callbackUrl": "https://chatgpt.com/", "csrfToken": csrf_token, "json": "true"},
+            headers=self.headers(signin_url, {
+                "Accept": "*/*",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://chatgpt.com",
+                "Referer": "https://chatgpt.com/",
+            }),
+            timeout=45,
+        )
+        data = response.json()
+        authorize_url = upstream.first_text(data.get("url"), response.location())
+        if response.status >= 400 or not authorize_url:
+            summary = upstream.protocol_compact_error(data)
+            raise upstream.LoginFlowError(
+                f"ChatGPT signin 未返回授权地址：HTTP {response.status} - {summary or 'empty response'}",
+                code="chatgpt_signin_failed",
+                hint="请检查全局代理出口是否允许访问 ChatGPT 登录接口后重试。",
+                status=response.status,
+                retryable=True,
+            )
+        authorize_url = urljoin(signin_url, authorize_url)
         self.remember_oauth_params_from_authorize_url(authorize_url)
         return authorize_url
 
@@ -64,16 +167,31 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         if self.oauth_state and returned_state and returned_state != self.oauth_state:
             raise RuntimeError("OpenAI OAuth state mismatch")
         self.follow_callback(callback_url)
+        return self._chatgpt_web_session()
+
+    def _chatgpt_web_session(self):
         session = self.get_session()
         access_token = upstream.first_text(session.get("accessToken"), session.get("access_token"))
         if not access_token:
-            raise RuntimeError("ChatGPT Web session returned no accessToken")
+            raise upstream.LoginFlowError(
+                "ChatGPT Web Session 未返回 accessToken",
+                code="chatgpt_session_missing",
+                hint="登录验证已通过，但 ChatGPT Session 尚未建立；请更换代理出口后重试。",
+                retryable=True,
+            )
         session["access_token"] = access_token
         session["accessToken"] = access_token
         session_token = self.get_session_cookie()
         if session_token:
             session["session_token"] = session_token
         return session
+
+    def _finish_chatgpt_login(self, continue_url):
+        if continue_url:
+            self.log("session", "ChatGPT 登录验证通过，完成 Web Session 跳转")
+            self.follow_callback(continue_url)
+        self.log("session", "直接读取 ChatGPT Web Session 并提取 AT")
+        return self._chatgpt_web_session()
 
     def resolve_realtime_phone_source(self, account_email):
         if not self.payload.get("hero_managed") or self._sms_realtime_provider() != "hero_sms":

@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent / "codex_runtime"))
 from manager_oauth import adapter
@@ -11,6 +12,7 @@ from manager_oauth import adapter
 class ChatGPTATFlowTests(unittest.TestCase):
     def test_web_mode_uses_chatgpt_authorize_and_session(self):
         flow = adapter.ProjectProtocolLogin("test", {
+            "email": "a@example.com",
             "credential_mode": "chatgpt_at",
             "proxy": "http://proxy.example:8080",
             "configured_login_mode": "password_totp",
@@ -20,21 +22,71 @@ class ChatGPTATFlowTests(unittest.TestCase):
             "https://auth.openai.com/authorize?state=expected-state"
             "&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Fopenai"
         )
+        calls = []
+
+        class Response:
+            status = 200
+
+            def __init__(self, data=None):
+                self.data = data or {}
+
+            def json(self):
+                return self.data
+
+            def location(self):
+                return ""
+
+        def request(url, *, method="GET", json_data=None, form_data=None, headers=None, timeout=60):
+            kwargs = {
+                "method": method,
+                "json_data": json_data,
+                "form_data": form_data,
+                "headers": headers,
+                "timeout": timeout,
+            }
+            calls.append((url, kwargs))
+            return Response({"url": authorize_url} if "/api/auth/signin/openai?" in url else {})
+
         with patch.object(flow, "get_csrf_token", return_value="csrf"), \
-                patch.object(flow, "signin_openai", return_value=authorize_url):
+                patch.object(flow, "request", side_effect=request):
             self.assertEqual(flow.prepare_oauth_authorize_url(), authorize_url)
         self.assertEqual(flow.oauth_authorize_source, "chatgpt_web")
         self.assertEqual(flow.oauth_code_verifier, "")
+        self.assertEqual([urlsplit(url).path for url, _ in calls], ["/login", "/api/auth/signin/openai"])
+        signin_url, signin_kwargs = calls[-1]
+        query = parse_qs(urlsplit(signin_url).query)
+        self.assertEqual(query["prompt"], ["login"])
+        self.assertEqual(query["login_hint"], ["a@example.com"])
+        self.assertEqual(query["ext-oai-did"], [flow.device_id])
+        self.assertEqual(query["screen_hint"], ["login_or_signup"])
+        self.assertEqual(query["ext-passkey-client-capabilities"], ["11111"])
+        self.assertTrue(query["auth_session_logging_id"][0])
+        self.assertEqual(signin_kwargs["form_data"], {
+            "callbackUrl": "https://chatgpt.com/", "csrfToken": "csrf", "json": "true",
+        })
 
-        callback = "https://chatgpt.com/api/auth/callback/openai?code=code&state=expected-state"
-        with patch.object(flow, "follow_callback") as follow, \
-                patch.object(flow, "get_session", return_value={"accessToken": "web-at", "user": {"email": "a@example.com"}}), \
+        with patch.object(flow, "get_session", return_value={"accessToken": "web-at", "user": {"email": "a@example.com"}}), \
                 patch.object(flow, "get_session_cookie", return_value="web-session"):
-            result = flow.exchange_oauth_callback(callback)
-        follow.assert_called_once_with(callback)
+            result = flow._chatgpt_web_session()
         self.assertEqual(result["access_token"], "web-at")
         self.assertEqual(result["session_token"], "web-session")
         self.assertNotIn("refresh_token", result)
+
+        continue_url = "https://chatgpt.com/api/auth/callback/openai?code=code"
+        with patch.object(flow, "follow_callback") as follow, \
+                patch.object(flow, "_chatgpt_web_session", return_value={"access_token": "web-at"}) as session:
+            self.assertEqual(flow._finish_chatgpt_login(continue_url), {"access_token": "web-at"})
+        follow.assert_called_once_with(continue_url)
+        session.assert_called_once_with()
+
+    def test_codex_mode_uses_unchanged_upstream_login(self):
+        flow = adapter.ProjectProtocolLogin("test", {
+            "credential_mode": "codex_rt",
+            "proxy": "http://proxy.example:8080",
+        })
+        with patch.object(adapter.upstream.ChatGPTProtocolLogin, "login", return_value={"access_token": "codex-at"}) as login:
+            self.assertEqual(flow.login(), {"access_token": "codex-at"})
+        login.assert_called_once_with()
 
     def test_run_passes_global_login_selection_and_disables_sms(self):
         captured = {}

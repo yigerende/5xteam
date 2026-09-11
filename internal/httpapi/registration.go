@@ -381,6 +381,7 @@ func (s *Server) runLocalLogin(id, email string) {
 		s.updateRegistration(id, "running", message)
 	}, nil)
 	if err != nil {
+		s.deleteMailAccountOnDeadLogin(email, nil, err.Error())
 		s.finishRegistration(id, "failed", err.Error())
 		return
 	}
@@ -389,9 +390,7 @@ func (s *Server) runLocalLogin(id, email string) {
 		if strings.TrimSpace(message) == "" {
 			message = "ChatGPT 临时 AT 登录失败"
 		}
-		if isDeadOAuthResult(result, message) {
-			_ = s.store.MarkMailAccountDead(email, message)
-		}
+		s.deleteMailAccountOnDeadLogin(email, result, message)
 		s.finishRegistration(id, "failed", message)
 		return
 	}
@@ -425,6 +424,13 @@ func (s *Server) runLocalLogin(id, email string) {
 		}
 	}
 	s.finishRegistration(id, "success", "临时 AT 获取成功")
+}
+
+func (s *Server) deleteMailAccountOnDeadLogin(email string, result map[string]any, message string) bool {
+	if !isDeadOAuthResult(result, message) {
+		return false
+	}
+	return s.store.DeleteMailAccount(email) == nil
 }
 
 // runTurbStyleProtocolLogin executes the complete login/OTP/callback/session
