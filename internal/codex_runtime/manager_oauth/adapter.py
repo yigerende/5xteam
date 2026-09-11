@@ -275,12 +275,11 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
     def resolve_realtime_phone_source(self, account_email):
         if not self.payload.get("hero_managed") or self._sms_realtime_provider() != "hero_sms":
             return super().resolve_realtime_phone_source(account_email)
-        previous = self.payload.get("_hero_activation")
         try:
-            result = bridge.call("hero_replace", id=previous["activation_id"]) if previous else bridge.call("hero_acquire")
+            result = bridge.call("hero_acquire")
         except Exception as exc:
             raise upstream.LoginFlowError(
-                "Hero 申请或换号失败，已停止继续申请：" + str(exc),
+                "Hero 申请新号码失败，已停止继续申请：" + str(exc),
                 code="sms_provider_failed", retryable=False,
             ) from exc
         act_id = str(result["id"])
@@ -289,7 +288,7 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
                "phone_number": phone, "provider": "hero_sms", "realtime": True}
         self.payload["_hero_activation"] = row
         self.payload["_resolved_sms_phone"] = row
-        self.log("phone_pool", ("Hero 更换号码成功" if previous else "Hero 申请号码成功") + "，激活 ID " + act_id)
+        self.log("phone_pool", "Hero 申请新号码成功，激活 ID " + act_id)
         return {"id": row["id"], "mode": "realtime", "provider": "hero_sms", "phone": phone,
                 "phone_digits": upstream.normalize_phone_digits(phone), "card_code": act_id,
                 "api_url": "", "account_email": account_email}
@@ -483,8 +482,7 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         if phone_id and phone_id not in tried:
             tried.append(phone_id)
         if phone.get("realtime") or phone.get("activation_id"):
-            if not (self.payload.get("hero_managed") and phone.get("provider") == "hero_sms"):
-                self._release_realtime_phone(phone, ok=False)
+            self._release_realtime_phone(phone, ok=False)
         elif phone_id:
             bridge.call("sms_rejected", id=phone_id, disable=exc.disable, reason=exc.reason)
         self.log("phone_pool", "当前号码未通过，换号重试：" + str(exc.reason), "warning")

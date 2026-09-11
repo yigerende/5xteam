@@ -20,7 +20,8 @@ func (s *Store) HasActiveSMSActivation(email string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM sms_activations WHERE email=? AND state IN ('active','cancel_pending','finish_pending')`, email).Scan(&count)
+	// Queued cleanup owns retired numbers independently of the current login.
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM sms_activations WHERE email=? AND state='active'`, email).Scan(&count)
 	return count > 0, err
 }
 

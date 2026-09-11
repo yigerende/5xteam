@@ -176,57 +176,83 @@ class FakeProvider:
 
 
 class ProtocolFlowTests(unittest.TestCase):
-    def test_managed_hero_replaces_without_cancel_then_finishes(self):
+    def test_managed_hero_queues_old_number_then_buys_new_and_finishes(self):
         calls = []
         def rpc(method, params):
             calls.append((method, params))
             if method == "hero_acquire":
-                return {"id": "1", "phone": "66990000001"}
-            if method == "hero_replace":
-                self.assertEqual(params["id"], "1")
-                return {"id": "2", "phone": "66990000002"}
+                act_id = str(sum(m == "hero_acquire" for m, _ in calls))
+                return {"id": act_id, "phone": "6699000000" + act_id}
             if method == "hero_fetch":
                 self.assertEqual(params["id"], "2")
                 return {"found": True, "code": "012345"}
             if method == "hero_release":
-                self.assertEqual(params, {"id": "2", "finish": True})
+                self.assertIn(params, [{"id": "1", "finish": False}, {"id": "2", "finish": True}])
                 return True
             raise AssertionError(method)
         s = Scenario(phone=True, reject_phones=1)
         result = s.run(rpc=rpc, sms_provider="hero_sms")
         self.assertTrue(result["success"], result)
-        self.assertEqual([m for m, _ in calls], ["hero_acquire", "hero_replace", "hero_fetch", "hero_release"])
+        self.assertEqual(calls, [
+            ("hero_acquire", {}), ("hero_release", {"id": "1", "finish": False}),
+            ("hero_acquire", {}), ("hero_fetch", {"id": "2", "timeout_seconds": 10}),
+            ("hero_release", {"id": "2", "finish": True}),
+        ])
+        self.assertTrue(all(delay < 120 for delay in s.sleeps))
         self.assertNotIn("012345", s.logs.getvalue())
 
-    def test_managed_hero_replace_failure_stops_new_purchase(self):
+    def test_managed_hero_purchase_failure_preserves_queued_cleanup(self):
         calls = []
         def rpc(method, params):
             calls.append(method)
             if method == "hero_acquire":
+                if calls.count("hero_acquire") > 1:
+                    raise RuntimeError("Hero-SMS NO_BALANCE")
                 return {"id": "1", "phone": "66990000001"}
-            if method == "hero_replace":
-                raise RuntimeError("Hero-SMS HTTP 422: not replaceable yet")
+            if method == "hero_release":
+                self.assertEqual(params, {"id": "1", "finish": False})
+                return True
             raise AssertionError(method)
         result = Scenario(phone=True, reject_phones=1).run(rpc=rpc, sms_provider="hero_sms")
         self.assertFalse(result["success"])
         self.assertFalse(result["retryable"])
         self.assertEqual(result["error_code"], "sms_provider_failed")
-        self.assertEqual(calls, ["hero_acquire", "hero_replace"])
+        self.assertEqual(calls, ["hero_acquire", "hero_release", "hero_acquire"])
 
-    def test_managed_hero_timeout_has_bounded_polls_and_replacements(self):
+    def test_managed_hero_timeout_has_bounded_polls_and_purchases(self):
         calls = []
         def rpc(method, params):
             calls.append(method)
-            if method in {"hero_acquire", "hero_replace"}:
-                return {"id": str(calls.count("hero_replace") + 1), "phone": "66990000001"}
+            if method == "hero_acquire":
+                return {"id": str(calls.count("hero_acquire")), "phone": "66990000001"}
             if method == "hero_fetch":
                 return {"found": False}
+            if method == "hero_release":
+                self.assertFalse(params["finish"])
+                return True
             raise AssertionError(method)
         result = Scenario(phone=True).run(rpc=rpc, sms_provider="hero_sms")
         self.assertFalse(result["success"])
-        self.assertEqual(calls.count("hero_acquire"), 1)
-        self.assertEqual(calls.count("hero_replace"), 2)
+        self.assertEqual(calls.count("hero_acquire"), 3)
+        self.assertEqual(calls.count("hero_release"), 3)
+        self.assertNotIn("hero_replace", calls)
         self.assertEqual(calls.count("hero_fetch"), 54)
+
+    def test_managed_hero_rejected_numbers_stop_at_purchase_limit(self):
+        calls = []
+        def rpc(method, params):
+            calls.append((method, params))
+            if method == "hero_acquire":
+                act_id = str(sum(m == "hero_acquire" for m, _ in calls))
+                return {"id": act_id, "phone": "6699000000" + act_id}
+            if method == "hero_release":
+                self.assertFalse(params["finish"])
+                return True
+            raise AssertionError(method)
+        result = Scenario(phone=True, reject_phones=10).run(rpc=rpc, sms_provider="hero_sms")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "phone_2fa_failed")
+        self.assertEqual([m for m, _ in calls], ["hero_acquire", "hero_release"] * 3)
 
     def success(self, s, **payload):
         result = s.run(**payload)

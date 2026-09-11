@@ -163,8 +163,115 @@ func TestHeroConcurrentJobsDoNotShareActivations(t *testing.T) {
 		t.Fatal(len(items), count.Load())
 	}
 	p := &oauthProtocolRPC{server: s, ctx: context.Background(), email: "account0@example.com"}
-	if _, err := p.call("hero_acquire", nil); err == nil {
-		t.Fatal("bought new number before old cleanup")
+	defer p.close()
+	if _, err := p.call("hero_acquire", nil); err != nil {
+		t.Fatal("pending cleanup blocked new OAuth attempt", err)
+	}
+	if count.Load() != 7 {
+		t.Fatal("unexpected purchase count", count.Load())
+	}
+}
+
+func TestHeroCancelCooldownDoesNotBlockNextNumber(t *testing.T) {
+	var purchased atomic.Int64
+	var denyCancel atomic.Bool
+	denyCancel.Store(true)
+	s, _ := heroFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/v1/activations":
+			id := purchased.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": id, "phone": fmt.Sprint(66990000000 + id)}}})
+		case "DELETE /api/v1/activations/1":
+			if denyCancel.Load() {
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"title":"EARLY_CANCEL_DENIED","details":"You can't cancel activation in first 2 minutes"}`))
+				return
+			}
+			w.WriteHeader(204)
+		case "GET /api/v1/activations/2/otp/last":
+			_, _ = w.Write([]byte(`{"data":{"smsCode":"012345"}}`))
+		case "POST /api/v1/activations/2/finish":
+			w.WriteHeader(204)
+		default:
+			t.Error("unexpected request", r.Method, r.URL.Path)
+			w.WriteHeader(500)
+		}
+	})
+	p := &oauthProtocolRPC{server: s, ctx: context.Background(), email: "fixture@example.com"}
+	defer p.close()
+	if _, err := p.call("hero_acquire", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.call("hero_release", map[string]any{"id": "1", "finish": false}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.store.DueSMSActivations(time.Now())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("old number not queued: %v %v", items, err)
+	}
+	s.cleanupHeroActivation(context.Background(), items[0])
+	if _, err := p.call("hero_acquire", nil); err != nil {
+		t.Fatal("cooldown blocked next number", err)
+	}
+	other := &oauthProtocolRPC{server: s, ctx: context.Background(), email: p.email}
+	if _, err := other.call("hero_acquire", nil); err == nil {
+		t.Fatal("same email bought a second in-use number")
+	}
+	result, err := p.call("hero_fetch", map[string]any{"id": "2"})
+	if err != nil || result.(map[string]any)["code"] != "012345" {
+		t.Fatalf("new number OTP: %v %v", result, err)
+	}
+	if _, err := p.call("hero_release", map[string]any{"id": "2", "finish": true}); err != nil {
+		t.Fatal(err)
+	}
+	items, err = s.store.DueSMSActivations(time.Now().Add(time.Hour))
+	if err != nil || len(items) != 2 {
+		t.Fatalf("both activations must stay tracked: %v %v", items, err)
+	}
+	for _, item := range items {
+		if item.ID == "2" {
+			s.cleanupHeroActivation(context.Background(), item)
+		}
+	}
+	items, err = s.store.DueSMSActivations(time.Now().Add(time.Hour))
+	if err != nil || len(items) != 1 || items[0].ID != "1" || items[0].Attempts != 1 {
+		t.Fatalf("old number lost during new number completion: %v %v", items, err)
+	}
+	denyCancel.Store(false)
+	s.cleanupHeroActivation(context.Background(), items[0])
+	items, err = s.store.DueSMSActivations(time.Now().Add(time.Hour))
+	if err != nil || len(items) != 0 || purchased.Load() != 2 {
+		t.Fatalf("cleanup=%v purchases=%d err=%v", items, purchased.Load(), err)
+	}
+}
+
+func TestHeroConcurrentSameEmailOnlyBuysOneInUseNumber(t *testing.T) {
+	var purchased atomic.Int64
+	s, _ := heroFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		id := purchased.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": id, "phone": fmt.Sprint(66990000000 + id)}}})
+	})
+	jobs := make(chan *oauthProtocolRPC, 6)
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p := &oauthProtocolRPC{server: s, ctx: context.Background(), email: "fixture@example.com"}
+			if _, err := p.call("hero_acquire", nil); err == nil {
+				jobs <- p
+			}
+		}()
+	}
+	wg.Wait()
+	close(jobs)
+	succeeded := 0
+	for p := range jobs {
+		succeeded++
+		p.close()
+	}
+	if succeeded != 1 || purchased.Load() != 1 {
+		t.Fatalf("concurrent purchases=%d successes=%d", purchased.Load(), succeeded)
 	}
 }
 

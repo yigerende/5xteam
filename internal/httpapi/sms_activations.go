@@ -66,9 +66,9 @@ func (p *oauthProtocolRPC) callHero(method string, args map[string]any) (any, er
 				return nil, checkErr
 			}
 			if outstanding {
-				return nil, errors.New("该账号的上一个 Hero 激活尚未回收，暂不购买新号码")
+				return nil, errors.New("该账号已有正在使用的 Hero 激活，请勿并发申请")
 			}
-			// A failed release must not allow a second live activation in this job.
+			// Only a durable cleanup handoff permits acquiring the next number.
 			if len(p.heroOwned) > 0 {
 				return nil, errors.New("本次任务已有 Hero 激活，禁止重复申请")
 			}

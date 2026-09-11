@@ -65,3 +65,26 @@ func TestSMSRecoveryAndEncryptedConfig(t *testing.T) {
 		t.Fatalf("backoff ignored: %v %v", items, err)
 	}
 }
+
+func TestSMSOnlyInUseActivationBlocksPurchase(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, state := range []string{"active", "cancel_pending", "finish_pending", "cleanup_failed"} {
+		t.Run(state, func(t *testing.T) {
+			email := state + "@example.com"
+			if err := s.SaveSMSActivation(state, email, herosms.Config{APIKey: "fixture-key"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpdateSMSActivation(state, state, "", 0, time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+			blocked, err := s.HasActiveSMSActivation(email)
+			if err != nil || blocked != (state == "active") {
+				t.Fatalf("state=%s blocked=%v err=%v", state, blocked, err)
+			}
+		})
+	}
+}
