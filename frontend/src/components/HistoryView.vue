@@ -7,10 +7,10 @@ import MessageBar from './MessageBar.vue'
 import StatusPill from './StatusPill.vue'
 import Pagination from './Pagination.vue'
 
-const props = defineProps({ history: { type: Array, default: () => [] } })
+const props = defineProps({ history: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
 const emit = defineEmits(['reload'])
 const page = ref(1)
-const size = ref(10)
+const size = ref(props.defaultPageSize)
 const rows = ref([])
 const total = ref(0)
 const summary = reactive({ all: 0, completed: 0, partial: 0, accounts: 0 })

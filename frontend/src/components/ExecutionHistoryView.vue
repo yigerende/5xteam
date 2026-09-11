@@ -6,12 +6,13 @@ import Pagination from './Pagination.vue'
 import StatusPill from './StatusPill.vue'
 import { formatTime } from '../utils'
 
+const props = defineProps({ defaultPageSize: { type: Number, default: 10 } })
 const events = ref([])
 const query = ref('')
 const filter = ref('all')
 const expanded = ref(new Set())
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(props.defaultPageSize)
 const total = ref(0)
 const busy = ref(false)
 const exportBusy = ref(false)

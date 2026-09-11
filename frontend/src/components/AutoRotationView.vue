@@ -7,12 +7,12 @@ import StatusPill from './StatusPill.vue'
 import Pagination from './Pagination.vue'
 import { formatTime } from '../utils'
 
-const props = defineProps({ adminAccounts: { type: Array, default: () => [] } })
+const props = defineProps({ adminAccounts: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
 const settings = ref({ enabled: false, threshold_percent: 50, interval_seconds: 300, concurrency: 2, max_per_run: 0, retry_count: 1, remove_method: 'mother_kick' })
 const runs = ref([]); const tasks = ref([]); const events = ref([]); const selectedRun = ref(null); const busy = ref(''); const message = ref({ text: '', type: '' })
-const runPage = ref(1); const runPageSize = ref(10); const runTotal = ref(0)
-const taskPage = ref(1); const taskPageSize = ref(10); const taskTotal = ref(0)
-const eventPage = ref(1); const eventPageSize = ref(10); const eventTotal = ref(0)
+const runPage = ref(1); const runPageSize = ref(props.defaultPageSize); const runTotal = ref(0)
+const taskPage = ref(1); const taskPageSize = ref(props.defaultPageSize); const taskTotal = ref(0)
+const eventPage = ref(1); const eventPageSize = ref(props.defaultPageSize); const eventTotal = ref(0)
 const latestRunAt = ref('')
 const clock = ref(Date.now())
 let countdownTimer

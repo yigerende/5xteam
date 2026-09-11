@@ -146,20 +146,20 @@ onMounted(checkAuth)
 
     <main class="app-main">
       <div v-if="loadingError" class="global-alert"><strong>数据加载失败</strong><span>{{ loadingError }}</span><button type="button" @click="loadingError = ''; load()">重试</button></div>
-      <ProManagementView v-if="current === 'pro'" :accounts="proAccounts" :admin-accounts="adminAccounts" @reload="syncProAccounts" />
+      <ProManagementView v-if="settings && current === 'pro'" :accounts="proAccounts" :admin-accounts="adminAccounts" :default-page-size="settings.default_page_size || 10" @reload="syncProAccounts" />
       <template v-if="spaceMergeVisited">
         <WorkflowView v-show="current === 'full'" mode="full" :admin-accounts="adminAccounts" :pro-accounts="proAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
         <WorkflowView v-show="current === 'enter'" mode="enter" :admin-accounts="adminAccounts" :pro-accounts="proAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
         <WorkflowView v-show="current === 'transfer'" mode="transfer" :admin-accounts="adminAccounts" :pro-accounts="proAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
         <WorkflowView v-show="current === 'kick'" mode="kick" :admin-accounts="adminAccounts" :pro-accounts="proAccounts" :any-active="anyActive" @job-state="updateJob" @history-changed="reloadHistory" @navigate="selectTab" />
       </template>
-      <FreePipelineView v-if="current === 'free'" :active="true" :accounts="freeAccounts" :admin-accounts="adminAccounts" :entry-email="teamEntryEmail" @reload="reloadFreeAccounts" />
-      <MailManagementView v-if="current === 'mail'" @open-team="openTeamFromMail" @pro-changed="syncProAccounts" />
-      <SmsManagementView v-if="current === 'sms'" />
-      <HistoryView v-if="current === 'history'" :history="history" @reload="reloadHistory" />
-      <AdminAccountsView v-if="current === 'admins'" :accounts="adminAccounts" :proxies="proxies" @reload="reloadAdmins" />
-      <OpenAIAccountsView v-if="current === 'openai'" :accounts="openAIAccounts" @reload="reloadOpenAI" />
-      <ProxiesView v-if="current === 'proxies'" :proxies="proxies" :selected-u-r-l="settings?.proxy_url || ''" @reload="reloadProxies" @select="selectProxy" />
+      <FreePipelineView v-if="settings && current === 'free'" :active="true" :accounts="freeAccounts" :admin-accounts="adminAccounts" :entry-email="teamEntryEmail" :default-page-size="settings.default_page_size || 10" @reload="reloadFreeAccounts" />
+      <MailManagementView v-if="settings && current === 'mail'" :default-page-size="settings.default_page_size || 10" @open-team="openTeamFromMail" @pro-changed="syncProAccounts" />
+      <SmsManagementView v-if="settings && current === 'sms'" :default-page-size="settings.default_page_size || 10" />
+      <HistoryView v-if="settings && current === 'history'" :history="history" :default-page-size="settings.default_page_size || 10" @reload="reloadHistory" />
+      <AdminAccountsView v-if="settings && current === 'admins'" :accounts="adminAccounts" :proxies="proxies" :default-page-size="settings.default_page_size || 10" @reload="reloadAdmins" />
+      <OpenAIAccountsView v-if="settings && current === 'openai'" :accounts="openAIAccounts" :default-page-size="settings.default_page_size || 10" @reload="reloadOpenAI" />
+      <ProxiesView v-if="settings && current === 'proxies'" :proxies="proxies" :selected-u-r-l="settings.proxy_url || ''" :default-page-size="settings.default_page_size || 10" @reload="reloadProxies" @select="selectProxy" />
       <SettingsView v-if="current === 'settings'" :settings="settings" :proxies="proxies" @saved="settings = $event" />
     </main>
     <div v-if="passwordDialog" class="modal-backdrop" @click.self="passwordDialog = false"><section class="modal-panel"><div class="modal-heading"><div><span class="overline">ACCOUNT SECURITY</span><h2>修改密码</h2></div><button class="icon-button" type="button" title="关闭" @click="passwordDialog = false"><X :size="17" /></button></div><form class="modal-form" @submit.prevent="changePassword"><label class="field"><span>当前密码</span><input v-model="passwordForm.current_password" type="password" required /></label><label class="field"><span>新密码</span><input v-model="passwordForm.new_password" type="password" minlength="6" required /></label><label class="field"><span>确认新密码</span><input v-model="passwordForm.confirm_password" type="password" minlength="6" required /></label><div v-if="passwordMessage" class="login-error">{{ passwordMessage }}</div><div class="modal-actions"><button class="btn" type="button" @click="passwordDialog = false">取消</button><button class="btn primary" type="submit" :disabled="passwordBusy">{{ passwordBusy ? '保存中…' : '确认修改' }}</button></div></form></section></div>

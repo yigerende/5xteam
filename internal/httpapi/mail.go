@@ -84,7 +84,7 @@ func (s *Server) mailStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listMailAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
-		page := parsePagination(r)
+		page := s.parsePagination(r)
 		result, err := s.store.MailAccountsPage("mail", r.URL.Query().Get("query"), r.URL.Query().Get("space_state"), page.Limit, page.Offset)
 		if err != nil {
 			writeAPI(w, http.StatusInternalServerError, nil, "读取邮件账号失败: "+err.Error())
@@ -296,7 +296,7 @@ func (s *Server) mailFetchStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listMailMessages(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
-		page := parsePagination(r)
+		page := s.parsePagination(r)
 		items, total, err := s.store.MailMessagesPage(r.URL.Query().Get("query"), r.URL.Query().Get("mail_type"), page.Limit, page.Offset)
 		if err != nil {
 			writeAPI(w, http.StatusInternalServerError, nil, "读取邮件失败: "+err.Error())

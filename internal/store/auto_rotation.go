@@ -285,7 +285,7 @@ func (s *Store) EnsureFreeAccountLifecycleTask(account model.FreeAccountProfile)
 func (s *Store) AutoRotationEventsByAccount(accountID string) []model.AutoRotationEvent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query("SELECT payload FROM auto_rotation_events WHERE account_id=? ORDER BY created_at DESC LIMIT 10000", accountID)
+	rows, err := s.db.Query("SELECT payload FROM auto_rotation_events WHERE account_id=? ORDER BY created_at DESC", accountID)
 	if err != nil {
 		return nil
 	}

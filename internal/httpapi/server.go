@@ -286,6 +286,9 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &settings, 1<<20); err != nil {
 		return
 	}
+	if settings.DefaultPageSize == 0 {
+		settings.DefaultPageSize = s.store.Settings().DefaultPageSize
+	}
 	settings.OAuthProxyMode = normalizeOAuthProxyMode(settings.OAuthProxyMode)
 	if err := validateSettings(settings); err != nil {
 		writeAPI(w, 400, nil, err.Error())
@@ -311,7 +314,7 @@ func (s *Server) listProxies(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 200, s.store.Proxies(), "")
 		return
 	}
-	page := parsePagination(r)
+	page := s.parsePagination(r)
 	items, total, err := s.store.ProxiesPage(page.Limit, page.Offset)
 	if err != nil {
 		writeAPI(w, 500, nil, "读取代理列表失败: "+err.Error())
@@ -421,7 +424,7 @@ func (s *Server) listAdminAccounts(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 200, s.store.AdminAccounts(), "")
 		return
 	}
-	page := parsePagination(r)
+	page := s.parsePagination(r)
 	items, total, summary, err := s.store.AdminAccountsPage(page.Limit, page.Offset)
 	if err != nil {
 		writeAPI(w, 500, nil, "读取母号列表失败: "+err.Error())
@@ -530,7 +533,7 @@ func (s *Server) listOpenAIAccounts(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 200, s.store.OpenAIAccounts(), "")
 		return
 	}
-	page := parsePagination(r)
+	page := s.parsePagination(r)
 	items, total, err := s.store.OpenAIAccountsPage(page.Limit, page.Offset)
 	if err != nil {
 		writeAPI(w, 500, nil, "读取 OpenAI 账号失败: "+err.Error())
@@ -1129,6 +1132,11 @@ func validateSettings(value model.Settings) error {
 	if value.NetworkRetryInterval < 0 || value.NetworkRetryInterval > 120 {
 		return errors.New("网络重试间隔必须在 0 到 120 秒之间")
 	}
+	switch value.DefaultPageSize {
+	case 10, 50, 100, 500:
+	default:
+		return errors.New("默认分页数只能选择 10、50、100 或 500")
+	}
 	for _, delay := range []int{value.InviteDelaySeconds, value.AcceptDelaySeconds, value.TransferDelaySeconds, value.AccountIntervalSeconds} {
 		if delay < 0 || delay > 120 {
 			return errors.New("步骤等待必须在 0 到 120 秒之间")
@@ -1283,7 +1291,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 200, s.store.History(), "")
 		return
 	}
-	page := parsePagination(r)
+	page := s.parsePagination(r)
 	items, total, summary, err := s.store.HistoryPage(page.Limit, page.Offset)
 	if err != nil {
 		writeAPI(w, 500, nil, "读取执行历史失败: "+err.Error())
@@ -1305,7 +1313,7 @@ func (s *Server) accountProgress(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 200, s.store.AccountProgress(r.URL.Query().Get("team_account_id")), "")
 		return
 	}
-	page := parsePagination(r)
+	page := s.parsePagination(r)
 	items, total, err := s.store.AccountProgressPage(r.URL.Query().Get("team_account_id"), page.Limit, page.Offset)
 	if err != nil {
 		writeAPI(w, 500, nil, "读取账号进度失败: "+err.Error())

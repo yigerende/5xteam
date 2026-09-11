@@ -43,6 +43,7 @@ import StatusPill from "./StatusPill.vue";
 import Pagination from "./Pagination.vue";
 
 const emit = defineEmits(["open-team", "pro-changed"]);
+const props = defineProps({ defaultPageSize: { type: Number, default: 10 } });
 const activeTab = ref("accounts");
 const accounts = ref([]);
 const pipelineAccounts = ref([]);
@@ -109,7 +110,7 @@ const credentialDialog = reactive({
 });
 const timers = new Set();
 const accountPage = ref(1);
-const accountPageSize = ref(10);
+const accountPageSize = ref(props.defaultPageSize);
 const accountTotal = ref(0);
 const selectedEmails = ref(new Set());
 const pagedFilteredAccounts = computed(() => accounts.value);
@@ -120,7 +121,7 @@ const allVisibleSelected = computed(() =>
   pagedFilteredAccounts.value.length > 0 && pagedFilteredAccounts.value.every((item) => selectedEmails.value.has(String(item.email || '').toLowerCase())),
 );
 const messagePage = ref(1);
-const messagePageSize = ref(10);
+const messagePageSize = ref(props.defaultPageSize);
 const messageTotal = ref(0);
 const loginDialogTerminal = computed(
   () =>

@@ -23,7 +23,7 @@ import (
 
 func (s *Server) listProAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
-		page := parsePagination(r)
+		page := s.parsePagination(r)
 		items, total, summary, err := s.store.ProAccountsPage(r.URL.Query().Get("query"), r.URL.Query().Get("merge_state"), page.Limit, page.Offset)
 		if err != nil {
 			writeAPI(w, http.StatusInternalServerError, nil, "读取 Pro 账号失败: "+err.Error())

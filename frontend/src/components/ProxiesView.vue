@@ -8,7 +8,7 @@ import MessageBar from './MessageBar.vue'
 import Pagination from './Pagination.vue'
 import StatusPill from './StatusPill.vue'
 
-const props = defineProps({ proxies: { type: Array, default: () => [] }, selectedURL: { type: String, default: '' } })
+const props = defineProps({ proxies: { type: Array, default: () => [] }, selectedURL: { type: String, default: '' }, defaultPageSize: { type: Number, default: 10 } })
 const emit = defineEmits(['reload', 'select'])
 const form = reactive({ id: '', name: '', url: '' })
 const tests = ref(new Map())
@@ -19,7 +19,7 @@ const batch = reactive({ mode: '', completed: 0, total: 0 })
 const message = reactive({ text: '', type: '' })
 const busy = ref(false)
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(props.defaultPageSize)
 const rows = ref([])
 const total = ref(0)
 const pagedProxies = computed(() => rows.value)

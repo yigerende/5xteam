@@ -7,13 +7,13 @@ import MessageBar from './MessageBar.vue'
 import Pagination from './Pagination.vue'
 import StatusPill from './StatusPill.vue'
 
-const props = defineProps({ accounts: { type: Array, default: () => [] }, adminAccounts: { type: Array, default: () => [] } })
+const props = defineProps({ accounts: { type: Array, default: () => [] }, adminAccounts: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
 const emit = defineEmits(['reload'])
 const activeTab = ref('accounts')
 const spaceFilter = ref('all')
 const query = ref('')
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(props.defaultPageSize)
 const rows = ref([])
 const total = ref(0)
 const listSummary = reactive({ all: 0, oauth_ready: 0, pushed: 0, merged: 0 })

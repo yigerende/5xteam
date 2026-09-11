@@ -296,7 +296,7 @@ func TestLegacySettingsReceiveNetworkRetryDefaults(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	settings := reopened.Settings()
 	defaults := model.DefaultSettings()
-	if settings.NetworkRetryCount != defaults.NetworkRetryCount || settings.NetworkRetryInterval != defaults.NetworkRetryInterval {
+	if settings.NetworkRetryCount != defaults.NetworkRetryCount || settings.NetworkRetryInterval != defaults.NetworkRetryInterval || settings.DefaultPageSize != defaults.DefaultPageSize {
 		t.Fatalf("retry defaults not migrated: %+v", settings)
 	}
 }

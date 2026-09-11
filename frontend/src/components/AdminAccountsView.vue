@@ -8,7 +8,7 @@ import MessageBar from './MessageBar.vue'
 import StatusPill from './StatusPill.vue'
 import Pagination from './Pagination.vue'
 
-const props = defineProps({ accounts: { type: Array, default: () => [] }, proxies: { type: Array, default: () => [] } })
+const props = defineProps({ accounts: { type: Array, default: () => [] }, proxies: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
 const emit = defineEmits(['reload'])
 const form = reactive({ id: '', label: '', session: '', refreshToken: '', teamID: '' })
 const parsed = reactive({ accessToken: '', refreshToken: '', preview: null })
@@ -20,7 +20,7 @@ const capacities = ref(new Map())
 const capacityBusy = ref(new Set())
 const capacityAllBusy = ref(false)
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(props.defaultPageSize)
 const rows = ref([])
 const total = ref(0)
 const listSummary = reactive({ all: 0, child_entries: 0, child_total_cost_usd: 0 })

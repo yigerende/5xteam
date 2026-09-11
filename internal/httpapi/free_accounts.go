@@ -28,7 +28,7 @@ const downstreamProlitePlanType = "self_serve_business_prolite"
 
 func (s *Server) listFreeAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
-		page := parsePagination(r)
+		page := s.parsePagination(r)
 		accounts, total, summary, err := s.store.FreeAccountsPage(r.URL.Query().Get("space_state"), page.Limit, page.Offset)
 		if err != nil {
 			writeAPI(w, http.StatusInternalServerError, nil, "读取 Team 轮转账号失败: "+err.Error())
@@ -57,18 +57,6 @@ func (s *Server) listFreeAccountEvents(w http.ResponseWriter, r *http.Request) {
 	task, taskErr := s.store.EnsureFreeAccountLifecycleTask(profile)
 	if taskErr != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, taskErr.Error())
-		return
-	}
-	if paginationRequested(r) {
-		page := parsePagination(r)
-		items, total, pageErr := s.store.AutoRotationEventsPage("", "", id, "", "", page.Limit, page.Offset)
-		if pageErr != nil {
-			writeAPI(w, http.StatusInternalServerError, nil, "读取账号执行记录失败: "+pageErr.Error())
-			return
-		}
-		writeAPI(w, http.StatusOK, paginatedData(redactExecutionEvents(items), total, page, map[string]any{
-			"account": profile, "lifecycle_task": task,
-		}), "")
 		return
 	}
 	writeAPI(w, http.StatusOK, map[string]any{"account": profile, "lifecycle_task": task, "events": redactExecutionEvents(s.store.AutoRotationEventsByAccount(id))}, "")

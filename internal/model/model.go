@@ -13,6 +13,7 @@ type Settings struct {
 	RequestTimeoutSeconds  int    `json:"request_timeout_seconds"`
 	NetworkRetryCount      int    `json:"network_retry_count"`
 	NetworkRetryInterval   int    `json:"network_retry_interval_seconds"`
+	DefaultPageSize        int    `json:"default_page_size"`
 	Concurrency            int    `json:"concurrency"`
 	ProxyURL               string `json:"proxy_url"`
 	OAuthProxyMode         string `json:"oauth_proxy_mode"`
@@ -263,7 +264,7 @@ func DefaultSettings() Settings {
 		BaseURL: "https://chatgpt.com/backend-api", AcceptedTOSVersion: "2024-12-17",
 		Role: "standard-user", InviteDelaySeconds: 3,
 		AcceptDelaySeconds: 2, TransferDelaySeconds: 5, RequestTimeoutSeconds: 45,
-		NetworkRetryCount: 2, NetworkRetryInterval: 3,
+		NetworkRetryCount: 2, NetworkRetryInterval: 3, DefaultPageSize: 10,
 		Concurrency: 2, OAuthProxyMode: "global", AllowSMS: true, AutoCleanup: true,
 	}
 }

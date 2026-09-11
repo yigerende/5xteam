@@ -8,7 +8,7 @@ import MessageBar from './MessageBar.vue'
 import StatusPill from './StatusPill.vue'
 import Pagination from './Pagination.vue'
 
-const props = defineProps({ accounts: { type: Array, default: () => [] } })
+const props = defineProps({ accounts: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
 const emit = defineEmits(['reload'])
 const form = reactive({ tokens: '', refreshToken: '' })
 const selected = ref(new Set())
@@ -17,7 +17,7 @@ const busy = ref(false)
 const fileInput = ref(null)
 const folderInput = ref(null)
 const page = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(props.defaultPageSize)
 const accounts = ref([])
 const total = ref(0)
 const pagedAccounts = computed(() => accounts.value)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -298,6 +299,49 @@ func TestAccountExecutionLogExportIsDownloadableAndRedacted(t *testing.T) {
 	}
 	if got := payload.Events[0].Request["access_token"]; got != "***" {
 		t.Fatalf("secret was not redacted: %v", got)
+	}
+}
+
+func TestAccountLifecycleEventsIgnorePaginationAndReturnAllEvents(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	account, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "timeline@example.com", UserID: "timeline-user"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make([]model.AutoRotationEvent, 0, 12)
+	for index := 0; index < 12; index++ {
+		events = append(events, model.AutoRotationEvent{ID: fmt.Sprintf("timeline-%02d", index), AccountID: account.ID, Type: "step", CreatedAt: time.Now().Add(time.Duration(index) * time.Second)})
+	}
+	if err := st.AddAutoRotationEvents(events); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	req := httptest.NewRequest(http.MethodGet, "/api/free-accounts/"+account.ID+"/events?page=1&page_size=10", nil)
+	req.SetPathValue("id", account.ID)
+	rec := httptest.NewRecorder()
+	server.listFreeAccountEvents(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Events []model.AutoRotationEvent `json:"events"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.OK || len(payload.Data.Events) != len(events) {
+		t.Fatalf("account lifecycle returned %d events, want %d", len(payload.Data.Events), len(events))
 	}
 }
 

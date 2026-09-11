@@ -16,6 +16,7 @@ import MessageBar from "./MessageBar.vue";
 import StatusPill from "./StatusPill.vue";
 import Pagination from "./Pagination.vue";
 
+const props = defineProps({ defaultPageSize: { type: Number, default: 10 } });
 const providers = ref([]);
 const phones = ref([]);
 const stats = ref({});
@@ -51,10 +52,10 @@ const activationHistory = ref([]);
 const historyLoading = ref(false);
 const smsMenu = ref("pool");
 const phonePage = ref(1);
-const phonePageSize = ref(10);
+const phonePageSize = ref(props.defaultPageSize);
 const phoneTotal = ref(0);
 const activationPage = ref(1);
-const activationPageSize = ref(10);
+const activationPageSize = ref(props.defaultPageSize);
 const activationTotal = ref(0);
 
 const providerLabel = (key) =>

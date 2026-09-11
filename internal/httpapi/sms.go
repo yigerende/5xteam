@@ -23,7 +23,7 @@ func (s *Server) listSMSProviders(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) listSMSPhones(w http.ResponseWriter, r *http.Request) {
 	limit, offset := 500, 0
-	page := parsePagination(r)
+	page := s.parsePagination(r)
 	if paginationRequested(r) {
 		limit, offset = page.Limit, page.Offset
 	}
@@ -447,7 +447,7 @@ func (s *Server) testSMSPlatform(w http.ResponseWriter, r *http.Request) {
 // legacy handler_api.php endpoint remains the source for balance/number
 // operations.  The API key is only read server-side and is never returned.
 func (s *Server) getSMSPlatformHistory(w http.ResponseWriter, r *http.Request) {
-	page := parsePagination(r)
+	page := s.parsePagination(r)
 	provider := strings.TrimSpace(r.URL.Query().Get("provider"))
 	if provider != "hero_sms" {
 		writeAPI(w, http.StatusOK, map[string]any{"provider": provider, "items": []any{}, "total": 0, "message": "当前仅支持 hero-sms 激活历史"}, "")
