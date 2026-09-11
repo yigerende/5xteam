@@ -7,14 +7,15 @@ COPY internal ./internal
 COPY webui ./webui
 RUN go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/chatgpt-space-merge ./cmd/server
 
-FROM alpine:3.21
+FROM python:3.11-alpine3.20
 # Protocol login/OAuth flows are executed by the Go service through Python.
 # The OAuth runtime also has a Node Sentinel fallback, so Node.js and the full
-# internal/codex_runtime package must be present in the image. A Docker image
-# does not inherit Python packages or source files from the host.
-RUN apk add --no-cache python3 py3-pip nodejs npm libstdc++ ca-certificates tzdata \
-    && python3 -m pip install --break-system-packages --no-cache-dir curl_cffi pyotp \
-    && python3 -c "import curl_cffi, pyotp; print('python protocol dependencies ok')"
+# internal/codex_runtime package must be present in the image. Python is pinned
+# to 3.11 because parity.json contains AST hashes generated with Python 3.11;
+# Python 3.12 changes ast.dump output even when the source is identical.
+RUN apk add --no-cache nodejs npm libstdc++ ca-certificates tzdata \
+    && python3 -m pip install --no-cache-dir curl_cffi pyotp \
+    && python3 -c "import sys, curl_cffi, pyotp; assert sys.version_info[:2] == (3, 11); print('python protocol dependencies ok')"
 RUN addgroup -S app && adduser -S -G app app
 WORKDIR /app
 COPY --from=builder /out/chatgpt-space-merge /app/chatgpt-space-merge
