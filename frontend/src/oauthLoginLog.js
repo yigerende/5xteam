@@ -1,5 +1,8 @@
 const methodNames = {
   email_otp: '邮箱验证码登录',
+  email_otp_totp: '邮箱验证码 + OpenAI TOTP 登录',
+  password_email_otp_totp: 'ChatGPT 密码 + 邮箱验证码 + OpenAI TOTP 登录',
+  totp: 'OpenAI TOTP 验证',
   password_totp: 'ChatGPT 密码 + OpenAI TOTP 登录',
   password: 'ChatGPT 密码登录',
   password_email_otp: 'ChatGPT 密码 + 邮箱验证码登录',

@@ -1723,7 +1723,7 @@ class ChatGPTProtocolLogin:
             raise LoginFlowError(
                 "账号启用了验证器(TOTP)二次验证，但未提供 2FA 密钥。",
                 code="totp_secret_missing",
-                hint="请在邮箱管理里以「email----GPT密码----2FA密钥」格式导入该账号后重试。",
+                hint="请在邮件管理中为该账号补充 OpenAI TOTP 密钥后重试；邮箱验证码登录无需 GPT 密码。",
                 retryable=False,
             )
 
@@ -1753,6 +1753,17 @@ class ChatGPTProtocolLogin:
         continue_url = self.normalize_auth_url(self.extract_continue_url(current_step))
         # 邮箱码通过后若被甩到 passkey/auth_challenge：同样永久失败
         self.raise_if_passkey_or_challenge(current_step, continue_url)
+        # Email OTP can require the same TOTP challenge as password login.
+        if self.extract_page_type(current_step) == "mfa_challenge" or "/mfa-challenge" in (continue_url or ""):
+            totp_secret = coerce_text(self.payload.get("_totp_secret"))
+            if totp_secret:
+                return self.complete_totp_challenge(current_step, totp_secret)
+            raise LoginFlowError(
+                "账号启用了验证器(TOTP)二次验证，但未提供 2FA 密钥。",
+                code="totp_secret_missing",
+                hint="请在邮件管理中为该账号补充 OpenAI TOTP 密钥后重试；邮箱验证码登录无需 GPT 密码。",
+                retryable=False,
+            )
         if self.needs_phone_verification(current_step, continue_url):
             continue_url = self.complete_phone_verification(current_step, continue_url)
         if not continue_url:

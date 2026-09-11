@@ -69,7 +69,12 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         return super().submit_modern_password(password)
 
     def complete_totp_challenge(self, step, secret):
-        self.set_login_method("password_totp", "ChatGPT 密码 + OpenAI TOTP 登录")
+        method, label = {
+            "email_otp": ("email_otp_totp", "邮箱验证码 + OpenAI TOTP 登录"),
+            "password_email_otp": ("password_email_otp_totp", "ChatGPT 密码 + 邮箱验证码 + OpenAI TOTP 登录"),
+            "password": ("password_totp", "ChatGPT 密码 + OpenAI TOTP 登录"),
+        }.get(self.login_details["login_method"], ("totp", "OpenAI TOTP 验证"))
+        self.set_login_method(method, label)
         self.log("totp", "OpenAI 要求 TOTP，开始验证器验证")
         return super().complete_totp_challenge(step, secret)
 
@@ -161,7 +166,7 @@ def run(payload, rpc=None):
     provider = str(payload.get("sms_provider") or "").strip()
     mode = "password_totp" if payload.get("login_mode") == "password_totp" else "email_otp"
     local = {"email": email, "password": str(payload.get("gpt_password") or "") if mode == "password_totp" else "",
-             "_totp_secret": str(payload.get("totp_secret") or "") if mode == "password_totp" else "",
+             "_totp_secret": str(payload.get("totp_secret") or ""),
              "force_email_code": mode == "email_otp", "email_code_login": mode == "email_otp",
              "configured_login_mode": payload.get("configured_login_mode") or mode,
              "selected_login_mode": mode,

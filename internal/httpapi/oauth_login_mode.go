@@ -48,10 +48,10 @@ func (selection oauthLoginSelection) apply(payload map[string]any) {
 		payload[key] = value
 	}
 	payload["login_mode"] = selection.selected
-	payload["gpt_password"], payload["totp_secret"] = "", ""
+	// Email OTP may still be followed by a server-requested TOTP challenge.
+	payload["gpt_password"], payload["totp_secret"] = "", selection.credentials.TotpSecret
 	if selection.selected == "password_totp" {
 		payload["gpt_password"] = selection.credentials.GptPassword
-		payload["totp_secret"] = selection.credentials.TotpSecret
 	}
 }
 

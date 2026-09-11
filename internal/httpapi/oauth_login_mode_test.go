@@ -32,8 +32,11 @@ func TestSelectOAuthLoginCredentialMatrix(t *testing.T) {
 					if payload["login_mode"] != want {
 						t.Fatal("child process mode differs from selection")
 					}
-					if want == "email_otp" && (payload["gpt_password"] != "" || payload["totp_secret"] != "") {
-						t.Fatal("email mode passed authentication credentials to password/TOTP path")
+					if want == "email_otp" && payload["gpt_password"] != "" {
+						t.Fatal("email mode must not submit a saved password")
+					}
+					if payload["totp_secret"] != secret {
+						t.Fatal("TOTP secret must remain available for a server-requested MFA challenge")
 					}
 					if want == "password_totp" && (payload["gpt_password"] != password || payload["totp_secret"] != secret) {
 						t.Fatal("2FA mode did not pass existing credentials unchanged")
@@ -54,16 +57,26 @@ func TestOAuthLoginSelectionIsolatedAcrossAccountsAndRetries(t *testing.T) {
 		workers.Add(1)
 		go func(index int) {
 			defer workers.Done()
-			credentials := model.MailAccountCredentials{Email: fmt.Sprintf("%d@example.com", index), GptPassword: fmt.Sprintf("password-%d", index), TotpSecret: "secret"}
-			login := selectOAuthLogin("password_totp", credentials)
+			credentials := model.MailAccountCredentials{Email: fmt.Sprintf("%d@example.com", index), GptPassword: fmt.Sprintf("password-%d", index), TotpSecret: fmt.Sprintf("secret-%d", index)}
+			mode := "password_totp"
+			if index%2 == 0 {
+				mode = "email_otp"
+			}
+			login := selectOAuthLogin(mode, credentials)
 			credentials.GptPassword = "changed"
+			credentials.TotpSecret = "changed"
 			for range 3 {
 				payload := map[string]any{}
 				login.apply(payload)
-				if payload["gpt_password"] != fmt.Sprintf("password-%d", index) {
+				wantPassword := ""
+				if mode == "password_totp" {
+					wantPassword = fmt.Sprintf("password-%d", index)
+				}
+				if payload["gpt_password"] != wantPassword || payload["totp_secret"] != fmt.Sprintf("secret-%d", index) {
 					t.Error("credential snapshot changed or leaked from another job")
 				}
 				payload["gpt_password"] = "mutated-child-input"
+				payload["totp_secret"] = "mutated-child-input"
 			}
 		}(i)
 	}

@@ -54,6 +54,15 @@ class Scenario:
         cookie = "oai-client-auth-session=" + encoded({"workspaces": [{"id": "ws-1"}]}) + "; Path=/; Secure"
         return Response(url, body={"continue_url": "/sign-in-with-chatgpt/codex/consent"}, cookies=[cookie])
 
+    def mfa(self, url):
+        factors = [{"id": "recovery", "factor_type": "totp", "is_recovery": True}, {"id": "sms", "factor_type": "sms"}, {"id": "factor-1", "factor_type": "totp"}]
+        payload = {"factors": [] if self.o.get("missing_factor") else factors}
+        if self.o.get("fallback_factor"):
+            payload = {"factor_id": "factor-1"}
+        return Response(url, body={"page": {"type": "" if self.o.get("mfa_url_only") else "mfa_challenge", "payload": payload},
+                                   "continue_url": "" if self.o.get("mfa_page_only") else "/mfa-challenge"},
+                        cookies=["mfa_session=private-mfa-cookie; Path=/; Secure"])
+
     def request(self, method, url, **kw):
         path = urlsplit(url).path
         raw = kw.get("data")
@@ -89,7 +98,7 @@ class Scenario:
             if self.o.get("direct_consent"):
                 return self.consent(url)
             if self.o.get("direct_mfa"):
-                return Response(url, body={"page": {"type": "mfa_challenge"}, "continue_url": "/mfa-challenge"})
+                return self.mfa(url)
             if self.o.get("password") or self.o.get("passwordless"):
                 return Response(url, body={"page": {"type": "login_password"}, "continue_url": "/log-in/password"})
             return Response(url, body={"page": {"type": "email_otp_verification"}, "continue_url": "/email-verification"})
@@ -99,11 +108,7 @@ class Scenario:
             if self.o.get("password_consent"):
                 return self.consent(url)
             if self.o.get("totp"):
-                factors = [{"id": "recovery", "factor_type": "totp", "is_recovery": True}, {"id": "sms", "factor_type": "sms"}, {"id": "factor-1", "factor_type": "totp"}]
-                factor_payload = {"factors": [] if self.o.get("missing_factor") else factors}
-                if self.o.get("fallback_factor"):
-                    factor_payload = {"factor_id": "factor-1"}
-                return Response(url, body={"page": {"type": "mfa_challenge", "payload": factor_payload}, "continue_url": "/mfa-challenge"})
+                return self.mfa(url)
             return Response(url, body={"page": {"type": "email_otp_verification"}, "continue_url": "/email-verification"})
         if path.endswith(("email-otp/resend", "email-otp/send", "passwordless/send-otp")):
             return Response(url, 404 if self.o.get("resend_fallback") and path.endswith("resend") else 200)
@@ -112,6 +117,10 @@ class Scenario:
         if path.endswith(("email-otp/validate", "mfa/verify")):
             if self.o.get("validate_error"):
                 return Response(url, self.o.get("validate_status", 403), {"error": {"code": self.o["validate_error"], "message": self.o["validate_error"] + " " + str(data.get("code", ""))}})
+            if path.endswith("email-otp/validate") and self.o.get("email_mfa"):
+                return self.mfa(url)
+            if path.endswith("mfa/verify") and self.o.get("mfa_error"):
+                return Response(url, self.o.get("mfa_status", 400), {"error": {"code": self.o["mfa_error"], "message": self.o["mfa_error"] + " " + str(data.get("code", ""))}})
             if self.o.get("phone"):
                 return Response(url, body={"page": {"type": "add_phone"}, "continue_url": "/add-phone"})
             return self.consent(url)
@@ -268,6 +277,81 @@ class ProtocolFlowTests(unittest.TestCase):
                     self.assertEqual(call["method"], "POST")
                 for secret in ("private-password", "JBSWY3DPEHPK3PXP", "765432"):
                     self.assertNotIn(secret, s.logs.getvalue())
+
+    def test_email_otp_then_totp_uses_existing_mfa_and_oauth_context(self):
+        for extra in ({}, {"mfa_url_only": True}, {"mfa_page_only": True}, {"issue_failed": True}, {"fallback_factor": True}):
+            with self.subTest(extra=extra), patch("pyotp.TOTP.now", return_value="765432"):
+                s = Scenario(email_mfa=True, **extra)
+                r = s.run(totp_secret="JBSWY3DPEHPK3PXP")
+                self.assertTrue(r["success"], r)
+                self.assertEqual(r["refresh_token"], "private-rt")
+                self.assertEqual(r["login_method"], "email_otp_totp")
+                self.assertEqual(r["login_auth_status"], "succeeded")
+                paths = [c["path"] for c in s.calls]
+                expected = ["/api/accounts/email-otp/validate", "/api/accounts/mfa/issue_challenge", "/api/accounts/mfa/verify", "/api/accounts/workspace/select", "/api/accounts/organization/select", "/oauth/token"]
+                self.assertEqual([p for p in paths if p in expected], expected)
+                self.assertNotIn("/api/accounts/password/verify", paths)
+                self.assertEqual(s.identifiers, 1)
+                issue, verify = [next(c for c in s.calls if c["path"] == p) for p in expected[1:3]]
+                self.assertEqual(issue["body"], {"id": "factor-1", "type": "totp", "force_fresh_challenge": False})
+                self.assertEqual(verify["body"], {"id": "factor-1", "type": "totp", "code": "765432"})
+                for call in (issue, verify):
+                    self.assertIn("login_session=private-cookie", call["headers"]["Cookie"])
+                    self.assertIn("mfa_session=private-mfa-cookie", call["headers"]["Cookie"])
+                    self.assertEqual(call["proxies"]["https"], "http://user:proxy-password@proxy.example:8080")
+                    self.assertEqual(call["impersonate"], "chrome131")
+                for secret in ("JBSWY3DPEHPK3PXP", "765432", "234567", "private-mfa-cookie"):
+                    self.assertNotIn(secret, s.logs.getvalue())
+
+    def test_email_totp_fallback_and_password_email_totp_metadata(self):
+        for payload, expected in [
+            ({"login_mode": "email_otp", "configured_login_mode": "password_totp", "login_fallback_reason": "missing_password"}, "email_otp_totp"),
+            ({"login_mode": "email_otp", "gpt_password": "private-password"}, "email_otp_totp"),
+            ({"login_mode": "password_totp", "gpt_password": "private-password"}, "password_email_otp_totp"),
+        ]:
+            with self.subTest(payload=payload), patch("pyotp.TOTP.now", return_value="765432"):
+                s = Scenario(password=True, email_mfa=True)
+                r = s.run(totp_secret="JBSWY3DPEHPK3PXP", **payload)
+                self.assertTrue(r["success"], r)
+                self.assertEqual(r["login_method"], expected)
+                self.assertEqual(r["login_fallback_reason"], payload.get("login_fallback_reason", ""))
+                self.assertEqual(any(c["path"].endswith("password/verify") for c in s.calls), payload["login_mode"] == "password_totp")
+
+    def test_email_mfa_missing_invalid_secret_or_factor_stops_before_tokens(self):
+        for secret, extra, error in [("", {}, "totp_secret_missing"), (" \t", {}, "totp_secret_missing"), ("not-base32!", {}, "totp_secret_invalid"), ("JBSWY3DPEHPK3PXP", {"missing_factor": True}, "totp_factor_missing")]:
+            with self.subTest(error=error, secret_present=bool(secret)):
+                s = Scenario(email_mfa=True, **extra)
+                r = s.run(totp_secret=secret)
+                self.assertFalse(r["success"], r)
+                self.assertEqual(r["error_code"], error)
+                self.assertFalse(r["retryable"])
+                self.assertFalse(r.get("dead"))
+                self.assertEqual(r["login_auth_status"], "failed")
+                self.assertEqual(s.tokens, 0)
+                self.assertNotIn("/api/accounts/mfa/verify", [c["path"] for c in s.calls])
+
+    def test_email_mfa_errors_preserve_error_handling_and_redact_codes(self):
+        for code, status in [("invalid_code", 400), ("account_deactivated", 403), ("forbidden", 403), ("rate_limit", 429)]:
+            with self.subTest(code=code), patch("pyotp.TOTP.now", return_value="765432"):
+                s = Scenario(email_mfa=True, mfa_error=code, mfa_status=status)
+                r = s.run(totp_secret="JBSWY3DPEHPK3PXP")
+                self.assertFalse(r["success"], r)
+                self.assertEqual(bool(r.get("dead")), code == "account_deactivated")
+                self.assertEqual(r["login_auth_status"], "failed")
+                self.assertEqual(r["login_method"], "email_otp_totp")
+                self.assertEqual(s.tokens, 0)
+                self.assertNotIn("765432", s.logs.getvalue())
+                self.assertNotIn("765432", r["error"])
+
+    def test_email_totp_then_phone_reuses_existing_sms_flow(self):
+        provider = FakeProvider()
+        s = Scenario(email_mfa=True, phone=True)
+        with patch.object(core.sp, "get_sms_provider", return_value=provider), patch("pyotp.TOTP.now", return_value="765432"):
+            r = s.run(totp_secret="JBSWY3DPEHPK3PXP", sms_provider="hero_sms", sms_config={"enabled": True})
+        self.assertTrue(r["success"], r)
+        self.assertEqual(r["login_method"], "email_otp_totp")
+        self.assertEqual(provider.count, 1)
+        self.assertEqual(provider.released, [("hero_sms:1", True)])
 
     def test_invalid_password_totp_secret_and_factor_never_downgrade(self):
         for options, secret in [({"password_error": True}, "JBSWY3DPEHPK3PXP"), ({"validate_error": "invalid_code", "validate_status": 400}, "JBSWY3DPEHPK3PXP"), ({}, "not-base32!"), ({"missing_factor": True}, "JBSWY3DPEHPK3PXP")]:
