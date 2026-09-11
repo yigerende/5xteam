@@ -424,7 +424,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 }
 
 func eligibleAutoRotationAccount(account model.FreeAccountProfile) bool {
-	return !account.Dead && account.ImportMode != "pure" && account.AcceptStatus != "completed" && account.InviteStatus != "completed" && account.RemoveStatus != "completed"
+	return !account.Dead && account.ImportMode != "pure" && account.AcceptStatus != "completed" && account.RemoveStatus != "completed"
 }
 
 func eligibleAutoRotationMail(account model.MailAccountProfile) bool {
@@ -458,42 +458,39 @@ func (s *Server) availablePremiumSlots(ctx context.Context, admins []model.Admin
 	total := 0
 	accounts := s.store.FreeAccounts()
 	tasks := s.store.AutoRotationTasks("")
+	snapshots := s.store.AdminCapacitySnapshots()
 	for _, a := range admins {
-		_, c, e := s.currentAdminCredential(ctx, a.ID)
-		if e != nil {
+		cap, ok := snapshots[a.ID]
+		if !ok {
 			continue
 		}
-		cap, e := s.capacityForAdmin(ctx, a, c.AccessToken)
-		if e == nil {
-			inside, inFlight := s.premiumUsageForAdminWithTasks(a.ID, accounts, tasks)
-			available := maxInt(0, cap.Premium.Total-inside-inFlight)
-			total += available
-			event := model.AutoRotationEvent{Type: "seat_query", AdminAccountID: a.ID, Message: "实时查询 5x 席位", Details: map[string]any{"total": cap.Premium.Total, "used": cap.Premium.Used, "remote_remaining": cap.Premium.Remaining, "inside_premium": inside, "in_flight_invites": inFlight, "available": available}}
-			if len(runID) > 0 {
-				event.RunID = runID[0]
-			}
-			s.enqueueAuditEvent(event)
+		inside, inFlight := s.premiumUsageForAdminWithTasks(a.ID, accounts, tasks)
+		available := maxInt(0, cap.Premium.Total-inside-inFlight)
+		total += available
+		event := model.AutoRotationEvent{Type: "seat_query", AdminAccountID: a.ID, Message: "按席位总数快照计算 5x 席位", Details: map[string]any{"snapshot_total": cap.Premium.Total, "inside_premium": inside, "in_flight_invites": inFlight, "available": available}}
+		if len(runID) > 0 {
+			event.RunID = runID[0]
 		}
+		s.enqueueAuditEvent(event)
 	}
 	return total
 }
 func (s *Server) selectPremiumAdmin(ctx context.Context, admins []model.AdminAccountProfile, accountID, runID string) (string, error) {
+	_ = ctx
+	snapshots := s.store.AdminCapacitySnapshots()
+	accounts := s.store.FreeAccounts()
+	tasks := s.store.AutoRotationTasks("")
 	for _, a := range admins {
 		v, _ := s.autoAdminLocks.LoadOrStore(a.ID, &sync.Mutex{})
 		lock := v.(*sync.Mutex)
 		lock.Lock()
-		_, c, e := s.currentAdminCredential(ctx, a.ID)
-		if e == nil {
-			cap, e := s.capacityForAdmin(ctx, a, c.AccessToken)
-			if e == nil {
-				accounts := s.store.FreeAccounts()
-				inside, inFlight := s.premiumUsageForAdmin(a.ID, accounts)
-				available := cap.Premium.Total - inside - inFlight
-				if available > 0 {
-					lock.Unlock()
-					s.enqueueAuditEvent(model.AutoRotationEvent{RunID: runID, AccountID: accountID, AdminAccountID: a.ID, Type: "seat_check", Source: "auto_rotation", Operation: "invite", Stage: "seat_check", Message: "实时席位规则允许执行", Details: map[string]any{"remote_total": cap.Premium.Total, "remote_remaining": cap.Premium.Remaining, "inside_premium": inside, "in_flight_invites": inFlight, "available": available}})
-					return a.ID, nil
-				}
+		if cap, ok := snapshots[a.ID]; ok {
+			inside, inFlight := s.premiumUsageForAdminWithTasks(a.ID, accounts, tasks)
+			available := cap.Premium.Total - inside - inFlight
+			if available > 0 {
+				lock.Unlock()
+				s.enqueueAuditEvent(model.AutoRotationEvent{RunID: runID, AccountID: accountID, AdminAccountID: a.ID, Type: "seat_check", Source: "auto_rotation", Operation: "invite", Stage: "seat_check", Message: "席位快照规则允许执行", Details: map[string]any{"snapshot_total": cap.Premium.Total, "inside_premium": inside, "in_flight_invites": inFlight, "available": available}})
+				return a.ID, nil
 			}
 		}
 		lock.Unlock()

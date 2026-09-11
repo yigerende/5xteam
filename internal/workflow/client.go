@@ -367,7 +367,15 @@ func parseSubscriptionCapacity(out *model.AdminSeatCapacity, value map[string]an
 		if typ == "premium" {
 			bucket = &out.Premium
 		}
-		bucket.Total = number(entry, "paid") + number(entry, "held")
+		// ChatGPT includes on-hold seats in `paid`, but they cannot currently
+		// participate in rotation. Expose them separately and persist only the
+		// effective seat total used by the two manual capacity refresh views.
+		paid, held := number(entry, "paid"), number(entry, "held")
+		bucket.Held = held
+		bucket.Total = paid - held
+		if bucket.Total < 0 {
+			bucket.Total = 0
+		}
 		bucket.Remaining = number(entry, "available")
 	}
 	if assigned, ok := value["assigned"].(map[string]any); ok {

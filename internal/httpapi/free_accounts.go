@@ -1731,6 +1731,9 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	unlockTeam := s.lockTeamAccountRemove(profile.TeamAccountID)
 	defer unlockTeam()
 	profile = s.refreshSub2CostBeforeRemoval(ctx, profile)
+	if s.store.AutoRotationSettings().RemoveMethod == "child_leave" {
+		return s.performFreeAccountChildLeave(ctx, profile)
+	}
 	adminProfile, adminCredentials, err := s.currentAdminCredential(ctx, profile.AdminAccountID)
 	if err != nil {
 		s.failFreeAccount(profile.ID, "remove", err)
@@ -1786,10 +1789,48 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	now := time.Now()
 	updated, updateErr := s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.RemoveStatus, item.LastError = "removed", "completed", ""
+		item.RemoveMethod = "mother_kick"
 		item.AutoRemove, item.RemovedAt = false, &now
 	})
 	_ = s.store.ReleaseSeatReservationByAccount(id)
 	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "seat_released", Source: "remove", Operation: "remove", Stage: "remove", Message: "账号移出空间，释放席位预占"})
+	return updated, updateErr
+}
+
+// performFreeAccountChildLeave uses the same Team membership DELETE request as
+// a mother kick, but authenticates with the child's source token. The request
+// client still applies the standard ChatGPT headers and the child's global
+// proxy settings.
+func (s *Server) performFreeAccountChildLeave(ctx context.Context, profile model.FreeAccountProfile) (model.FreeAccountProfile, error) {
+	_, credentials, err := s.store.FreeAccountCredential(profile.ID)
+	if err != nil {
+		return profile, err
+	}
+	if strings.TrimSpace(credentials.SourceAccessToken) == "" {
+		return profile, errors.New("子号缺少 Access Token，无法自行退出空间")
+	}
+	client, err := workflow.NewClient(s.store.Settings())
+	if err != nil {
+		return profile, err
+	}
+	started := time.Now()
+	method := "child_leave"
+	_, err = client.Kick(ctx, credentials.SourceAccessToken, profile.TeamAccountID, profile.UserID)
+	if err != nil {
+		s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "child_leave_error", Level: "error", Message: "子号自行退出失败", DurationMS: time.Since(started).Milliseconds(), Response: map[string]any{"error": err.Error(), "method": method}, Details: map[string]any{"error": err.Error(), "method": method}})
+		return profile, err
+	}
+	if deleteErr := s.deleteLinkedDownstream(ctx, profile); deleteErr != nil {
+		return profile, deleteErr
+	}
+	now := time.Now()
+	updated, updateErr := s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
+		item.Status, item.RemoveStatus, item.LastError = "removed", "completed", ""
+		item.RemoveMethod = method
+		item.AutoRemove, item.RemovedAt = false, &now
+	})
+	_ = s.store.ReleaseSeatReservationByAccount(profile.ID)
+	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "child_leave_success", Message: "子号自行退出成功", DurationMS: time.Since(started).Milliseconds(), Response: map[string]any{"method": method}, Details: map[string]any{"method": method}})
 	return updated, updateErr
 }
 

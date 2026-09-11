@@ -14,6 +14,11 @@ import (
 func (s *Store) SaveAdminCapacitySnapshot(adminID string, capacity model.AdminSeatCapacity) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Persist only purchased seat totals. Used/remaining values are derived
+	// from durable pipeline state at read time and must never become stale
+	// database snapshots.
+	capacity.Standard.Used, capacity.Standard.Remaining = 0, 0
+	capacity.Premium.Used, capacity.Premium.Remaining = 0, 0
 	if capacity.FetchedAt.IsZero() {
 		capacity.FetchedAt = time.Now()
 	}

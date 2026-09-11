@@ -144,6 +144,11 @@ function costText(account) {
   if (!account?.cost_checked_at) return '未查询'
   return `$${Number(account?.total_cost_usd || 0).toFixed(4)}`
 }
+function removeMethodText(account) {
+  if (account?.remove_method === 'child_leave') return '实际：子号自己退出'
+  if (account?.remove_method === 'mother_kick') return '实际：母号踢出'
+  return '尚未执行'
+}
 // A record may retain a legacy identifier from the other downstream after a
 // provider switch.  All actions must follow only the currently enabled line.
 const hasDownstream = (account) => pushProvider.value === 'cpa'
@@ -174,7 +179,9 @@ async function loadAdminCapacity(account) {
 async function loadCapacitySnapshots() {
   const data = await api('/api/admin-capacity-snapshots', { cache: 'no-store' })
   const entries = Object.entries(data || {})
-  snapshotCapacities.value = new Map(entries.map(([id, value]) => [/^\d+$/.test(id) ? Number(id) : id, value]))
+  const next = new Map(entries.map(([id, value]) => [/^\d+$/.test(id) ? Number(id) : id, value]))
+  snapshotCapacities.value = next
+  adminCapacities.value = new Map(next)
   const fetchedAt = entries.reduce((latest, [, value]) => {
     const timestamp = new Date(value?.fetched_at || 0).getTime()
     return Number.isFinite(timestamp) && timestamp > latest ? timestamp : latest
@@ -240,23 +247,9 @@ const pendingSeatUsage = computed(() => {
 })
 
 function adjustedAdminCapacity(admin) {
-  const capacity = adminCapacities.value.get(admin.id)
+  const capacity = snapshotCapacities.value.get(admin.id) || adminCapacities.value.get(admin.id)
   if (!capacity || capacity.error) return capacity
-  const pending = pendingSeatUsage.value.get(admin.id) || { standard: 0, premium: 0 }
-  const adjusted = { ...capacity }
-  for (const key of ['standard', 'premium']) {
-    const bucket = capacity[key]
-    if (!bucket) continue
-    const reservation = pending[key]
-    if (!reservation) continue
-    // The upstream seat summary is eventually consistent and commonly omits
-    // invitations that have been sent but whose recipient has not accepted
-    // yet. Treat those records as reservations in the picker. The server-side
-    // join endpoint remains authoritative and will reject an actually full
-    // seat, so this only prevents an optimistic/incorrect display.
-    adjusted[key] = { ...bucket, remaining: Math.max(0, Number(bucket.remaining || 0) - reservation) }
-  }
-  return adjusted
+  return capacity
 }
 
 function adminOptionLabel(admin) {
@@ -553,17 +546,10 @@ function adminSpaceID(account) {
 }
 
 async function openJoin(account) {
-  joinCapacityRefreshing.value = true
-  try {
-    // Refresh both sources at the moment the picker is opened.  This covers
-    // invitations completed by another worker while this page was idle.
-    const accounts = await refreshLiveAccounts().catch(() => [])
-    const fresh = accounts.find((item) => item.id === account.id)
-    if (fresh) account = fresh
-    await loadAdminCapacities({ force: true })
-  } finally {
-    joinCapacityRefreshing.value = false
-  }
+  // Invitation selection uses the same persisted snapshot and local usage
+  // calculation as automatic rotation; opening the picker must not call
+  // OpenAI for every mother account.
+  await Promise.all([refreshLiveAccounts().catch(() => {}), loadCapacitySnapshots().catch(() => {})])
   joinForm.account = account
   joinForm.adminAccountID = account.admin_account_id || props.adminAccounts[0]?.id || ''
   joinForm.seatType = account.seat_type || 'default'
@@ -861,7 +847,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
           <td><strong>{{ costText(account) }}</strong><small v-if="account.cost_checked_at && account.push_provider !== 'cpa'" class="table-note">{{ formatTime(account.cost_checked_at) }}</small><small v-else-if="account.push_provider === 'cpa'" class="table-note">CPA 不统计</small></td>
           <td><strong>{{ quotaText(account.quota_5h) }}</strong><small v-if="account.quota_5h" class="table-note">剩余</small></td>
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
-          <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
+          <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small class="table-note">{{ removeMethodText(account) }}</small><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
           <td><strong>{{ account.relogin_count || 0 }} / {{ account.relogin_failure_count || 0 }}</strong><small class="table-note">成功 / 失败阈值 {{ activeReloginFailureLimit }}</small></td>
           <td><div class="row-actions"><IconButton label="更多操作" @mouseenter="showPipelineMenu(account, $event)" @mouseleave="closePipelineMenu()"><MoreHorizontal :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !hasDownstream(account)" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
         </tr>

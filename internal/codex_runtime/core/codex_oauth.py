@@ -1033,7 +1033,7 @@ def _do_phone_verification_legacy(session: BrowserSession) -> None:
         http.close()
 
 
-def _do_phone_verification(session: BrowserSession) -> None:
+def _do_phone_verification(session: BrowserSession) -> dict:
     """gpt-account-manager 风格 add_phone 接码：仅在状态机确认 add_phone 后调用。"""
     from core.project_sms_provider import ProjectSMS, SMSProviderError
     provider = str(getattr(_cfg, "SMS_PROVIDER", "") or "").strip().lower()
@@ -1063,7 +1063,7 @@ def _do_phone_verification(session: BrowserSession) -> None:
                 raise SMSProviderError(f"phone-otp/validate HTTP {val.status_code}: {_response_text(val)[:180]}")
             sms.release(ok=True)
             logger.info("[Codex] add_phone 手机验证码通过")
-            return
+            return _resp_json(val)
         except Exception as exc:
             last_error = str(exc)
             logger.warning("[Codex] add_phone 尝试 %s/%s 失败：%s", attempt, max_retries, last_error[:220])

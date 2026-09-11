@@ -49,6 +49,24 @@ func TestExtractAccessTokenFromSessionJSON(t *testing.T) {
 	}
 }
 
+func TestParseSubscriptionCapacitySubtractsHeldFromEffectiveTotal(t *testing.T) {
+	var capacity model.AdminSeatCapacity
+	parseSubscriptionCapacity(&capacity, map[string]any{
+		"seat_capacity": []any{
+			map[string]any{"type": "default", "paid": float64(3), "held": float64(0), "available": float64(1)},
+			map[string]any{"type": "prolite", "paid": float64(11), "held": float64(2), "available": float64(0)},
+		},
+		"assigned": map[string]any{"default": float64(2), "prolite": float64(9)},
+	})
+
+	if capacity.Standard.Total != 3 || capacity.Standard.Used != 2 || capacity.Standard.Remaining != 1 || capacity.Standard.Held != 0 {
+		t.Fatalf("unexpected standard capacity: %+v", capacity.Standard)
+	}
+	if capacity.Premium.Total != 9 || capacity.Premium.Used != 9 || capacity.Premium.Remaining != 0 || capacity.Premium.Held != 2 {
+		t.Fatalf("unexpected premium capacity: %+v", capacity.Premium)
+	}
+}
+
 func TestClientRequestShape(t *testing.T) {
 	var mu sync.Mutex
 	var calls []string

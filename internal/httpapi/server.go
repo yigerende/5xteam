@@ -469,9 +469,14 @@ func (s *Server) adminCapacitySnapshots(w http.ResponseWriter, _ *http.Request) 
 		active[admin.ID] = struct{}{}
 	}
 	snapshots := s.store.AdminCapacitySnapshots()
+	accounts := s.store.FreeAccounts()
+	tasks := s.store.AutoRotationTasks("")
 	result := make(map[string]model.AdminSeatCapacity)
 	for id, snapshot := range snapshots {
 		if _, ok := active[id]; ok {
+			inside, inFlight := s.premiumUsageForAdminWithTasks(id, accounts, tasks)
+			snapshot.Premium.Used = inside
+			snapshot.Premium.Remaining = maxInt(0, snapshot.Premium.Total-inside-inFlight)
 			result[id] = snapshot
 		}
 	}

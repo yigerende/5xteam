@@ -121,6 +121,10 @@ func redactMap(input map[string]any) map[string]any {
 	out := make(map[string]any, len(input))
 	for key, value := range input {
 		lower := strings.ToLower(strings.TrimSpace(key))
+		if metadata, ok := redactOAuthMetadata(lower, value); ok {
+			out[key] = metadata
+			continue
+		}
 		if strings.Contains(lower, "token") || strings.Contains(lower, "cookie") || strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "authorization") || strings.Contains(lower, "management-key") || strings.Contains(lower, "management_key") {
 			out[key] = "***"
 			continue
@@ -128,6 +132,51 @@ func redactMap(input map[string]any) map[string]any {
 		out[key] = redactValue(value)
 	}
 	return out
+}
+
+// Preserve typed diagnostics, never Cookie values or arbitrary credential fields.
+func redactOAuthMetadata(key string, value any) (any, bool) {
+	switch key {
+	case "auth_session_cookie_present", "access_token_present", "refresh_token_present", "id_token_present":
+		present, ok := value.(bool)
+		return present, ok
+	case "cookie_jar":
+		items, ok := value.([]any)
+		if !ok {
+			return nil, false
+		}
+		rows := make([]any, 0, len(items))
+		for _, item := range items {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			row := map[string]any{}
+			for _, field := range []string{"name", "domain", "path"} {
+				if text, ok := entry[field].(string); ok {
+					row[field] = redactValue(text)
+				}
+			}
+			if secure, ok := entry["secure"].(bool); ok {
+				row["secure"] = secure
+			}
+			rows = append(rows, row)
+		}
+		return rows, true
+	case "set_cookie_names":
+		items, ok := value.([]any)
+		if !ok {
+			return nil, false
+		}
+		names := make([]any, 0, len(items))
+		for _, item := range items {
+			if name, ok := item.(string); ok {
+				names = append(names, redactValue(name))
+			}
+		}
+		return names, true
+	}
+	return nil, false
 }
 
 func redactValue(value any) any {

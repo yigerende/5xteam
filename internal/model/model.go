@@ -211,6 +211,7 @@ type AdminSeatBucket struct {
 	Total     int `json:"total"`
 	Used      int `json:"used"`
 	Remaining int `json:"remaining"`
+	Held      int `json:"held"`
 }
 
 type AdminSeatCapacity struct {
@@ -355,10 +356,11 @@ type AutoRotationSettings struct {
 	Concurrency      int     `json:"concurrency"`
 	MaxPerRun        int     `json:"max_per_run"`
 	RetryCount       int     `json:"retry_count"`
+	RemoveMethod     string  `json:"remove_method"`
 }
 
 func DefaultAutoRotationSettings() AutoRotationSettings {
-	return AutoRotationSettings{ThresholdPercent: 50, IntervalSeconds: 300, Concurrency: 2, MaxPerRun: 0, RetryCount: 1}
+	return AutoRotationSettings{ThresholdPercent: 50, IntervalSeconds: 300, Concurrency: 2, MaxPerRun: 0, RetryCount: 1, RemoveMethod: "mother_kick"}
 }
 
 type AutoRotationRun struct {

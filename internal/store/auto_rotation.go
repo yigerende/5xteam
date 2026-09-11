@@ -43,6 +43,9 @@ func (s *Store) AutoRotationSettings() model.AutoRotationSettings {
 	if settings.RetryCount < 0 {
 		settings.RetryCount = 0
 	}
+	if settings.RemoveMethod != "child_leave" {
+		settings.RemoveMethod = "mother_kick"
+	}
 	return settings
 }
 
@@ -63,6 +66,12 @@ func (s *Store) SaveAutoRotationSettings(settings model.AutoRotationSettings) (m
 	}
 	if settings.RetryCount < 0 || settings.RetryCount > 10 {
 		return settings, errors.New("重试次数必须在 0 到 10 之间")
+	}
+	if settings.RemoveMethod == "" {
+		settings.RemoveMethod = "mother_kick"
+	}
+	if settings.RemoveMethod != "mother_kick" && settings.RemoveMethod != "child_leave" {
+		return settings, errors.New("移出方式无效")
 	}
 	b, _ := json.Marshal(settings)
 	_, err := s.db.Exec("INSERT INTO auto_rotation_settings(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", string(b))

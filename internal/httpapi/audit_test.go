@@ -80,4 +80,59 @@ func TestOAuthProtocolDiagnosticUsesAsyncAccountTimeline(t *testing.T) {
 	if strings.Contains(event.Details["continue_url"].(string), "must-not-survive") {
 		t.Fatalf("structured event retained callback secret: %+v", event.Details)
 	}
+	if present, ok := event.Response["auth_session_cookie_present"].(bool); !ok || present {
+		t.Fatalf("cookie presence diagnostics were lost: %+v", event.Response)
+	}
+	if rows, ok := event.Response["cookie_jar"].([]any); !ok || len(rows) != 1 {
+		t.Fatalf("cookie metadata was lost: %+v", event.Response)
+	}
+}
+
+func TestOAuthDiagnosticMetadataPreservesShapeWithoutSecrets(t *testing.T) {
+	input := map[string]any{
+		"auth_session_cookie_present": true,
+		"access_token_present":        false,
+		"refresh_token_present":       true,
+		"id_token_present":            false,
+		"access_token":                "must-not-survive",
+		"cookie_jar": []any{map[string]any{
+			"name": "oai-client-auth-session", "domain": "auth.openai.com", "path": "/",
+			"secure": true, "value": "must-not-survive", "extra": "must-not-survive",
+		}},
+		"set_cookie_names": []any{"oai-client-auth-session", "login_session"},
+	}
+	for i := 0; i < 2; i++ {
+		input = redactMap(input)
+		if input["auth_session_cookie_present"] != true || input["access_token_present"] != false || input["refresh_token_present"] != true {
+			t.Fatalf("diagnostic booleans were masked: %+v", input)
+		}
+		if input["access_token"] != "***" {
+			t.Fatal("access token was exposed")
+		}
+		row := input["cookie_jar"].([]any)[0].(map[string]any)
+		if row["name"] != "oai-client-auth-session" || row["domain"] != "auth.openai.com" || row["secure"] != true {
+			t.Fatalf("cookie metadata was lost: %+v", row)
+		}
+		if _, ok := row["value"]; ok {
+			t.Fatal("cookie value was exposed")
+		}
+		if _, ok := row["extra"]; ok {
+			t.Fatal("unexpected cookie field was exposed")
+		}
+		if len(input["set_cookie_names"].([]any)) != 2 {
+			t.Fatal("Set-Cookie names were lost")
+		}
+	}
+}
+
+func TestOAuthDiagnosticMetadataDoesNotWhitelistUnvalidatedValues(t *testing.T) {
+	input := map[string]any{
+		"auth_session_cookie_present": "secret", "access_token_present": "secret",
+		"cookie_jar": "oai-client-auth-session=secret", "set_cookie_names": "session=secret",
+	}
+	for key, value := range redactMap(input) {
+		if value != "***" {
+			t.Fatalf("%s bypassed redaction: %v", key, value)
+		}
+	}
 }

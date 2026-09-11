@@ -49,7 +49,7 @@ func TestAdminCapacitySnapshotPersistence(t *testing.T) {
 	if !ok {
 		t.Fatal("snapshot not found")
 	}
-	if got.Premium != want.Premium || got.Standard != want.Standard || !got.FetchedAt.Equal(want.FetchedAt) {
+	if got.Premium.Total != want.Premium.Total || got.Standard.Total != want.Standard.Total || got.Premium.Used != 0 || got.Premium.Remaining != 0 || got.Standard.Used != 0 || got.Standard.Remaining != 0 || !got.FetchedAt.Equal(want.FetchedAt) {
 		t.Fatalf("snapshot mismatch: got=%+v want=%+v", got, want)
 	}
 	all := s.AdminCapacitySnapshots()
