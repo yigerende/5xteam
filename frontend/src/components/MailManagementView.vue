@@ -70,6 +70,8 @@ const actionMenuStyle = ref({});
 const sensitiveMasked = ref(false);
 let actionMenuCloseTimer;
 const importForm = reactive({ raw: "", group: "free" });
+const importProgress = reactive({ total: 0, processed: 0, imported: 0, updated: 0, skipped: 0, complete: false, error: "" });
+const importProgressPercent = computed(() => importProgress.total ? Math.round((importProgress.processed / importProgress.total) * 100) : 0);
 const message = reactive({ text: "", type: "" });
 const busy = ref("");
 const fetchJob = ref(null);
@@ -252,6 +254,8 @@ function displaySpace(account) {
 function hasRegistered(account) {
   return (
     account.registration_status === "success" ||
+    account.access_token_present ||
+    account.chatgpt_session_present ||
     account.gpt_password_present ||
     account.totp_secret_present
   );
@@ -574,22 +578,39 @@ async function refreshAll() {
 function parseImport() {
   return parseMailAccountText(importForm.raw);
 }
+function openImportDialog() {
+  Object.assign(importProgress, { total: 0, processed: 0, imported: 0, updated: 0, skipped: 0, complete: false, error: "" });
+  importOpen.value = true;
+}
+function closeImportDialog() {
+  if (busy.value !== "import") importOpen.value = false;
+}
 async function importAccounts() {
   busy.value = "import";
   try {
     const items = parseImport();
-    const result = await api("/api/mail/accounts/import", {
-      method: "POST",
-      body: { accounts: items, group: importForm.group.trim() },
-    });
+    Object.assign(importProgress, { total: items.length, processed: 0, imported: 0, updated: 0, skipped: 0, complete: false, error: "" });
+    const batchSize = 25;
+    for (let start = 0; start < items.length; start += batchSize) {
+      const batch = items.slice(start, start + batchSize);
+      const result = await api("/api/mail/accounts/import", {
+        method: "POST",
+        body: { accounts: batch, group: importForm.group.trim() },
+      });
+      importProgress.imported += Number(result.imported || 0);
+      importProgress.updated += Number(result.updated || 0);
+      importProgress.skipped += Number(result.skipped || 0);
+      importProgress.processed += batch.length;
+    }
+    importProgress.complete = true;
     importForm.raw = "";
-    importOpen.value = false;
     await loadAccounts();
     setMessage(
-      `导入完成：新增 ${result.imported || 0}，更新 ${result.updated || 0}，跳过 ${result.skipped || 0}`,
+      `导入完成：新增 ${importProgress.imported}，更新 ${importProgress.updated}，跳过 ${importProgress.skipped}`,
       "success",
     );
   } catch (error) {
+    importProgress.error = error.message;
     setMessage(error.message, "error");
   } finally {
     busy.value = "";
@@ -1235,7 +1256,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             <button
               class="btn primary"
               type="button"
-              @click="importOpen = true"
+              @click="openImportDialog"
             >
               <Plus :size="15" />导入账号
             </button>
@@ -1598,7 +1619,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
     <div
       v-if="importOpen"
       class="modal-backdrop"
-      @click.self="importOpen = false"
+      @click.self="closeImportDialog"
     >
       <form class="modal mail-import-modal" @submit.prevent="importAccounts">
         <span class="overline">IMPORT MAIL ACCOUNTS</span>
@@ -1616,7 +1637,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             rows="9"
             spellcheck="false"
             required
-            placeholder="iCloud：邮箱----接码链接&#10;iCloud：邮箱----密码或查询码----接码链接&#10;带临时 AT：邮箱----接码链接----Session JSON&#10;Outlook：邮箱----邮箱密码----client_id----邮箱RT&#10;TOTP：邮箱----GPT密码----TOTP密钥"
+            placeholder="iCloud：邮箱----接码链接&#10;iCloud：邮箱----密码或查询码----接码链接&#10;带临时 AT：邮箱----接码链接----Session JSON&#10;Outlook：邮箱----邮箱密码----client_id----邮箱RT&#10;TOTP：邮箱----ChatGPT密码----2FA密钥&#10;TOTP + AT：邮箱----ChatGPT密码----2FA密钥----AT"
           ></textarea
           ><small
             >支持 msg.linlanyu.com 的 /messages/ 链接；如果末尾追加 ChatGPT
@@ -1624,15 +1645,31 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             保存，不会保存 sessionToken。</small
           ></label
         >
+        <section v-if="importProgress.total" class="mail-import-progress" aria-live="polite">
+          <div class="mail-import-progress-heading">
+            <span>{{ importProgress.error ? '导入中断' : importProgress.complete ? '导入完成' : '正在导入' }}</span>
+            <strong>{{ importProgressPercent }}%</strong>
+          </div>
+          <div class="mail-import-progress-track" role="progressbar" :aria-valuenow="importProgress.processed" aria-valuemin="0" :aria-valuemax="importProgress.total">
+            <i :class="{ danger: importProgress.error }" :style="{ width: `${importProgressPercent}%` }"></i>
+          </div>
+          <div class="mail-import-progress-stats">
+            <span>已处理 <strong>{{ importProgress.processed }} / {{ importProgress.total }}</strong></span>
+            <span>新增 <strong>{{ importProgress.imported }}</strong></span>
+            <span>更新 <strong>{{ importProgress.updated }}</strong></span>
+            <span>跳过 <strong>{{ importProgress.skipped }}</strong></span>
+          </div>
+          <small v-if="importProgress.error" class="danger-text">{{ importProgress.error }}</small>
+        </section>
         <div class="panel-actions">
-          <button class="btn ghost" type="button" @click="importOpen = false">
-            取消</button
+          <button class="btn ghost" type="button" :disabled="busy === 'import'" @click="closeImportDialog">
+            {{ importProgress.complete || importProgress.error ? '关闭' : '取消' }}</button
           ><button
             class="btn primary"
             type="submit"
-            :disabled="busy === 'import'"
+            :disabled="busy === 'import' || !importForm.raw.trim()"
           >
-            <Upload :size="15" />确认导入
+            <LoaderCircle v-if="busy === 'import'" class="spin" :size="15" /><Upload v-else :size="15" />{{ busy === 'import' ? `正在导入 ${importProgress.processed}/${importProgress.total}` : '确认导入' }}
           </button>
         </div>
       </form>
@@ -2416,6 +2453,39 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .mail-import-modal .field:first-of-type {
   margin-top: 18px;
+}
+.mail-import-progress {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+}
+.mail-import-progress-heading,
+.mail-import-progress-stats {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.mail-import-progress-heading strong,
+.mail-import-progress-stats strong {
+  color: var(--text-2);
+}
+.mail-import-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--surface-3);
+}
+.mail-import-progress-track i {
+  display: block;
+  height: 100%;
+  background: var(--green);
+  transition: width 0.2s ease;
+}
+.mail-import-progress-track i.danger {
+  background: var(--red);
 }
 .login-confirm-dialog {
   width: min(500px, 100%);

@@ -44,4 +44,34 @@ assert.deepEqual(
   [{ email: 'third@example.com', gpt_password: 'gpt-password', totp_secret: 'JBSWY3DPEHPK3PXP' }],
 )
 
+assert.deepEqual(
+  parseMailAccountText('fourth@gmail.com----chatgpt-password----2fa:key-with-vendor-format----opaque-access-token'),
+  [{
+    email: 'fourth@gmail.com',
+    gpt_password: 'chatgpt-password',
+    totp_secret: '2fa:key-with-vendor-format',
+    access_token: 'opaque-access-token',
+  }],
+)
+
+assert.deepEqual(
+  parseMailAccountText('person@hotmail.co.uk----mail-password----00000000-0000-4000-8000-000000000000----outlook-refresh-token'),
+  [{
+    email: 'person@hotmail.co.uk',
+    mail_password: 'mail-password',
+    client_id: '00000000-0000-4000-8000-000000000000',
+    mail_refresh_token: 'outlook-refresh-token',
+  }],
+)
+
+assert.deepEqual(
+  parseMailAccountText('hosted@company.example----mail-password----00000000-0000-4000-8000-000000000000----outlook-refresh-token'),
+  [{
+    email: 'hosted@company.example',
+    mail_password: 'mail-password',
+    client_id: '00000000-0000-4000-8000-000000000000',
+    mail_refresh_token: 'outlook-refresh-token',
+  }],
+)
+
 console.log('mail import parser: ok')
