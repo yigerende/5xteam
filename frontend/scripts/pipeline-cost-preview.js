@@ -8,6 +8,9 @@ const items = [52.04, 0, null, undefined].map((cost, i) => ({
   id: `cost-${i}`, email: `cost-${i}@example.com`, user_id: `fixture-user-${i}`,
   imported_at: '2026-09-12T00:00:00Z', cost_checked_at: '2026-09-12T04:15:30Z',
   total_cost_usd: 25.1788, total_user_cost_usd: cost,
+  cost_downstream_snapshot: 25.1788,
+  user_cost_downstream_identity: cost == null ? '' : String(42 + i),
+  user_cost_downstream_snapshot: cost == null ? 0 : cost,
   push_provider: i === 3 ? 'cpa' : 'sub2', sub2_account_id: 42 + i,
   cpa_auth_file_name: i === 3 ? 'fixture.json' : '',
   accept_status: 'completed', push_status: 'completed', quota_status: 'completed',
@@ -31,6 +34,8 @@ window.fetch = async (path, options = {}) => {
   if (url.pathname === '/api/free-accounts/cost-0/quota' && options.method === 'POST') {
     items[0].total_cost_usd = 30
     items[0].total_user_cost_usd = 60
+    items[0].cost_downstream_snapshot = 30
+    items[0].user_cost_downstream_snapshot = 60
     return json({ account: items[0], auto_removed: false })
   }
   throw new Error(`Unmocked fixture request: ${url.pathname}`)

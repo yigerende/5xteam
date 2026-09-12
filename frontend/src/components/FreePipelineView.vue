@@ -174,11 +174,14 @@ const operationMeta = {
 function costText(account) {
   if (String(account?.push_provider || '').toLowerCase() === 'cpa') return '—'
   if (!account?.cost_checked_at) return '未查询'
-  return `$${Number(account?.total_cost_usd || 0).toFixed(4)}`
+  // Show the current downstream account snapshot. `total_cost_usd` is a
+  // lifecycle accumulator kept for historical attribution and must not be
+  // displayed as the current cycle's consumption.
+  return `$${Number(account?.cost_downstream_snapshot || 0).toFixed(4)}`
 }
 function userCostText(account) {
-  if (account?.total_user_cost_usd == null) return '用户 --'
-  return `用户 $${Number(account.total_user_cost_usd).toFixed(4)}`
+  if (account?.user_cost_downstream_identity == null || account?.user_cost_downstream_identity === '') return '用户 --'
+  return `用户 $${Number(account?.user_cost_downstream_snapshot || 0).toFixed(4)}`
 }
 function removeMethodText(account) {
   if (account?.remove_method === 'child_leave') return '实际：子号自己退出'
@@ -888,13 +891,13 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
         <button type="button" :class="{ active: teamSpaceFilter === 'removed' }" @click="setTeamSpaceFilter('removed')">已使用过 <span>{{ accountSummary.removed }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'dead' }" @click="setTeamSpaceFilter('dead')">死号 <span>{{ accountSummary.dead || 0 }}</span></button>
       </div>
-      <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>累计消耗</th><th>5小时</th><th>7天</th><th>移出策略</th><th>重登成功 / 连续失败</th><th>进入母号数</th><th class="actions-column">操作</th></tr></thead><tbody>
+      <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>消耗额度</th><th>5小时</th><th>7天</th><th>移出策略</th><th>重登成功 / 连续失败</th><th>进入母号数</th><th class="actions-column">操作</th></tr></thead><tbody>
         <tr v-if="!displayedAccounts.length"><td colspan="11" class="empty-cell">暂无 Free 账号</td></tr>
         <tr v-for="account in displayedAccounts" :key="account.id" :class="{ 'row-running': activityFor(account), 'row-highlighted': entryEmail && account.email === entryEmail }">
           <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="account.dead" class="danger-text" :title="account.dead_reason">死号{{ account.remove_status === 'completed' ? ' · 已自动移出空间' : ' · 自动移出失败' }}</small><small v-else-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>
           <td><small class="table-note">{{ account.imported_at ? formatTime(account.imported_at) : '未知' }}</small></td>
           <td><div class="stage-strip"><label v-for="key in ['invite','accept','oauth','push','quota','remove']" :key="key" :class="['stage-select', `tone-${stageTone(visibleStageStatus(account, key))}`]" :title="`${stageLabels[key]}：${stateLabels[visibleStageStatus(account, key)] || '未开始'}${visibleStageStatus(account, key) === 'running' ? '（可手动修正）' : ''}`"><LoaderCircle v-if="visibleStageStatus(account, key) === 'running'" class="spin" :size="10" /><span v-else>{{ stageLabels[key] }}</span><select :value="visibleStageStatus(account, key)" :aria-label="`${stageLabels[key]}阶段状态`" :disabled="isAccountBusy(account)" @change="saveStageValue(account, key, $event.target.value)"><option value="not_started">未开始</option><option value="pending">待处理</option><option value="completed">成功</option><option value="failed">失败</option></select></label></div></td>
-          <td class="cost-cell"><strong>{{ costText(account) }}</strong><small v-if="String(account.push_provider || '').toLowerCase() !== 'cpa'" class="table-note user-cost" title="累计用户消耗额度">{{ userCostText(account) }}</small><small v-if="account.cost_checked_at && account.push_provider !== 'cpa'" class="table-note">{{ formatTime(account.cost_checked_at) }}</small><small v-else-if="account.push_provider === 'cpa'" class="table-note">CPA 不统计</small></td>
+          <td class="cost-cell"><strong>{{ costText(account) }}</strong><small v-if="String(account.push_provider || '').toLowerCase() !== 'cpa'" class="table-note user-cost" title="当前用户消耗额度">{{ userCostText(account) }}</small><small v-if="account.cost_checked_at && account.push_provider !== 'cpa'" class="table-note">{{ formatTime(account.cost_checked_at) }}</small><small v-else-if="account.push_provider === 'cpa'" class="table-note">CPA 不统计</small></td>
           <td><strong>{{ quotaText(account.quota_5h) }}</strong><small v-if="account.quota_5h" class="table-note">剩余</small></td>
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
           <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small class="table-note">{{ removeMethodText(account) }}</small><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
