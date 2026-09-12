@@ -329,7 +329,14 @@ function mailSpaceStatus(account) {
 const spaceFilterCounts = reactive({ outside: 0, inside: 0, removed: 0, dead: 0 });
 let accountSearchTimer;
 function isInTeamPipeline(account) {
-  return !!pipelineFor(account);
+  const pipeline = pipelineFor(account);
+  return !!pipeline && pipeline.remove_status !== 'completed';
+}
+function teamButtonLabel(account) {
+  const pipeline = pipelineFor(account);
+  if (isInTeamPipeline(account)) return '已进轮转';
+  if (pipeline?.remove_status === 'completed') return '再次轮转';
+  return 'Team 轮转';
 }
 function accountEmailKey(account) {
   return String(account?.email || '').trim().toLowerCase();
@@ -1295,7 +1302,8 @@ async function openTeam(account) {
       `/api/mail/accounts/${encodeURIComponent(account.email)}/team`,
       { method: "POST", body: {} },
     );
-    setMessage(`${account.email} 已加入 Team 轮转`, "success");
+    const reused = pipelineFor(account)?.remove_status === 'completed';
+    setMessage(reused ? `${account.email} 已开放下一轮 Team 轮转入口` : `${account.email} 已加入 Team 轮转`, "success");
     // Keep the user on Mail Management. Refresh the local pipeline projection
     // so this button immediately becomes disabled and shows 已进轮转.
     await loadAccounts();
@@ -1611,12 +1619,11 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                       class="btn primary compact"
                       type="button"
                       :disabled="
-                        !!busy || !hasAT(account) || isInTeamPipeline(account)
+                        !!busy || !hasAT(account) || isDeadAccount(account) || isInTeamPipeline(account)
                       "
                       @click="openTeam(account)"
                     >
-                      {{ isInTeamPipeline(account) ? "已进轮转" : "Team 轮转"
-                      }}<ArrowRight :size="14" />
+                      {{ teamButtonLabel(account) }}<ArrowRight :size="14" />
                     </button>
                     <button
                       class="btn ghost compact"
