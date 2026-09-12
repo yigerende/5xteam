@@ -197,23 +197,50 @@ func TestRestoreSchedulingClearsTemporaryBlockAndVerifiesAccount(t *testing.T) {
 	}
 }
 
-func TestQueryTotalStandardCost(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/auth/login" {
-			_, _ = w.Write([]byte(`{"code":0,"data":{"access_token":"admin-token"}}`))
-			return
-		}
-		if r.URL.Path != "/api/v1/admin/accounts/42/stats" || r.URL.Query().Get("days") != "90" {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = w.Write([]byte(`{"code":0,"data":{"summary":{"total_standard_cost":12.3456,"total_cost":99}}}`))
-	}))
-	defer ts.Close()
-
-	cost, err := New().QueryTotalStandardCost(context.Background(), model.Sub2Settings{URL: ts.URL, Email: "admin@example.com"}, "secret", 42)
-	if err != nil || cost != 12.3456 {
-		t.Fatalf("cost = %v, err=%v", cost, err)
+func TestQueryTotalCosts(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		summary     string
+		standard    float64
+		user        float64
+		userPresent bool
+		wantError   bool
+	}{
+		{"both", `{"total_standard_cost":12.3456,"total_cost":99,"total_user_cost":52.04}`, 12.3456, 52.04, true, false},
+		{"zero", `{"total_standard_cost":0,"total_user_cost":0}`, 0, 0, true, false},
+		{"missing_user", `{"total_standard_cost":4}`, 4, 0, false, false},
+		{"null_user", `{"total_standard_cost":4,"total_user_cost":null}`, 4, 0, false, false},
+		{"fallback", `{"total_cost":7,"total_user_cost":9}`, 7, 9, true, false},
+		{"negative", `{"total_standard_cost":-2,"total_user_cost":-3}`, 0, 0, true, false},
+		{"missing_standard", `{"total_user_cost":3}`, 0, 0, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var statsCalls atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/api/v1/auth/login" {
+					_, _ = w.Write([]byte(`{"code":0,"data":{"access_token":"admin-token"}}`))
+					return
+				}
+				if r.Method != http.MethodGet || r.URL.Path != "/api/v1/admin/accounts/42/stats" || r.URL.Query().Get("days") != "90" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+					http.NotFound(w, r)
+					return
+				}
+				statsCalls.Add(1)
+				_, _ = w.Write([]byte(`{"code":0,"data":{"summary":` + tt.summary + `}}`))
+			}))
+			defer ts.Close()
+			cost, err := New().QueryTotalCosts(context.Background(), model.Sub2Settings{URL: ts.URL, Email: "admin@example.com"}, "secret", 42)
+			if (err != nil) != tt.wantError || cost.StandardCostUSD != tt.standard || (cost.UserCostUSD != nil) != tt.userPresent {
+				t.Fatalf("cost = %+v, err=%v", cost, err)
+			}
+			if cost.UserCostUSD != nil && *cost.UserCostUSD != tt.user {
+				t.Fatalf("user cost = %v, want %v", *cost.UserCostUSD, tt.user)
+			}
+			if statsCalls.Load() != 1 {
+				t.Fatalf("stats requests = %d, want 1", statsCalls.Load())
+			}
+		})
 	}
 }

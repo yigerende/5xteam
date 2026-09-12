@@ -8,6 +8,7 @@ import (
 
 	"chatgpt-space-merge/internal/model"
 	"chatgpt-space-merge/internal/store"
+	"chatgpt-space-merge/internal/sub2"
 )
 
 func TestOAuthProxyLeasesBalanceConcurrentWork(t *testing.T) {
@@ -150,7 +151,7 @@ func TestSub2CostSnapshotsAreIncrementalAndAttributedToAdmin(t *testing.T) {
 		total        float64
 		want         float64
 	}{{10, 5, 5}, {10, 8, 8}, {10, 7, 8}, {20, 2, 10}} {
-		account, err = server.saveSub2CostSnapshot(account.ID, admin.ID, sample.downstreamID, sample.total)
+		account, err = server.saveSub2CostSnapshot(account.ID, admin.ID, sample.downstreamID, sub2.AccountCosts{StandardCostUSD: sample.total})
 		if err != nil {
 			t.Fatal(err)
 		}

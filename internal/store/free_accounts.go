@@ -144,6 +144,9 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		profile.ReloginCount, profile.ReloginFailureCount, profile.ReloginLastFailedAt = existing.ReloginCount, existing.ReloginFailureCount, existing.ReloginLastFailedAt
 		profile.Quota5H, profile.Quota7D, profile.ExhaustionPolicy, profile.AutoRemove = existing.Quota5H, existing.Quota7D, existing.ExhaustionPolicy, existing.AutoRemove
 		profile.TotalCostUSD, profile.CostCheckedAt = existing.TotalCostUSD, existing.CostCheckedAt
+		profile.TotalUserCostUSD = existing.TotalUserCostUSD
+		profile.UserCostByAdmin = existing.UserCostByAdmin
+		profile.UserCostDownstreamIdentity, profile.UserCostDownstreamSnapshot = existing.UserCostDownstreamIdentity, existing.UserCostDownstreamSnapshot
 		profile.CostProvider, profile.CostDownstreamIdentity = existing.CostProvider, existing.CostDownstreamIdentity
 		profile.CostDownstreamSnapshot, profile.CostByAdmin = existing.CostDownstreamSnapshot, existing.CostByAdmin
 		profile.JoinedAt, profile.OAuthReadyAt, profile.PushedAt, profile.QuotaCheckedAt, profile.StatusCheckedAt, profile.RemovedAt = existing.JoinedAt, existing.OAuthReadyAt, existing.PushedAt, existing.QuotaCheckedAt, existing.StatusCheckedAt, existing.RemovedAt

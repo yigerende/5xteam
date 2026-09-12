@@ -203,6 +203,8 @@ type AdminAccountProfile struct {
 	TeamRotationChildCost  float64    `json:"team_rotation_child_cost_usd"`
 	CreatedAt              time.Time  `json:"created_at"`
 	UpdatedAt              time.Time  `json:"updated_at"`
+
+	TeamRotationChildUserCost *float64 `json:"team_rotation_child_user_cost_usd,omitempty"`
 }
 
 // AdminSeatCapacity is the live seat snapshot for a Team workspace. The

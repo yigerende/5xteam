@@ -1320,7 +1320,6 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 		item.QuotaStatus, item.LastError = "running", ""
 	})
 	var window5H, window7D *model.FreeQuotaWindow
-	var totalCost *float64
 	var costErr error
 	quotaRemovalThreshold := settings.QuotaRemainingThresholdPercent
 	if strings.EqualFold(settings.Provider, "cpa") {
@@ -1343,7 +1342,7 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	} else {
 		var quota sub2.QuotaUsage
 		var quotaErr error
-		var queriedCost float64
+		var queriedCost sub2.AccountCosts
 		var wait sync.WaitGroup
 		wait.Add(2)
 		go func() {
@@ -1352,7 +1351,7 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 		}()
 		go func() {
 			defer wait.Done()
-			queriedCost, costErr = s.sub2.QueryTotalStandardCost(ctx, settings, password, profile.Sub2AccountID)
+			queriedCost, costErr = s.sub2.QueryTotalCosts(ctx, settings, password, profile.Sub2AccountID)
 		}()
 		wait.Wait()
 		err = quotaErr
@@ -1360,7 +1359,6 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 			window5H, window7D = quota.Windows()
 		}
 		if costErr == nil {
-			totalCost = &queriedCost
 			if updated, updateErr := s.saveSub2CostSnapshot(profile.ID, profile.AdminAccountID, profile.Sub2AccountID, queriedCost); updateErr == nil {
 				profile = updated
 			} else {
@@ -1370,7 +1368,10 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 		if costErr != nil {
 			s.auditAccountEvent(ctx, profile.ID, "cost_query_failed", "quota", "quota", "sub2", "Sub2 累计消耗查询失败，保留上次成功数据", map[string]any{"error": costErr.Error(), "account_id": profile.Sub2AccountID})
 		} else {
-			s.auditAccountEvent(ctx, profile.ID, "cost_updated", "quota", "quota", "sub2", "Sub2 累计消耗已更新", map[string]any{"downstream_total_cost_usd": *totalCost, "total_cost_usd": profile.TotalCostUSD, "account_id": profile.Sub2AccountID})
+			s.auditAccountEvent(ctx, profile.ID, "cost_updated", "quota", "quota", "sub2", "Sub2 累计消耗已更新", map[string]any{
+				"downstream_total_cost_usd": queriedCost.StandardCostUSD, "total_cost_usd": profile.TotalCostUSD,
+				"downstream_total_user_cost_usd": queriedCost.UserCostUSD, "total_user_cost_usd": profile.TotalUserCostUSD, "account_id": profile.Sub2AccountID,
+			})
 		}
 	}
 	if err != nil {
@@ -1452,10 +1453,8 @@ func quotaRemovalDue(selected *model.FreeQuotaWindow, remainingThresholdPercent 
 	return remainingPercent <= remainingThresholdPercent
 }
 
-func (s *Server) saveSub2CostSnapshot(accountID, adminID string, downstreamID int64, downstreamTotal float64) (model.FreeAccountProfile, error) {
-	if downstreamTotal < 0 {
-		downstreamTotal = 0
-	}
+func (s *Server) saveSub2CostSnapshot(accountID, adminID string, downstreamID int64, costs sub2.AccountCosts) (model.FreeAccountProfile, error) {
+	downstreamTotal := max(0, costs.StandardCostUSD)
 	identity := strconv.FormatInt(downstreamID, 10)
 	now := time.Now()
 	return s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
@@ -1483,6 +1482,34 @@ func (s *Server) saveSub2CostSnapshot(accountID, adminID string, downstreamID in
 		item.CostDownstreamIdentity = identity
 		if !sameIdentity || downstreamTotal > item.CostDownstreamSnapshot {
 			item.CostDownstreamSnapshot = downstreamTotal
+		}
+		// Keep a separate user-cost baseline: older responses may omit this
+		// measure even when the standard-cost downstream identity has changed.
+		if costs.UserCostUSD != nil {
+			if item.UserCostByAdmin == nil {
+				item.UserCostByAdmin = make(map[string]float64)
+				if item.TotalUserCostUSD != nil && strings.TrimSpace(item.AdminAccountID) != "" {
+					item.UserCostByAdmin[item.AdminAccountID] = max(0, *item.TotalUserCostUSD)
+				}
+			}
+			userCost := max(0, *costs.UserCostUSD)
+			sameUserIdentity := item.UserCostDownstreamIdentity == identity
+			userDelta := userCost
+			if sameUserIdentity {
+				userDelta = max(0, userCost-item.UserCostDownstreamSnapshot)
+			}
+			totalUserCost := userDelta
+			if item.TotalUserCostUSD != nil {
+				totalUserCost += *item.TotalUserCostUSD
+			}
+			item.TotalUserCostUSD = &totalUserCost
+			if strings.TrimSpace(adminID) != "" {
+				item.UserCostByAdmin[adminID] += userDelta
+			}
+			item.UserCostDownstreamIdentity = identity
+			if !sameUserIdentity || userCost > item.UserCostDownstreamSnapshot {
+				item.UserCostDownstreamSnapshot = userCost
+			}
 		}
 		item.CostCheckedAt = &now
 	})
@@ -1957,7 +1984,7 @@ func (s *Server) refreshSub2CostBeforeRemoval(ctx context.Context, profile model
 	if err != nil || strings.EqualFold(settings.Provider, "cpa") || profile.Sub2AccountID < 1 {
 		return profile
 	}
-	cost, err := s.sub2.QueryTotalStandardCost(ctx, settings, password, profile.Sub2AccountID)
+	cost, err := s.sub2.QueryTotalCosts(ctx, settings, password, profile.Sub2AccountID)
 	if err != nil {
 		s.auditAccountEvent(ctx, profile.ID, "cost_query_failed", "remove", "remove", "sub2", "移出前累计消耗查询失败，继续执行移出", map[string]any{"error": err.Error(), "account_id": profile.Sub2AccountID})
 		return profile
@@ -1967,7 +1994,10 @@ func (s *Server) refreshSub2CostBeforeRemoval(ctx context.Context, profile model
 		s.auditAccountEvent(ctx, profile.ID, "cost_query_failed", "remove", "remove", "sub2", "移出前累计消耗保存失败，继续执行移出", map[string]any{"error": err.Error(), "account_id": profile.Sub2AccountID})
 		return profile
 	}
-	s.auditAccountEvent(ctx, profile.ID, "cost_updated", "remove", "remove", "sub2", "移出前已更新最终累计消耗", map[string]any{"downstream_total_cost_usd": cost, "total_cost_usd": updated.TotalCostUSD, "account_id": profile.Sub2AccountID})
+	s.auditAccountEvent(ctx, profile.ID, "cost_updated", "remove", "remove", "sub2", "移出前已更新最终累计消耗", map[string]any{
+		"downstream_total_cost_usd": cost.StandardCostUSD, "total_cost_usd": updated.TotalCostUSD,
+		"downstream_total_user_cost_usd": cost.UserCostUSD, "total_user_cost_usd": updated.TotalUserCostUSD, "account_id": profile.Sub2AccountID,
+	})
 	return updated
 }
 

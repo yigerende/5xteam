@@ -258,34 +258,45 @@ func (c *Client) RestoreScheduling(ctx context.Context, settings model.Sub2Setti
 	return account, nil
 }
 
-// QueryTotalStandardCost returns the model-price-equivalent USD usage stored
-// by Sub2 for this account. Team rotation accounts live for at most a few
-// days, so the API's maximum 90-day window covers their complete lifecycle.
-func (c *Client) QueryTotalStandardCost(ctx context.Context, settings model.Sub2Settings, password string, accountID int64) (float64, error) {
+type AccountCosts struct {
+	StandardCostUSD float64
+	UserCostUSD     *float64
+}
+
+// QueryTotalCosts reads both cost measures from one statistics response.
+// Preserve the existing 90-day window; older Sub2 versions may omit user cost.
+func (c *Client) QueryTotalCosts(ctx context.Context, settings model.Sub2Settings, password string, accountID int64) (AccountCosts, error) {
 	if accountID < 1 {
-		return 0, errors.New("Sub2 账号 ID 无效")
+		return AccountCosts{}, errors.New("Sub2 账号 ID 无效")
 	}
 	path := "/api/v1/admin/accounts/" + strconv.FormatInt(accountID, 10) + "/stats?days=90"
 	data, err := c.doJSON(ctx, settings, password, http.MethodGet, path, nil, nil)
 	if err != nil {
-		return 0, err
+		return AccountCosts{}, err
 	}
 	var result struct {
 		Summary struct {
 			TotalStandardCost *float64 `json:"total_standard_cost"`
 			TotalCost         *float64 `json:"total_cost"`
+			TotalUserCost     *float64 `json:"total_user_cost"`
 		} `json:"summary"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
-		return 0, fmt.Errorf("解析 Sub2 累计消耗失败: %w", err)
+		return AccountCosts{}, fmt.Errorf("解析 Sub2 累计消耗失败: %w", err)
 	}
-	if result.Summary.TotalStandardCost != nil {
-		return max(0, *result.Summary.TotalStandardCost), nil
+	standard := result.Summary.TotalStandardCost
+	if standard == nil {
+		standard = result.Summary.TotalCost
 	}
-	if result.Summary.TotalCost != nil {
-		return max(0, *result.Summary.TotalCost), nil
+	if standard == nil {
+		return AccountCosts{}, errors.New("Sub2 累计消耗响应缺少 total_standard_cost")
 	}
-	return 0, errors.New("Sub2 累计消耗响应缺少 total_standard_cost")
+	costs := AccountCosts{StandardCostUSD: max(0, *standard)}
+	if result.Summary.TotalUserCost != nil {
+		userCost := max(0, *result.Summary.TotalUserCost)
+		costs.UserCostUSD = &userCost
+	}
+	return costs, nil
 }
 
 // DeleteAccount removes a downstream Sub2 account by its admin ID.
