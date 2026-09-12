@@ -539,9 +539,41 @@ func (s *Server) startMailAccountRegistrationMode(w http.ResponseWriter, r *http
 }
 
 func (s *Server) exportMailAccountCredentials(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
 	if !strings.Contains(email, "@") {
 		writeAPI(w, http.StatusBadRequest, nil, "邮箱地址无效")
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" || format == "raw" {
+		profile, local, err := s.store.MailAccountCredential(email)
+		if err != nil {
+			writeAPI(w, http.StatusBadRequest, nil, "无法读取该邮件账号的凭证")
+			return
+		}
+		credentials := mailGPTCredentials{
+			Email: profile.Email, GPTPassword: strings.TrimSpace(local.GptPassword),
+			AccessToken: strings.TrimSpace(local.AccessToken), RefreshToken: strings.TrimSpace(local.RefreshToken),
+			ChatGPTSession: strings.TrimSpace(local.ChatGPTSession),
+		}
+		// Keep legacy RT/account-ID enrichment without requiring AT to view 2FA.
+		if credentials.AccessToken != "" {
+			credentials, _, err = s.prepareMailGPTCredentials(r.Context(), email)
+			if err != nil {
+				writeAPI(w, http.StatusBadRequest, nil, err.Error())
+				return
+			}
+		}
+		writeAPI(w, http.StatusOK, map[string]any{
+			"email":              credentials.Email,
+			"gpt_password":       credentials.GPTPassword,
+			"totp_secret":        strings.TrimSpace(local.TotpSecret),
+			"access_token":       credentials.AccessToken,
+			"refresh_token":      credentials.RefreshToken,
+			"chatgpt_account_id": credentials.AccountID,
+			"chatgpt_session":    chatGPTSessionValue(credentials.ChatGPTSession),
+		}, "")
 		return
 	}
 	credentials, expiresAt, err := s.prepareMailGPTCredentials(r.Context(), email)
@@ -550,17 +582,7 @@ func (s *Server) exportMailAccountCredentials(w http.ResponseWriter, r *http.Req
 		return
 	}
 	exportedAt := time.Now().UTC()
-	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	switch format {
-	case "", "raw":
-		writeAPI(w, http.StatusOK, map[string]any{
-			"email":              credentials.Email,
-			"gpt_password":       credentials.GPTPassword,
-			"access_token":       credentials.AccessToken,
-			"refresh_token":      credentials.RefreshToken,
-			"chatgpt_account_id": credentials.AccountID,
-			"chatgpt_session":    chatGPTSessionValue(credentials.ChatGPTSession),
-		}, "")
 	case "cpa":
 		if credentials.RefreshToken == "" {
 			writeAPI(w, http.StatusConflict, nil, "该账号尚未获取 Codex RT，不能导出 CPA JSON")

@@ -17,7 +17,8 @@ const items = Array.from({ length: 24 }, (_, i) => ({
   access_token_present: true,
   pickup_url_present: true,
 }))
-window.mailExportFixture = { requests: [], fail: false, delay: 350 }
+if (new URLSearchParams(location.search).has('totp-no-at')) items[0].access_token_present = false
+window.mailExportFixture = { requests: [], fail: false, delay: 350, totpValue: '012345', totpValidity: 30000, totpFail: false, totpDelay: 0 }
 const fixture = window.mailExportFixture
 const encoder = new TextEncoder()
 const json = data => new Response(JSON.stringify({ ok: true, data }), { headers: { 'Content-Type': 'application/json' } })
@@ -26,6 +27,16 @@ window.fetch = async (path, options = {}) => {
   const body = options.body ? JSON.parse(options.body) : {}
   fixture.requests.push({ path: url.pathname, body })
   if (url.pathname === '/api/mail/status') return json({ available: true })
+  if (url.pathname.startsWith('/api/mail/accounts/') && url.pathname.endsWith('/totp')) {
+    await new Promise(resolve => setTimeout(resolve, fixture.totpDelay))
+    if (fixture.totpFail) return new Response(JSON.stringify({ ok: false, error: '模拟密钥格式无效' }), { status: 409 })
+    return json({ code: fixture.totpValue, valid_for_ms: fixture.totpValidity })
+  }
+  if (url.pathname.startsWith('/api/mail/accounts/') && url.pathname.endsWith('/credentials')) {
+    const item = items.find(item => item.email === decodeURIComponent(url.pathname.split('/')[4]))
+    if (!item) throw new Error('Missing credential fixture')
+    return json({ email: item.email, gpt_password: item.gpt_password_present ? 'fixture-password' : '', totp_secret: item.totp_secret_present ? 'JBSWY3DPEHPK3PXP' : '', access_token: item.access_token_present ? 'fixture-at' : '', refresh_token: item.refresh_token_present ? 'fixture-rt' : '' })
+  }
   if (url.pathname === '/api/mail/accounts') {
     const page = Number(url.searchParams.get('page') || 1)
     const size = Number(url.searchParams.get('page_size') || 10)

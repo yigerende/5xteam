@@ -214,6 +214,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/mail/accounts/credentials/export-batch", s.exportMailAccountCredentialsBatch)
 	mux.HandleFunc("POST /api/mail/accounts/credentials/export-progress", s.exportMailAccountCredentialsProgress)
 	mux.HandleFunc("GET /api/mail/accounts/{email}/credentials", s.exportMailAccountCredentials)
+	mux.HandleFunc("GET /api/mail/accounts/{email}/totp", s.getMailAccountTOTP)
 	mux.HandleFunc("GET /api/mail/login/{id}", s.mailAccountLoginStatus)
 	mux.HandleFunc("GET /api/mail/register/{id}", s.mailAccountLoginStatus)
 	mux.HandleFunc("GET /api/mail/register-at/{id}", s.mailAccountLoginStatus)

@@ -262,7 +262,11 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 	const cte = `WITH accounts AS (
 		SELECT id, profile,
 			CASE WHEN json_extract(profile,'$.remove_status')='completed' THEN 'removed' WHEN json_extract(profile,'$.accept_status')='completed' THEN 'inside' ELSE 'outside' END AS space_state,
-			COALESCE(NULLIF(json_extract(profile,'$.imported_at'),''), NULLIF(json_extract(profile,'$.created_at'),''), updated_at) AS entered_at
+			COALESCE(
+				julianday(NULLIF(json_extract(profile,'$.imported_at'),'0001-01-01T00:00:00Z')),
+				julianday(NULLIF(json_extract(profile,'$.created_at'),'0001-01-01T00:00:00Z')),
+				julianday(updated_at)
+			) AS entered_at
 		FROM free_accounts
 	)`
 	var summary FreeAccountsPageSummary
@@ -310,8 +314,15 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 	if err := s.db.QueryRow(cte+` SELECT COUNT(*) FROM accounts WHERE (?='' OR space_state=?)`, spaceState, spaceState).Scan(&total); err != nil {
 		return nil, 0, summary, err
 	}
+	// Sort by the current workspace stage before pagination. Legacy records
+	// without a stage timestamp fall back to when they entered the list.
 	rows, err := s.db.Query(cte+` SELECT profile FROM accounts WHERE (?='' OR space_state=?)
-		ORDER BY CASE space_state WHEN 'inside' THEN 0 WHEN 'outside' THEN 1 ELSE 2 END, entered_at DESC, id DESC LIMIT ? OFFSET ?`, spaceState, spaceState, limit, offset)
+		ORDER BY CASE space_state WHEN 'inside' THEN 0 WHEN 'outside' THEN 1 ELSE 2 END,
+			COALESCE(CASE space_state
+				WHEN 'removed' THEN julianday(NULLIF(json_extract(profile,'$.removed_at'),'0001-01-01T00:00:00Z'))
+				WHEN 'inside' THEN julianday(NULLIF(json_extract(profile,'$.joined_at'),'0001-01-01T00:00:00Z'))
+				ELSE entered_at END, entered_at) DESC,
+			id DESC LIMIT ? OFFSET ?`, spaceState, spaceState, limit, offset)
 	if err != nil {
 		return nil, 0, summary, err
 	}

@@ -116,6 +116,7 @@ const credentialDialog = reactive({
   open: false,
   email: "",
   gptPassword: "",
+  totpSecret: "",
   accessToken: "",
   refreshToken: "",
   chatgptSession: "",
@@ -125,6 +126,10 @@ const credentialDialog = reactive({
   copied: "",
   error: "",
 });
+const totpCode = reactive({ value: "", loading: false, error: "", remaining: 0 });
+let credentialRequestID = 0;
+let totpTimer;
+let totpDeadline = 0;
 const timers = new Set();
 const accountPage = ref(1);
 const accountPageSize = ref(props.defaultPageSize);
@@ -810,10 +815,13 @@ async function exportSelectedText() {
 }
 
 async function openCredentialDialog(account) {
+  const requestID = ++credentialRequestID;
+  resetTotpCode();
   Object.assign(credentialDialog, {
     open: true,
     email: account.email,
     gptPassword: "",
+    totpSecret: "",
     accessToken: "",
     refreshToken: "",
     chatgptSession: "",
@@ -827,24 +835,29 @@ async function openCredentialDialog(account) {
     const credentials = await api(
       `/api/mail/accounts/${encodeURIComponent(account.email)}/credentials`,
     );
+    if (requestID !== credentialRequestID) return;
     Object.assign(credentialDialog, {
       gptPassword: credentials.gpt_password || "",
+      totpSecret: credentials.totp_secret || "",
       accessToken: credentials.access_token || "",
       refreshToken: credentials.refresh_token || "",
       chatgptSession: formatChatGPTSession(credentials.chatgpt_session),
       accountID: credentials.chatgpt_account_id || "",
     });
   } catch (error) {
-    credentialDialog.error = error.message;
+    if (requestID === credentialRequestID) credentialDialog.error = error.message;
   } finally {
-    credentialDialog.loading = false;
+    if (requestID === credentialRequestID) credentialDialog.loading = false;
   }
 }
 function closeCredentialDialog() {
+  credentialRequestID++;
+  resetTotpCode();
   Object.assign(credentialDialog, {
     open: false,
     email: "",
     gptPassword: "",
+    totpSecret: "",
     accessToken: "",
     refreshToken: "",
     chatgptSession: "",
@@ -854,6 +867,37 @@ function closeCredentialDialog() {
     copied: "",
     error: "",
   });
+}
+function resetTotpCode() {
+  window.clearInterval(totpTimer);
+  if (credentialDialog.copied === "totp-code") credentialDialog.copied = "";
+  totpDeadline = 0;
+  Object.assign(totpCode, { value: "", loading: false, error: "", remaining: 0 });
+}
+function updateTotpRemaining() {
+  totpCode.remaining = Math.max(0, Math.ceil((totpDeadline - performance.now()) / 1000));
+  if (!totpCode.remaining) window.clearInterval(totpTimer);
+}
+async function showTotpCode() {
+  if (!credentialDialog.totpSecret || totpCode.loading) return;
+  resetTotpCode();
+  totpCode.loading = true;
+  const requestID = credentialRequestID;
+  const started = performance.now();
+  try {
+    const result = await api(`/api/mail/accounts/${encodeURIComponent(credentialDialog.email)}/totp`, { cache: "no-store" });
+    if (requestID !== credentialRequestID) return;
+    if (!/^\d{6}$/.test(result.code) || !Number.isFinite(result.valid_for_ms)) throw new Error("验证码响应异常，请重试");
+    totpCode.value = result.code;
+    // Use server validity and monotonic elapsed time, not the PC's wall clock.
+    totpDeadline = started + result.valid_for_ms;
+    updateTotpRemaining();
+    if (totpCode.remaining) totpTimer = window.setInterval(updateTotpRemaining, 250);
+  } catch (error) {
+    if (requestID === credentialRequestID) totpCode.error = error.message;
+  } finally {
+    if (requestID === credentialRequestID) totpCode.loading = false;
+  }
 }
 function formatChatGPTSession(value) {
   if (!value) return "";
@@ -887,14 +931,18 @@ async function copyAccountForImport(account) {
   }
 }
 async function copyCredential(kind) {
-  const value =
-    kind === "at"
-      ? credentialDialog.accessToken
-      : kind === "password"
-        ? credentialDialog.gptPassword
-        : kind === "session"
-          ? credentialDialog.chatgptSession
-          : credentialDialog.refreshToken;
+  if (kind === "totp-code") {
+    updateTotpRemaining();
+    if (!totpCode.remaining) return;
+  }
+  const value = {
+    at: credentialDialog.accessToken,
+    rt: credentialDialog.refreshToken,
+    password: credentialDialog.gptPassword,
+    totp: credentialDialog.totpSecret,
+    "totp-code": totpCode.value,
+    session: credentialDialog.chatgptSession,
+  }[kind];
   if (!value) return;
   try {
     await navigator.clipboard.writeText(value);
@@ -1299,6 +1347,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => [...timers].forEach(stopTimer));
 onBeforeUnmount(() => exportController?.abort());
+onBeforeUnmount(() => { credentialRequestID++; resetTotpCode(); });
 onBeforeUnmount(() => window.clearTimeout(accountSearchTimer));
 onBeforeUnmount(() => window.clearTimeout(actionMenuCloseTimer));
 onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
@@ -1592,7 +1641,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                         @mouseleave="scheduleCloseActionMenu"
                       >
                         <button class="action-menu-item" type="button" :disabled="!!busy" @click="closeActionMenu(); startFetch([account.email])"><Inbox :size="14" />收取该邮箱</button>
-                        <button class="action-menu-item" type="button" :disabled="!!busy || !account.access_token_present" @click="closeActionMenu(); openCredentialDialog(account)"><FileKey2 :size="14" />查看、复制和导出 AT / RT</button>
+                        <button class="action-menu-item" type="button" :disabled="!!busy" @click="closeActionMenu(); openCredentialDialog(account)"><FileKey2 :size="14" />查看、复制和导出 AT / RT</button>
                         <button
                           class="action-menu-item"
                           type="button"
@@ -1944,6 +1993,17 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
               </button></span
             ><input :value="credentialDialog.gptPassword || '未设置'" readonly
           /></label>
+          <div class="credential-token-field">
+            <span><strong>OpenAI 2FA 密钥</strong><button type="button" :disabled="!credentialDialog.totpSecret" @click="copyCredential('totp')"><Check v-if="credentialDialog.copied === 'totp'" :size="14" /><Copy v-else :size="14" />{{ credentialDialog.copied === 'totp' ? '已复制' : '复制 2FA' }}</button></span>
+            <input :value="credentialDialog.totpSecret || '未配置'" aria-label="OpenAI 2FA 密钥" readonly spellcheck="false" @focus="$event.target.select()" />
+            <div v-if="credentialDialog.totpSecret" class="credential-totp-code">
+              <code v-if="totpCode.value">{{ totpCode.remaining ? totpCode.value : '------' }}</code>
+              <small v-if="totpCode.value">{{ totpCode.remaining ? `${totpCode.remaining} 秒后过期` : '已过期' }}</small>
+              <button type="button" :disabled="totpCode.loading" @click="showTotpCode"><LoaderCircle v-if="totpCode.loading" class="spin" :size="14" /><RefreshCw v-else-if="totpCode.value" :size="14" /><KeyRound v-else :size="14" />{{ totpCode.value ? '刷新' : '查看验证码' }}</button>
+              <button v-if="totpCode.value" type="button" :disabled="!totpCode.remaining || totpCode.loading" @click="copyCredential('totp-code')"><Check v-if="credentialDialog.copied === 'totp-code'" :size="14" /><Copy v-else :size="14" />{{ credentialDialog.copied === 'totp-code' ? '已复制' : '复制验证码' }}</button>
+            </div>
+            <p v-if="totpCode.error" class="danger-text" role="alert">{{ totpCode.error }}</p>
+          </div>
           <label class="credential-token-field"
             ><span
               ><strong>Access Token (AT)</strong
@@ -2023,7 +2083,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
               class="btn ghost"
               type="button"
               :disabled="
-                !!credentialDialog.exporting || !credentialDialog.refreshToken
+                !!credentialDialog.exporting || !credentialDialog.accessToken || !credentialDialog.refreshToken
               "
               @click="exportCredentialFormat('cpa')"
             >
@@ -2036,7 +2096,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
               class="btn primary"
               type="button"
               :disabled="
-                !!credentialDialog.exporting || !credentialDialog.refreshToken
+                !!credentialDialog.exporting || !credentialDialog.accessToken || !credentialDialog.refreshToken
               "
               @click="exportCredentialFormat('sub2')"
             >
@@ -3160,6 +3220,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .credential-dialog {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   width: min(720px, 100%);
   max-height: calc(100vh - 40px);
   gap: 16px;
@@ -3173,6 +3234,9 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .credential-dialog-header h2 {
   margin-top: 4px;
+}
+.credential-dialog-header > div {
+  min-width: 0;
 }
 .credential-dialog-header p {
   overflow: hidden;
@@ -3201,7 +3265,29 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .credential-token-field {
   display: grid;
+  min-width: 0;
   gap: 7px;
+}
+.credential-token-field input {
+  width: 100%;
+  min-width: 0;
+}
+.credential-totp-code {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.credential-totp-code code {
+  min-width: 72px;
+  color: var(--blue);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.credential-totp-code small {
+  min-width: 70px;
+  color: var(--muted);
+  font-size: 11px;
 }
 .credential-token-field > span {
   display: flex;
@@ -3256,6 +3342,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .credential-export-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding-top: 2px;
