@@ -148,6 +148,7 @@ func TestEmptyRotationImportsMailboxCandidatesWithinLimits(t *testing.T) {
 		{"mail_shortage", 4, 0, 1, 0, 1},
 		{"no_capacity", 0, 2, 5, 0, 0},
 		{"rotation_first", 4, 2, 5, 1, 1},
+		{"rotation_satisfies_limit", 4, 2, 5, 2, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st, err := store.Open(t.TempDir())
@@ -183,6 +184,16 @@ func TestEmptyRotationImportsMailboxCandidatesWithinLimits(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// Refreshing/reimporting an old mailbox must not change its entry priority.
+			if tc.mail > 0 {
+				_, credentials, err := st.MailAccountCredential("mail-0@example.com")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.SaveMailAccount(model.MailAccountProfile{Email: credentials.Email, Label: "reimported"}, credentials); err != nil {
+					t.Fatal(err)
+				}
+			}
 			run := model.AutoRotationRun{ID: "empty-bootstrap", Status: "running", StartedAt: time.Now()}
 			if err := st.SaveAutoRotationRun(run); err != nil {
 				t.Fatal(err)
@@ -197,6 +208,20 @@ func TestEmptyRotationImportsMailboxCandidatesWithinLimits(t *testing.T) {
 			}
 			if mailCount != tc.wantMail {
 				t.Fatalf("imported mailbox candidates=%d, want %d", mailCount, tc.wantMail)
+			}
+			selectedMail := make(map[string]bool)
+			for _, account := range st.FreeAccounts() {
+				selectedMail[account.Email] = true
+			}
+			for i := 0; i < tc.mail; i++ {
+				email := fmt.Sprintf("mail-%d@example.com", i)
+				if selectedMail[email] != (i < tc.wantMail) {
+					t.Fatalf("mailbox selection must prefer earliest entry: %s selected=%v, want %v", email, selectedMail[email], i < tc.wantMail)
+				}
+			}
+			// Candidate selection must not reverse the user-facing mail list.
+			if tc.mail > 0 && st.MailAccountsByManagementScope("mail")[0].Email != fmt.Sprintf("mail-%d@example.com", tc.mail-1) {
+				t.Fatal("mail list no longer shows newest entries first")
 			}
 			if tasks := st.AutoRotationTasks(run.ID); len(tasks) != tc.wantMail+tc.rotation {
 				t.Fatalf("planned tasks=%d, want %d", len(tasks), tc.wantMail+tc.rotation)

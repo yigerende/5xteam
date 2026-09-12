@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -325,7 +326,13 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 	// Mailbox candidates have not been imported yet, so the rotation list is not a candidate cap.
 	need = autoRotationPlan(settings.MaxPerRun, need, 0, need)
 	for len(selected) < need {
-		for _, mail := range s.store.MailAccountsByManagementScope("mail") {
+		mailCandidates := s.store.MailAccountsByManagementScope("mail")
+		// Replenish oldest entries first without changing the mail list's display order.
+		// Stable sorting preserves the store's email tie-breaker for equal timestamps.
+		sort.SliceStable(mailCandidates, func(i, j int) bool {
+			return mailCandidates[i].CreatedAt.Before(mailCandidates[j].CreatedAt)
+		})
+		for _, mail := range mailCandidates {
 			if len(selected) >= need {
 				break
 			}

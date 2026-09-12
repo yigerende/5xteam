@@ -1828,7 +1828,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           <header><h2 id="mail-selection-title">条件选择</h2><IconButton label="关闭条件选择" :disabled="!!busy" @click="selectionOpen = false"><X :size="16" /></IconButton></header>
           <div class="mail-options-scope"><span>账号范围</span><strong>未进入空间</strong></div>
           <fieldset :disabled="!!busy" class="mail-options-fields">
-            <label class="field"><span>AT 状态</span><select v-model="selectionConditions.at_status"><option value="">不限</option><option value="invalid">AT 无效</option><option value="valid">AT 有效</option></select></label>
+            <label class="field"><span>ChatGPT / AT 状态</span><select v-model="selectionConditions.at_status"><option value="">不限</option><option value="invalid">AT 无效</option><option value="valid">AT 有效</option><option value="not_logged_in">ChatGPT 未登录</option></select></label>
             <label class="mail-option-check"><input v-model="selectionConditions.require_rt" type="checkbox" />有 RT</label>
             <label class="mail-option-check"><input v-model="selectionConditions.require_password" type="checkbox" />有 ChatGPT 密码</label>
             <label class="mail-option-check"><input v-model="selectionConditions.require_totp" type="checkbox" />有 2FA</label>

@@ -37,7 +37,7 @@ func (s *Server) selectMailAccounts(w http.ResponseWriter, r *http.Request) {
 	emails, err := s.store.SelectOutsideMailAccounts(input.MailAccountSelection)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if input.ATStatus != "" && input.ATStatus != "valid" && input.ATStatus != "invalid" {
+		if input.ATStatus != "" && input.ATStatus != "valid" && input.ATStatus != "invalid" && input.ATStatus != "not_logged_in" {
 			status = http.StatusBadRequest
 		}
 		writeAPI(w, status, nil, "选择邮件账号失败: "+err.Error())

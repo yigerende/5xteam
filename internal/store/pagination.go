@@ -92,8 +92,8 @@ type MailAccountSelection struct {
 
 // A nil email list selects across all pages; an empty list selects nothing.
 func (s *Store) SelectOutsideMailAccounts(filter MailAccountSelection) ([]string, error) {
-	if filter.ATStatus != "" && filter.ATStatus != "valid" && filter.ATStatus != "invalid" {
-		return nil, fmt.Errorf("AT 状态只能为不限、有效或无效")
+	if filter.ATStatus != "" && filter.ATStatus != "valid" && filter.ATStatus != "invalid" && filter.ATStatus != "not_logged_in" {
+		return nil, fmt.Errorf("状态只能为不限、AT 有效、AT 无效或 ChatGPT 未登录")
 	}
 	if filter.Emails != nil && len(filter.Emails) == 0 {
 		return []string{}, nil
@@ -107,7 +107,12 @@ func (s *Store) SelectOutsideMailAccounts(filter MailAccountSelection) ([]string
 			AND COALESCE(json_extract(profile,'$.registration_status'),'')!='dead'
 			AND COALESCE(json_extract(pipeline_profile,'$.dead'),0)=0`
 	args := []any{}
-	if filter.ATStatus != "" {
+	if filter.ATStatus == "not_logged_in" {
+		// Match the mail list's persisted "not logged in" status, not an invalid AT.
+		query += ` AND COALESCE(json_extract(profile,'$.at_checked_at'),'')=''
+			AND COALESCE(json_extract(profile,'$.access_token_present'),0)=0
+			AND COALESCE(json_extract(profile,'$.auth_type'),'') NOT IN ('AT','RT')`
+	} else if filter.ATStatus != "" {
 		query += ` AND COALESCE(json_extract(profile,'$.at_checked_at'),'')!='' AND COALESCE(json_extract(profile,'$.at_valid'),0)=?`
 		args = append(args, filter.ATStatus == "valid")
 	}

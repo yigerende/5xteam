@@ -115,14 +115,17 @@ func TestMailAccountSelectionAllConditionCombinations(t *testing.T) {
 		mask          int
 	}
 	fixtures := []fixture{}
-	for _, status := range []string{"unknown", "valid", "invalid"} {
+	for _, status := range []string{"not_logged_in", "unknown", "valid", "invalid"} {
 		for mask := 0; mask < 8; mask++ {
 			email := fmt.Sprintf("%s-%d@example.com", status, mask)
 			profile := model.MailAccountProfile{Email: email, ATValid: status == "valid"}
-			if status != "unknown" {
+			if status == "valid" || status == "invalid" {
 				profile.ATCheckedAt = &now
 			}
 			credentials := model.MailAccountCredentials{Email: email}
+			if status != "not_logged_in" {
+				credentials.AccessToken = "fixture-at"
+			}
 			if mask&1 != 0 {
 				credentials.RefreshToken = "fixture-rt"
 			}
@@ -138,7 +141,7 @@ func TestMailAccountSelectionAllConditionCombinations(t *testing.T) {
 			fixtures = append(fixtures, fixture{email, status, mask})
 		}
 	}
-	for _, status := range []string{"", "valid", "invalid"} {
+	for _, status := range []string{"", "valid", "invalid", "not_logged_in"} {
 		for mask := 0; mask < 8; mask++ {
 			t.Run(fmt.Sprintf("%s-%d", status, mask), func(t *testing.T) {
 				filter := MailAccountSelection{ATStatus: status, RequireRT: mask&1 != 0, RequirePassword: mask&2 != 0, RequireTOTP: mask&4 != 0}
@@ -157,10 +160,10 @@ func TestMailAccountSelectionAllConditionCombinations(t *testing.T) {
 						t.Fatal("unexpected selection", email)
 					}
 				}
-				filter.Emails = []string{" VALID-7@EXAMPLE.COM ", "invalid-3@example.com"}
+				filter.Emails = []string{" VALID-7@EXAMPLE.COM ", "invalid-3@example.com", "not_logged_in-7@example.com"}
 				got, err = s.SelectOutsideMailAccounts(filter)
 				expectedPage := 0
-				for _, email := range []string{"valid-7@example.com", "invalid-3@example.com"} {
+				for _, email := range []string{"valid-7@example.com", "invalid-3@example.com", "not_logged_in-7@example.com"} {
 					if want[email] {
 						expectedPage++
 					}
@@ -169,7 +172,7 @@ func TestMailAccountSelectionAllConditionCombinations(t *testing.T) {
 					t.Fatalf("page=%v expected=%d err=%v", got, expectedPage, err)
 				}
 				for _, email := range got {
-					if email != "valid-7@example.com" && email != "invalid-3@example.com" {
+					if email != "valid-7@example.com" && email != "invalid-3@example.com" && email != "not_logged_in-7@example.com" {
 						t.Fatal("outside page", email)
 					}
 				}
@@ -181,5 +184,62 @@ func TestMailAccountSelectionAllConditionCombinations(t *testing.T) {
 	}
 	if _, err := s.SelectOutsideMailAccounts(MailAccountSelection{ATStatus: "bad"}); err == nil {
 		t.Fatal("invalid condition was accepted")
+	}
+}
+
+func TestMailNotLoggedInSelectionScopeAndStatus(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now()
+	for _, name := range []string{"outside", "pro", "inside", "removed", "dead", "registration-dead", "pipeline-dead", "checked-valid", "checked-invalid", "legacy-at", "legacy-rt"} {
+		email := name + "@example.com"
+		profile := model.MailAccountProfile{Email: email}
+		switch name {
+		case "pro":
+			profile.ManagementScope = "pro"
+		case "dead":
+			profile.ChatGPTStatus = "dead"
+		case "registration-dead":
+			profile.RegistrationStatus = "dead"
+		case "checked-valid", "checked-invalid":
+			profile.ATCheckedAt, profile.ATValid = &now, name == "checked-valid"
+		}
+		if _, err := s.SaveMailAccount(profile, model.MailAccountCredentials{Email: email}); err != nil {
+			t.Fatal(err)
+		}
+		if name == "legacy-at" || name == "legacy-rt" {
+			authType := "AT"
+			if name == "legacy-rt" {
+				authType = "RT"
+			}
+			if _, err := s.db.Exec(`UPDATE mail_accounts SET profile=json_set(profile,'$.auth_type',?) WHERE email=?`, authType, email); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if name == "inside" || name == "removed" || name == "pipeline-dead" {
+			account, _, err := s.SaveImportedFreeAccount(model.FreeAccountProfile{Email: email, UserID: email}, "fixture-at")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.UpdateFreeAccount(account.ID, func(p *model.FreeAccountProfile) {
+				if name == "pipeline-dead" {
+					p.Dead = true
+				} else {
+					p.AcceptStatus = "completed"
+				}
+				if name == "removed" {
+					p.RemoveStatus = "completed"
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	emails, err := s.SelectOutsideMailAccounts(MailAccountSelection{ATStatus: "not_logged_in"})
+	if err != nil || len(emails) != 1 || emails[0] != "outside@example.com" {
+		t.Fatalf("unexpected not-logged-in selection: %v, %v", emails, err)
 	}
 }
