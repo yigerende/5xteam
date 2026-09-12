@@ -2523,7 +2523,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .mail-account-table {
   width: 100%;
-  min-width: 1360px !important;
+  min-width: 1650px !important;
   table-layout: fixed;
 }
 .mail-accounts-panel .table-shell {
@@ -2562,11 +2562,14 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .mail-account-table th:nth-child(8),
 .mail-account-table td:nth-child(8) {
-  width: 110px;
+  width: 190px;
+  min-width: 190px;
 }
 .mail-account-table th:nth-child(9),
 .mail-account-table td:nth-child(9) {
-  width: 90px;
+  width: 110px;
+  min-width: 110px;
+  text-align: center;
 }
 .mail-account-table th:nth-child(10),
 .mail-account-table td:nth-child(10) {

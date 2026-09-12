@@ -572,8 +572,8 @@ tbody tr:hover { background: var(--surface-2); }
 .actions-column { width: 1%; text-align: right; }
 .row-actions { justify-content: flex-end; }
 .mail-account-table { min-width: 1180px !important; }
-.pipeline-status-cell { min-width: 178px; }
-.pipeline-mini-stages { display: grid; grid-template-columns: repeat(3, 1fr); width: 168px; margin-top: 6px; gap: 3px; }
+.pipeline-status-cell { min-width: 190px; overflow: hidden; }
+.pipeline-mini-stages { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: min(168px, 100%); max-width: 100%; margin-top: 6px; gap: 3px; }
 .pipeline-mini-stages span { display: block; min-width: 0; padding: 2px 4px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font-size: 8px; line-height: 1.4; text-align: center; white-space: nowrap; }
 .pipeline-mini-stages .tone-completed { border-color: rgba(67, 168, 124, .25); background: var(--green-bg); color: var(--green-strong); }
 .pipeline-mini-stages .tone-running { border-color: rgba(98, 166, 202, .25); background: var(--blue-bg); color: var(--blue); }
