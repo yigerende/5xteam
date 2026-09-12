@@ -78,19 +78,62 @@ WITH latest_pipeline AS (
 )
 `
 
-// Select identifiers only, using the same latest-membership rules as the paged list.
 func (s *Store) MailOutsideInvalidATEmails() ([]string, error) {
+	return s.SelectOutsideMailAccounts(MailAccountSelection{ATStatus: "invalid"})
+}
+
+type MailAccountSelection struct {
+	ATStatus        string   `json:"at_status"`
+	RequireRT       bool     `json:"require_rt"`
+	RequirePassword bool     `json:"require_password"`
+	RequireTOTP     bool     `json:"require_totp"`
+	Emails          []string `json:"-"`
+}
+
+// A nil email list selects across all pages; an empty list selects nothing.
+func (s *Store) SelectOutsideMailAccounts(filter MailAccountSelection) ([]string, error) {
+	if filter.ATStatus != "" && filter.ATStatus != "valid" && filter.ATStatus != "invalid" {
+		return nil, fmt.Errorf("AT 状态只能为不限、有效或无效")
+	}
+	if filter.Emails != nil && len(filter.Emails) == 0 {
+		return []string{}, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(mailAccountPageCTE + `
+	query := mailAccountPageCTE + `
 		SELECT LOWER(TRIM(json_extract(profile,'$.email'))) FROM joined
 		WHERE management_scope='mail' AND space_state='outside'
-			AND COALESCE(json_extract(profile,'$.at_checked_at'),'')!=''
-			AND COALESCE(json_extract(profile,'$.at_valid'),0)=0
 			AND COALESCE(json_extract(profile,'$.chatgpt_status'),'')!='dead'
 			AND COALESCE(json_extract(profile,'$.registration_status'),'')!='dead'
-			AND COALESCE(json_extract(pipeline_profile,'$.dead'),0)=0
-		ORDER BY entered_at DESC, LOWER(json_extract(profile,'$.email'))`)
+			AND COALESCE(json_extract(pipeline_profile,'$.dead'),0)=0`
+	args := []any{}
+	if filter.ATStatus != "" {
+		query += ` AND COALESCE(json_extract(profile,'$.at_checked_at'),'')!='' AND COALESCE(json_extract(profile,'$.at_valid'),0)=?`
+		args = append(args, filter.ATStatus == "valid")
+	}
+	for _, requirement := range []struct {
+		enabled bool
+		field   string
+	}{
+		{filter.RequireRT, "refresh_token_present"},
+		{filter.RequirePassword, "gpt_password_present"},
+		{filter.RequireTOTP, "totp_secret_present"},
+	} {
+		if requirement.enabled {
+			query += ` AND COALESCE(json_extract(profile,?),0)=1`
+			args = append(args, "$."+requirement.field)
+		}
+	}
+	if filter.Emails != nil {
+		encoded, err := json.Marshal(filter.Emails)
+		if err != nil {
+			return nil, err
+		}
+		query += ` AND LOWER(TRIM(json_extract(profile,'$.email'))) IN (SELECT LOWER(TRIM(value)) FROM json_each(?))`
+		args = append(args, string(encoded))
+	}
+	query += ` ORDER BY entered_at DESC, LOWER(json_extract(profile,'$.email'))`
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

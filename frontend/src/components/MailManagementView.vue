@@ -31,12 +31,15 @@ import {
   MoreHorizontal,
   Search,
   ListChecks,
+  RotateCcw,
+  FileText,
   Trash2,
   Upload,
   X,
   XCircle,
 } from "lucide-vue-next";
-import { api, downloadFile } from "../api";
+import { api } from "../api";
+import { downloadMailExport } from "../mailExport.js";
 import { parseMailAccountText } from "../mailImport.js";
 import { formatTime } from "../utils";
 import IconButton from "./IconButton.vue";
@@ -127,6 +130,14 @@ const accountPage = ref(1);
 const accountPageSize = ref(props.defaultPageSize);
 const accountTotal = ref(0);
 const selectedEmails = ref(new Set());
+const selectionOpen = ref(false);
+const selectionError = ref("");
+const selectionConditions = reactive({ at_status: "invalid", require_rt: false, require_password: false, require_totp: false });
+const textExportDialog = reactive({ open: false, emails: [], includeAT: false, includeRT: false, error: "" });
+const exportProgress = reactive({ open: false, label: "", stage: "processing", total: 0, processed: 0, received: 0, size: 0, error: "", summary: "" });
+const exportProgressPercent = computed(() => exportProgress.total ? Math.floor(exportProgress.processed * 100 / exportProgress.total) : 0);
+const exportProgressLabel = computed(() => ({ processing: "正在处理账号", generating: "正在生成文件", downloading: "正在下载文件", completed: "导出完成", failed: "导出失败" })[exportProgress.stage] || "正在准备");
+let exportController;
 const pagedFilteredAccounts = computed(() => accounts.value);
 const selectedAccounts = computed(() =>
   [...selectedEmails.value].map((email) => ({ email })),
@@ -339,16 +350,28 @@ function toggleAllVisible() {
 function clearSelection() {
   selectedEmails.value = new Set();
 }
-async function selectOutsideInvalidATAccounts() {
-  busy.value = "select-invalid-at";
+function openSelection() {
+  selectionError.value = "";
+  selectionOpen.value = true;
+}
+function resetSelectionConditions() {
+  Object.assign(selectionConditions, { at_status: "", require_rt: false, require_password: false, require_totp: false });
+}
+async function selectMatchingAccounts(scope) {
+  busy.value = "select-accounts";
+  selectionError.value = "";
   try {
-    const result = await api("/api/mail/accounts/invalid-at-outside");
+    const result = await api("/api/mail/accounts/select", {
+      method: "POST",
+      body: { ...selectionConditions, scope, ...(scope === "page" ? { page_emails: accounts.value.map(accountEmailKey) } : {}) },
+    });
     selectedEmails.value = new Set((result.emails || []).map((email) => accountEmailKey({ email })).filter(Boolean));
     setMessage(selectedEmails.value.size
-      ? `已选中 ${selectedEmails.value.size} 个未进入空间且 AT 无效的账号（包含所有分页）`
-      : "没有未进入空间且 AT 无效的账号", "success");
+      ? `已选中 ${selectedEmails.value.size} 个符合条件的未进入空间账号（${scope === 'page' ? '本页' : '全部分页'}）`
+      : "没有符合条件的未进入空间账号", "success");
+    selectionOpen.value = false;
   } catch (error) {
-    setMessage(error.message, "error");
+    selectionError.value = error.message;
   } finally {
     busy.value = "";
   }
@@ -737,15 +760,48 @@ async function exportSelectedCredentials(format) {
   const label = format === "cpa" ? "CPA" : "Sub2";
   busy.value = `export-${format}`;
   try {
-    await downloadFile(
-      "/api/mail/accounts/credentials/export-batch",
-      format === "cpa" ? "cpa-accounts.zip" : "sub2-accounts.json",
-      {
-        method: "POST",
-        body: { emails: targets.map((account) => account.email), format },
-      },
-    );
-    setMessage(`已导出 ${targets.length} 个账号的 ${label} 凭据`, "success");
+    await runMailExport({ emails: targets.map((account) => account.email), format }, label);
+    exportProgress.summary = `已导出 ${targets.length} 个账号的 ${label} 凭据`;
+    setMessage(exportProgress.summary, "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    busy.value = "";
+  }
+}
+
+async function runMailExport(body, label) {
+  Object.assign(exportProgress, { open: true, label, stage: "processing", total: body.emails.length, processed: 0, received: 0, size: 0, error: "", summary: "" });
+  exportController = new AbortController();
+  try {
+    const result = await downloadMailExport(body, (progress) => Object.assign(exportProgress, progress), exportController.signal);
+    exportProgress.stage = "completed";
+    return result;
+  } catch (error) {
+    exportProgress.stage = "failed";
+    exportProgress.error = error.message;
+    throw error;
+  } finally {
+    exportController = null;
+  }
+}
+
+function openTextExport() {
+  if (!selectedAccounts.value.length) return;
+  Object.assign(textExportDialog, { open: true, emails: [...selectedEmails.value], includeAT: false, includeRT: false, error: "" });
+}
+async function exportSelectedText() {
+  busy.value = "export-text";
+  textExportDialog.error = "";
+  textExportDialog.open = false;
+  try {
+    const result = await runMailExport({ emails: textExportDialog.emails, format: "text", include_at: textExportDialog.includeAT, include_rt: textExportDialog.includeRT }, "文本");
+    const warnings = [["AT", "X-Export-Missing-AT"], ["RT", "X-Export-Missing-RT"], ["接码链接", "X-Export-Missing-Pickup"]]
+      .map(([name, header]) => [name, Number(result.headers.get(header) || 0)])
+      .filter(([, count]) => count > 0)
+      .map(([name, count]) => `${name} 缺失 ${count} 个（${name === '接码链接' ? '留空' : '已跳过'}）`);
+    exportProgress.summary = `已导出 ${textExportDialog.emails.length} 个账号${warnings.length ? `；${warnings.join('，')}` : ''}`;
+    setMessage(exportProgress.summary, warnings.length ? "warning" : "success");
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -1242,6 +1298,7 @@ onMounted(() => {
   document.addEventListener("click", closeActionMenu);
 });
 onBeforeUnmount(() => [...timers].forEach(stopTimer));
+onBeforeUnmount(() => exportController?.abort());
 onBeforeUnmount(() => window.clearTimeout(accountSearchTimer));
 onBeforeUnmount(() => window.clearTimeout(actionMenuCloseTimer));
 onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
@@ -1306,8 +1363,8 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                 v-model="accountQuery"
                 placeholder="搜索邮箱或分组" />
             </label>
-            <button class="btn ghost" type="button" :disabled="!!busy" @click="selectOutsideInvalidATAccounts" title="选中所有分页中未进入空间且已标记 AT 无效的账号">
-              <ListChecks :size="15" />一键选中未入空间 AT 无效账号
+            <button class="btn ghost" type="button" :disabled="!!busy" @click="openSelection">
+              <ListChecks :size="15" />条件选择
             </button>
             <button
               class="btn ghost"
@@ -1328,6 +1385,9 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             </button>
             <button class="btn ghost" type="button" :disabled="!!busy || !selectedAccounts.length" @click="exportSelectedCredentials('sub2')">
               <Download :size="15" />批量导出 Sub2<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span>
+            </button>
+            <button class="btn ghost" type="button" :disabled="!!busy || !selectedAccounts.length" @click="openTextExport">
+              <FileText :size="15" />导出文本<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span>
             </button>
             <button class="btn ghost" type="button" :disabled="!!busy || !selectedAccounts.length" @click="runSelectedMailTask('login')">
               <KeyRound :size="15" />临时获取 AT<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span>
@@ -1699,6 +1759,55 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
         </section>
       </div>
     </template>
+
+    <Teleport to="body">
+      <div v-if="exportProgress.open" class="modal-backdrop mail-options-backdrop" @click.self="!busy && (exportProgress.open = false)" @keydown.esc="!busy && (exportProgress.open = false)">
+        <section class="modal mail-options-dialog" role="dialog" aria-modal="true" aria-labelledby="mail-export-progress-title" aria-live="polite">
+          <header><h2 id="mail-export-progress-title">{{ exportProgress.label }}导出</h2><IconButton label="关闭导出进度" :disabled="!!busy" @click="exportProgress.open = false"><X :size="16" /></IconButton></header>
+          <div class="mail-import-progress mail-export-progress">
+            <div class="mail-import-progress-heading"><span>{{ exportProgressLabel }}</span><strong>{{ exportProgressPercent }}%</strong></div>
+            <div class="mail-import-progress-track" role="progressbar" :aria-valuenow="exportProgress.processed" aria-valuemin="0" :aria-valuemax="exportProgress.total" aria-label="账号处理进度"><i :class="{ danger: exportProgress.error }" :style="{ width: `${exportProgressPercent}%` }"></i></div>
+            <div class="mail-import-progress-stats"><span>已处理 <strong>{{ exportProgress.processed }} / {{ exportProgress.total }}</strong></span><span v-if="exportProgress.stage === 'downloading'">文件下载 {{ exportProgress.size ? Math.floor(exportProgress.received * 100 / exportProgress.size) : 0 }}%</span></div>
+          </div>
+          <p v-if="exportProgress.error" class="danger-text" role="alert">{{ exportProgress.error }}</p>
+          <p v-else-if="exportProgress.summary">{{ exportProgress.summary }}</p>
+          <footer class="panel-actions mail-options-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="exportProgress.open = false">关闭</button></footer>
+        </section>
+      </div>
+      <div v-if="selectionOpen" class="modal-backdrop mail-options-backdrop" @click.self="!busy && (selectionOpen = false)" @keydown.esc="!busy && (selectionOpen = false)">
+        <section class="modal mail-options-dialog" role="dialog" aria-modal="true" aria-labelledby="mail-selection-title">
+          <header><h2 id="mail-selection-title">条件选择</h2><IconButton label="关闭条件选择" :disabled="!!busy" @click="selectionOpen = false"><X :size="16" /></IconButton></header>
+          <div class="mail-options-scope"><span>账号范围</span><strong>未进入空间</strong></div>
+          <fieldset :disabled="!!busy" class="mail-options-fields">
+            <label class="field"><span>AT 状态</span><select v-model="selectionConditions.at_status"><option value="">不限</option><option value="invalid">AT 无效</option><option value="valid">AT 有效</option></select></label>
+            <label class="mail-option-check"><input v-model="selectionConditions.require_rt" type="checkbox" />有 RT</label>
+            <label class="mail-option-check"><input v-model="selectionConditions.require_password" type="checkbox" />有 ChatGPT 密码</label>
+            <label class="mail-option-check"><input v-model="selectionConditions.require_totp" type="checkbox" />有 2FA</label>
+          </fieldset>
+          <p v-if="selectionError" class="danger-text" role="alert">{{ selectionError }}</p>
+          <footer class="panel-actions mail-options-actions">
+            <button class="btn ghost" type="button" :disabled="!!busy" @click="resetSelectionConditions"><RotateCcw :size="14" />重置</button>
+            <button class="btn ghost" type="button" :disabled="!!busy || !accounts.length" @click="selectMatchingAccounts('page')"><ListChecks :size="14" />本页选择</button>
+            <button class="btn primary" type="button" :disabled="!!busy" @click="selectMatchingAccounts('all')"><LoaderCircle v-if="busy === 'select-accounts'" class="spin" :size="14" /><Check v-else :size="14" />全选</button>
+          </footer>
+        </section>
+      </div>
+      <div v-if="textExportDialog.open" class="modal-backdrop mail-options-backdrop" @click.self="!busy && (textExportDialog.open = false)" @keydown.esc="!busy && (textExportDialog.open = false)">
+        <form class="modal mail-options-dialog" role="dialog" aria-modal="true" aria-labelledby="mail-text-export-title" @submit.prevent="exportSelectedText">
+          <header><h2 id="mail-text-export-title">导出文本</h2><IconButton label="关闭文本导出" :disabled="!!busy" @click="textExportDialog.open = false"><X :size="16" /></IconButton></header>
+          <div class="mail-options-scope"><span>已选账号</span><strong>{{ textExportDialog.emails.length }}</strong></div>
+          <fieldset :disabled="!!busy" class="mail-options-fields">
+            <label class="mail-option-check"><input v-model="textExportDialog.includeAT" type="checkbox" />附带 AT</label>
+            <label class="mail-option-check"><input v-model="textExportDialog.includeRT" type="checkbox" />附带 RT</label>
+          </fieldset>
+          <p v-if="textExportDialog.error" class="danger-text" role="alert">{{ textExportDialog.error }}</p>
+          <footer class="panel-actions mail-options-actions">
+            <button class="btn ghost" type="button" :disabled="!!busy" @click="textExportDialog.open = false">取消</button>
+            <button class="btn primary" type="submit" :disabled="!!busy"><LoaderCircle v-if="busy === 'export-text'" class="spin" :size="14" /><Download v-else :size="14" />导出</button>
+          </footer>
+        </form>
+      </div>
+    </Teleport>
 
     <div
       v-if="importOpen"
@@ -2290,6 +2399,19 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
   gap: 7px;
   margin: -5px 0 14px;
 }
+.mail-options-backdrop { z-index: 250; }
+.mail-options-dialog { max-height: calc(100dvh - 40px); overflow-y: auto; }
+.mail-options-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mail-options-dialog h2 { margin: 0; }
+.mail-options-dialog p { overflow-wrap: anywhere; margin-top: 14px; font-size: 12px; }
+.mail-export-progress .mail-import-progress-heading,
+.mail-export-progress .mail-import-progress-stats { font-size: 12px; flex-wrap: wrap; }
+.mail-options-scope { display: flex; justify-content: space-between; gap: 12px; margin: 18px 0; color: var(--muted); font-size: 12px; }
+.mail-options-scope strong { color: var(--text); }
+.mail-options-fields { min-width: 0; display: grid; gap: 14px; padding: 0; margin: 0; border: 0; }
+.mail-options-fields .field { margin: 0; }
+.mail-option-check { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--text); }
+.mail-options-actions { flex-wrap: wrap; justify-content: flex-end; margin-top: 24px; }
 .mail-accounts-panel > .panel-title > div:first-child {
   flex: 0 0 auto;
 }

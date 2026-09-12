@@ -508,12 +508,12 @@ func TestNormalizeBatchCredentialEmailsValidatesAndDeduplicates(t *testing.T) {
 	if _, err = normalizeBatchCredentialEmails([]string{"../bad@example.com"}); err == nil {
 		t.Fatal("invalid email should be rejected")
 	}
-	tooMany := make([]string, 501)
-	for index := range tooMany {
-		tooMany[index] = fmt.Sprintf("account-%d@example.com", index)
+	allPages := make([]string, 501)
+	for index := range allPages {
+		allPages[index] = fmt.Sprintf("account-%d@example.com", index)
 	}
-	if _, err = normalizeBatchCredentialEmails(tooMany); err == nil {
-		t.Fatal("more than 500 emails should be rejected")
+	if normalized, err := normalizeBatchCredentialEmails(allPages); err != nil || len(normalized) != 501 {
+		t.Fatal("all-page export must not be capped at 500", err)
 	}
 }
 

@@ -579,8 +579,10 @@ func (s *Server) exportMailAccountCredentials(w http.ResponseWriter, r *http.Req
 }
 
 type batchMailCredentialExportInput struct {
-	Emails []string `json:"emails"`
-	Format string   `json:"format"`
+	Emails    []string `json:"emails"`
+	Format    string   `json:"format"`
+	IncludeAT bool     `json:"include_at"`
+	IncludeRT bool     `json:"include_rt"`
 }
 
 type preparedMailCredentialExport struct {
@@ -590,7 +592,7 @@ type preparedMailCredentialExport struct {
 
 func (s *Server) exportMailAccountCredentialsBatch(w http.ResponseWriter, r *http.Request) {
 	var input batchMailCredentialExportInput
-	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
+	if err := decodeJSON(w, r, &input, 8<<20); err != nil {
 		return
 	}
 	emails, err := normalizeBatchCredentialEmails(input.Emails)
@@ -599,15 +601,25 @@ func (s *Server) exportMailAccountCredentialsBatch(w http.ResponseWriter, r *htt
 		return
 	}
 	format := strings.ToLower(strings.TrimSpace(input.Format))
-	if format != "cpa" && format != "sub2" {
-		writeAPI(w, http.StatusBadRequest, nil, "批量导出格式只能是 cpa 或 sub2")
+	reportMailExportProgress(r.Context(), "processing", 0, len(emails))
+	if format == "text" {
+		s.exportMailAccountsText(w, r, emails, input.IncludeAT, input.IncludeRT)
 		return
 	}
+	if format != "cpa" && format != "sub2" {
+		writeAPI(w, http.StatusBadRequest, nil, "批量导出格式只能是 cpa、sub2 或 text")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
 
 	items := make([]preparedMailCredentialExport, 0, len(emails))
 	failures := make([]string, 0)
-	for _, email := range emails {
+	for index, email := range emails {
+		if r.Context().Err() != nil {
+			return
+		}
 		credentials, expiresAt, loadErr := s.prepareMailGPTCredentials(r.Context(), email)
+		reportMailExportProgress(r.Context(), "processing", index+1, len(emails))
 		if loadErr != nil {
 			failures = append(failures, fmt.Sprintf("%s：%s", email, loadErr.Error()))
 			continue
@@ -625,6 +637,7 @@ func (s *Server) exportMailAccountCredentialsBatch(w http.ResponseWriter, r *htt
 
 	exportedAt := time.Now().UTC()
 	timestamp := beijingNow().Format("20060102-150405")
+	reportMailExportProgress(r.Context(), "generating", len(emails), len(emails))
 	if format == "cpa" {
 		archive, archiveErr := buildCPABatchCredentialArchive(items, exportedAt)
 		if archiveErr != nil {
@@ -654,9 +667,6 @@ func (s *Server) exportMailAccountCredentialsBatch(w http.ResponseWriter, r *htt
 func normalizeBatchCredentialEmails(values []string) ([]string, error) {
 	if len(values) == 0 {
 		return nil, errors.New("请先勾选要导出的邮件账号")
-	}
-	if len(values) > 500 {
-		return nil, errors.New("每次最多批量导出 500 个邮件账号")
 	}
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))

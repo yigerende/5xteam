@@ -102,3 +102,84 @@ func TestMailOutsideInvalidATSelectionEmpty(t *testing.T) {
 		t.Fatalf("emails=%v err=%v", emails, err)
 	}
 }
+
+func TestMailAccountSelectionAllConditionCombinations(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now()
+	type fixture struct {
+		email, status string
+		mask          int
+	}
+	fixtures := []fixture{}
+	for _, status := range []string{"unknown", "valid", "invalid"} {
+		for mask := 0; mask < 8; mask++ {
+			email := fmt.Sprintf("%s-%d@example.com", status, mask)
+			profile := model.MailAccountProfile{Email: email, ATValid: status == "valid"}
+			if status != "unknown" {
+				profile.ATCheckedAt = &now
+			}
+			credentials := model.MailAccountCredentials{Email: email}
+			if mask&1 != 0 {
+				credentials.RefreshToken = "fixture-rt"
+			}
+			if mask&2 != 0 {
+				credentials.GptPassword = "fixture-password"
+			}
+			if mask&4 != 0 {
+				credentials.TotpSecret = "fixture-totp"
+			}
+			if _, err := s.SaveMailAccount(profile, credentials); err != nil {
+				t.Fatal(err)
+			}
+			fixtures = append(fixtures, fixture{email, status, mask})
+		}
+	}
+	for _, status := range []string{"", "valid", "invalid"} {
+		for mask := 0; mask < 8; mask++ {
+			t.Run(fmt.Sprintf("%s-%d", status, mask), func(t *testing.T) {
+				filter := MailAccountSelection{ATStatus: status, RequireRT: mask&1 != 0, RequirePassword: mask&2 != 0, RequireTOTP: mask&4 != 0}
+				want := map[string]bool{}
+				for _, f := range fixtures {
+					if (status == "" || f.status == status) && f.mask&mask == mask {
+						want[f.email] = true
+					}
+				}
+				got, err := s.SelectOutsideMailAccounts(filter)
+				if err != nil || len(got) != len(want) {
+					t.Fatalf("got=%v want=%v err=%v", got, want, err)
+				}
+				for _, email := range got {
+					if !want[email] {
+						t.Fatal("unexpected selection", email)
+					}
+				}
+				filter.Emails = []string{" VALID-7@EXAMPLE.COM ", "invalid-3@example.com"}
+				got, err = s.SelectOutsideMailAccounts(filter)
+				expectedPage := 0
+				for _, email := range []string{"valid-7@example.com", "invalid-3@example.com"} {
+					if want[email] {
+						expectedPage++
+					}
+				}
+				if err != nil || len(got) != expectedPage {
+					t.Fatalf("page=%v expected=%d err=%v", got, expectedPage, err)
+				}
+				for _, email := range got {
+					if email != "valid-7@example.com" && email != "invalid-3@example.com" {
+						t.Fatal("outside page", email)
+					}
+				}
+			})
+		}
+	}
+	if emails, err := s.SelectOutsideMailAccounts(MailAccountSelection{Emails: []string{}}); err != nil || len(emails) != 0 {
+		t.Fatal("empty page selected records", emails, err)
+	}
+	if _, err := s.SelectOutsideMailAccounts(MailAccountSelection{ATStatus: "bad"}); err == nil {
+		t.Fatal("invalid condition was accepted")
+	}
+}

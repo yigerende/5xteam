@@ -35,7 +35,11 @@ export async function downloadFile(path, fallbackName = 'download.json', options
     throw new Error(message)
   }
   const blob = await response.blob()
-  const disposition = response.headers.get('Content-Disposition') || ''
+  return saveDownload(blob, response.headers, fallbackName)
+}
+
+export function saveDownload(blob, headers, fallbackName) {
+  const disposition = headers.get('Content-Disposition') || ''
   const match = disposition.match(/filename="?([^";]+)"?/i)
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
@@ -44,5 +48,6 @@ export async function downloadFile(path, fallbackName = 'download.json', options
   document.body.appendChild(link)
   link.click()
   link.remove()
-  URL.revokeObjectURL(url)
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  return { filename: link.download, headers }
 }
