@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,6 +76,132 @@ func TestAverageFreeQuotaUsesOnlyInsideAccountsAndSeatTotal(t *testing.T) {
 func TestAverageFreeQuotaReturnsUnknownWithoutQuota(t *testing.T) {
 	if got := averageFreeQuota([]model.FreeAccountProfile{{AcceptStatus: "completed"}}, 4); got >= 0 {
 		t.Fatalf("expected unknown, got %v", got)
+	}
+}
+
+func TestEmptySpaceBootstrapDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		accounts       []model.FreeAccountProfile
+		total, pending int
+		wantAverage    float64
+		wantRun        bool
+	}{
+		{"empty", nil, 19, 0, 0, true},
+		{"only_removed", []model.FreeAccountProfile{{AcceptStatus: "completed", RemoveStatus: "completed", Quota7D: &model.FreeQuotaWindow{UsedPercent: 0}}}, 19, 0, 0, true},
+		{"invitations_reserve_all", nil, 19, 19, 0, false},
+		{"invitations_reserve_some", nil, 19, 18, 0, true},
+		{"zero_capacity", nil, 0, 0, 0, false},
+		{"inside_without_capacity", []model.FreeAccountProfile{{AcceptStatus: "completed", Quota7D: &model.FreeQuotaWindow{UsedPercent: 50}}}, 0, 0, -1, false},
+		{"inside_missing_quota", []model.FreeAccountProfile{{AcceptStatus: "completed"}}, 19, 0, -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			avg := averageFreeQuota(tc.accounts, tc.total)
+			allowed, _ := autoRotationDecision(avg, 50, availablePremiumFromSnapshot(tc.total, 0, tc.pending))
+			if avg != tc.wantAverage || allowed != tc.wantRun {
+				t.Fatalf("average=%v allowed=%v", avg, allowed)
+			}
+		})
+	}
+}
+
+func TestAutoRotationStartsWithoutSpaceQuota(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	admin, err := st.SaveAdminAccount(model.AdminAccountProfile{Email: "admin@example.com", TeamAccountID: "team-1"}, "fixture-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.SaveAdminCapacitySnapshot(admin.ID, model.AdminSeatCapacity{Premium: model.AdminSeatBucket{Total: 19}}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: st, auditQueue: make(chan model.AutoRotationEvent, 200)}
+	run, started, err := s.startAutoRotation(context.Background(), "automatic")
+	if err != nil || !started || run.Status != "running" || run.AveragePercent != 0 || !strings.Contains(run.Reason, "空空间") {
+		t.Fatalf("started=%v run=%+v err=%v", started, run, err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		s.autoMu.Lock()
+		running := s.autoRunning
+		s.autoMu.Unlock()
+		if !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("empty candidate run did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestEmptyRotationImportsMailboxCandidatesWithinLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name                                 string
+		seats, max, mail, rotation, wantMail int
+	}{
+		{"max_per_run", 4, 2, 5, 0, 2},
+		{"seat_limit", 2, 10, 5, 0, 2},
+		{"mail_shortage", 4, 0, 1, 0, 1},
+		{"no_capacity", 0, 2, 5, 0, 0},
+		{"rotation_first", 4, 2, 5, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := store.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			// No Team ID: stop at the invitation precondition without any remote calls.
+			admin, err := st.SaveAdminAccount(model.AdminAccountProfile{Email: "admin@example.com"}, "fixture-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.SaveAdminCapacitySnapshot(admin.ID, model.AdminSeatCapacity{Premium: model.AdminSeatBucket{Total: tc.seats}}); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < tc.mail; i++ {
+				email := fmt.Sprintf("mail-%d@example.com", i)
+				claims, err := json.Marshal(map[string]any{
+					"https://api.openai.com/auth":    map[string]string{"chatgpt_user_id": email, "chatgpt_account_id": email, "chatgpt_plan_type": "free"},
+					"https://api.openai.com/profile": map[string]string{"email": email},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				token := "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".sig"
+				if _, err := st.SaveMailAccount(model.MailAccountProfile{Email: email}, model.MailAccountCredentials{Email: email, AccessToken: token}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < tc.rotation; i++ {
+				email := fmt.Sprintf("rotation-%d@example.com", i)
+				if _, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: email, UserID: email}, turbIntegrationTestToken(email)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			run := model.AutoRotationRun{ID: "empty-bootstrap", Status: "running", StartedAt: time.Now()}
+			if err := st.SaveAutoRotationRun(run); err != nil {
+				t.Fatal(err)
+			}
+			s := &Server{store: st, auditQueue: make(chan model.AutoRotationEvent, 500)}
+			s.executeAutoRotation(context.Background(), run, model.AutoRotationSettings{MaxPerRun: tc.max, Concurrency: 2})
+			mailCount := 0
+			for _, account := range st.FreeAccounts() {
+				if strings.HasPrefix(account.Email, "mail-") {
+					mailCount++
+				}
+			}
+			if mailCount != tc.wantMail {
+				t.Fatalf("imported mailbox candidates=%d, want %d", mailCount, tc.wantMail)
+			}
+			if tasks := st.AutoRotationTasks(run.ID); len(tasks) != tc.wantMail+tc.rotation {
+				t.Fatalf("planned tasks=%d, want %d", len(tasks), tc.wantMail+tc.rotation)
+			}
+		})
 	}
 }
 

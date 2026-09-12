@@ -78,6 +78,34 @@ WITH latest_pipeline AS (
 )
 `
 
+// Select identifiers only, using the same latest-membership rules as the paged list.
+func (s *Store) MailOutsideInvalidATEmails() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(mailAccountPageCTE + `
+		SELECT LOWER(TRIM(json_extract(profile,'$.email'))) FROM joined
+		WHERE management_scope='mail' AND space_state='outside'
+			AND COALESCE(json_extract(profile,'$.at_checked_at'),'')!=''
+			AND COALESCE(json_extract(profile,'$.at_valid'),0)=0
+			AND COALESCE(json_extract(profile,'$.chatgpt_status'),'')!='dead'
+			AND COALESCE(json_extract(profile,'$.registration_status'),'')!='dead'
+			AND COALESCE(json_extract(pipeline_profile,'$.dead'),0)=0
+		ORDER BY entered_at DESC, LOWER(json_extract(profile,'$.email'))`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	emails := []string{}
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, err
+		}
+		emails = append(emails, email)
+	}
+	return emails, rows.Err()
+}
+
 func (s *Store) MailAccountsPage(scope, query, spaceState string, limit, offset int) (MailAccountsPageResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

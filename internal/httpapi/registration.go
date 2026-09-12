@@ -74,6 +74,40 @@ func (s *Server) updateRegistration(id, state, message string) {
 		j["logs"] = logs
 	}
 }
+
+func (s *Server) appendRegistrationDiagnostic(id string, event protocolOAuthDiagnostic) {
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	job := s.registrationJobs[id]
+	if job == nil {
+		return
+	}
+	level := event.Level
+	if level == "" {
+		level = "info"
+	}
+	message := event.Message
+	if event.HTTPStatus > 0 {
+		message += fmt.Sprintf("（HTTP %d）", event.HTTPStatus)
+	}
+	if event.Event == "request_complete" && event.HTTPStatus >= 400 {
+		if reason, ok := event.Response["error_message"].(string); ok && reason != "" {
+			message += "：" + reason
+		}
+	}
+	job["status"], job["state"] = "running", "running"
+	if event.Event == "retry_wait" {
+		job["state"] = "retry_wait"
+	}
+	if number, ok := event.Details["retry_number"]; ok {
+		job["retry_count"] = number
+	}
+	logs, _ := job["logs"].([]any)
+	job["logs"] = append(logs, map[string]any{"time": time.Now().UTC().Format(time.RFC3339), "level": level,
+		"step": event.Stage, "message": message, "http_status": event.HTTPStatus, "event": event.Event,
+		"details": redactMap(event.Details)})
+}
+
 func (s *Server) finishRegistration(id, state, message string) {
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
@@ -85,6 +119,12 @@ func (s *Server) finishRegistration(id, state, message string) {
 			return message
 		}()
 		j["result"] = map[string]any{"success": state == "success", "message": message}
+		level, step := "error", "failed"
+		if state == "success" {
+			level, step = "success", "done"
+		}
+		logs, _ := j["logs"].([]any)
+		j["logs"] = append(logs, map[string]any{"time": time.Now().UTC().Format(time.RFC3339), "level": level, "step": step, "message": message})
 	}
 }
 func (s *Server) localRegistrationStatus(id string) (map[string]any, bool) {
@@ -377,9 +417,9 @@ func (s *Server) runLocalLogin(id, email string) {
 		s.finishRegistration(id, "failed", err.Error())
 		return
 	}
-	result, err := s.executeChatGPTAT(email, func(message string) {
-		s.updateRegistration(id, "running", message)
-	}, nil)
+	result, err := s.executeChatGPTAT(email, nil, func(event protocolOAuthDiagnostic) {
+		s.appendRegistrationDiagnostic(id, event)
+	})
 	if err != nil {
 		s.deleteMailAccountOnDeadLogin(email, nil, err.Error())
 		s.finishRegistration(id, "failed", err.Error())
@@ -423,7 +463,11 @@ func (s *Server) runLocalLogin(id, email string) {
 			return
 		}
 	}
-	s.finishRegistration(id, "success", "临时 AT 获取成功")
+	message := "临时 AT 获取成功并已保存"
+	if retries, ok := result["rate_limit_retries"].(float64); ok && retries > 0 {
+		message = fmt.Sprintf("临时 AT 重试 %.0f 次后获取成功并已保存", retries)
+	}
+	s.finishRegistration(id, "success", message)
 }
 
 func (s *Server) deleteMailAccountOnDeadLogin(email string, result map[string]any, message string) bool {

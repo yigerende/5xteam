@@ -9,6 +9,7 @@ import {
   watch,
 } from "vue";
 import {
+  AlertTriangle,
   ArrowRight,
   BadgeCheck,
   Check,
@@ -29,6 +30,7 @@ import {
   RefreshCw,
   MoreHorizontal,
   Search,
+  ListChecks,
   Trash2,
   Upload,
   X,
@@ -127,7 +129,7 @@ const accountTotal = ref(0);
 const selectedEmails = ref(new Set());
 const pagedFilteredAccounts = computed(() => accounts.value);
 const selectedAccounts = computed(() =>
-  accounts.value.filter((item) => selectedEmails.value.has(String(item.email || '').toLowerCase())),
+  [...selectedEmails.value].map((email) => ({ email })),
 );
 const allVisibleSelected = computed(() =>
   pagedFilteredAccounts.value.length > 0 && pagedFilteredAccounts.value.every((item) => selectedEmails.value.has(String(item.email || '').toLowerCase())),
@@ -209,6 +211,7 @@ function batchTaskStatus(task) {
   if (task.status === "failed") return "失败";
   if (task.status === "cancelled") return "已取消";
   if (task.status === "challenge") return "需要处理";
+  if (task.state === "retry_wait") return "等待重试";
   if (task.status === "queued" || task.state === "queued") return "等待中";
   return "执行中";
 }
@@ -336,6 +339,20 @@ function toggleAllVisible() {
 function clearSelection() {
   selectedEmails.value = new Set();
 }
+async function selectOutsideInvalidATAccounts() {
+  busy.value = "select-invalid-at";
+  try {
+    const result = await api("/api/mail/accounts/invalid-at-outside");
+    selectedEmails.value = new Set((result.emails || []).map((email) => accountEmailKey({ email })).filter(Boolean));
+    setMessage(selectedEmails.value.size
+      ? `已选中 ${selectedEmails.value.size} 个未进入空间且 AT 无效的账号（包含所有分页）`
+      : "没有未进入空间且 AT 无效的账号", "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    busy.value = "";
+  }
+}
 function pipelineStageStatus(account, stage) {
   return pipelineFor(account)?.[`${stage}_status`] || "pending";
 }
@@ -414,6 +431,13 @@ function logStep(value) {
       start: "启动任务",
       mail_credentials: "加载邮箱",
       proxy_check: "代理检测",
+      rate_limit: "限流重试",
+      login_method: "登录方式",
+      api_accounts_authorize_continue: "提交账号",
+      api_accounts_email_otp_validate: "验证邮箱验证码",
+      api_accounts_password_verify: "验证密码",
+      api_accounts_mfa_issue_challenge: "发起 2FA 验证",
+      api_accounts_mfa_verify: "验证 2FA",
       strategy: "选择登录方式",
       egress: "确认出口",
       oauth_init: "初始化 OAuth",
@@ -498,8 +522,6 @@ async function loadAccounts() {
     accountPage.value = lastPage;
     return loadAccounts();
   }
-  const available = new Set(accounts.value.map((item) => String(item.email || '').toLowerCase()));
-  selectedEmails.value = new Set([...selectedEmails.value].filter((email) => available.has(email)));
   counts.value = { ...counts.value, ...(data.counts || {}) };
   Object.assign(spaceFilterCounts, data.space_counts || {});
 }
@@ -508,13 +530,11 @@ function loadAccountsHandled() {
 }
 function setAccountPage(value) {
   accountPage.value = value;
-  clearSelection();
   loadAccountsHandled();
 }
 function setAccountPageSize(value) {
   accountPageSize.value = value;
   accountPage.value = 1;
-  clearSelection();
   loadAccountsHandled();
 }
 function setSpaceFilter(value) {
@@ -681,6 +701,7 @@ async function removeAccount(account) {
       `/api/mail/accounts/${encodeURIComponent(account.email)}`,
       { method: "DELETE" },
     );
+    selectedEmails.value.delete(accountEmailKey(account));
     await loadAccounts();
     setMessage(
       `邮件账号已删除${result.pipeline_deleted ? `，同时删除 ${result.pipeline_deleted} 条 Team 轮转记录` : ""}`,
@@ -1188,6 +1209,7 @@ async function moveToPro(account) {
     await api(`/api/mail/accounts/${encodeURIComponent(account.email)}/management-scope`, {
       method: 'PUT', body: { scope: 'pro' },
     });
+    selectedEmails.value.delete(accountEmailKey(account));
     await loadAccounts();
     emit('pro-changed');
     setMessage(`${account.email} 已移入 Pro 管理`, 'success');
@@ -1284,6 +1306,9 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                 v-model="accountQuery"
                 placeholder="搜索邮箱或分组" />
             </label>
+            <button class="btn ghost" type="button" :disabled="!!busy" @click="selectOutsideInvalidATAccounts" title="选中所有分页中未进入空间且已标记 AT 无效的账号">
+              <ListChecks :size="15" />一键选中未入空间 AT 无效账号
+            </button>
             <button
               class="btn ghost"
               type="button"
@@ -1325,6 +1350,8 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           <button type="button" :class="{ active: spaceFilter === 'removed' }" @click="setSpaceFilter('removed')">已移出空间 <span>{{ spaceFilterCounts.removed }}</span></button>
         </div>
         <div class="mail-method-summary">
+          <span v-if="selectedAccounts.length">已选 {{ selectedAccounts.length }}</span>
+          <button v-if="selectedAccounts.length" class="btn ghost" type="button" :disabled="!!busy" @click="clearSelection"><X :size="13" />清空选择</button>
           <span>Outlook {{ counts.outlook || 0 }}</span
           ><span>mail.com {{ counts.mailcom || 0 }}</span
           ><span>TOTP {{ counts.totp || 0 }}</span
@@ -2042,12 +2069,14 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                 >
                   <span class="timeline-icon">
                     <XCircle v-if="item.level === 'error'" :size="15" />
+                    <AlertTriangle v-else-if="item.level === 'warning'" :size="15" />
                     <LoaderCircle
                       v-else-if="index === task.logs.length - 1 && !terminalTaskStatus(task)"
                       class="spin"
                       :size="15"
                     />
-                    <CheckCircle2 v-else :size="15" />
+                    <CheckCircle2 v-else-if="item.level === 'success'" :size="15" />
+                    <Circle v-else :size="15" />
                   </span>
                   <div>
                     <span><strong>{{ logStep(item.step) }}</strong><time>{{ logTime(item.time) }}</time></span>
@@ -2131,12 +2160,13 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             :class="item.level"
           >
             <span class="timeline-icon"
-              ><XCircle v-if="item.level === 'error'" :size="15" /><LoaderCircle
+              ><XCircle v-if="item.level === 'error'" :size="15" /><AlertTriangle v-else-if="item.level === 'warning'" :size="15" /><LoaderCircle
                 v-else-if="
                   index === loginDialog.logs.length - 1 && !loginDialogTerminal
                 "
                 class="spin"
-                :size="15" /><CheckCircle2 v-else :size="15"
+                :size="15" /><CheckCircle2 v-else-if="item.level === 'success'" :size="15"
+              /><Circle v-else :size="15"
             /></span>
             <div>
               <span
@@ -2255,9 +2285,13 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .mail-method-summary {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 7px;
   margin: -5px 0 14px;
+}
+.mail-accounts-panel > .panel-title > div:first-child {
+  flex: 0 0 auto;
 }
 .space-filter-tabs {
   display: flex;
@@ -2920,8 +2954,14 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
   height: 15px;
   margin-top: 1px;
   place-items: center;
-  color: var(--green-strong);
+  color: var(--muted);
   background: var(--surface);
+}
+.login-timeline li.success .timeline-icon {
+  color: var(--green-strong);
+}
+.login-timeline li.warning .timeline-icon {
+  color: var(--amber, #b87918);
 }
 .login-timeline li.error .timeline-icon {
   color: var(--red);

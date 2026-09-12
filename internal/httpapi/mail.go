@@ -82,6 +82,15 @@ func (s *Server) mailStatus(w http.ResponseWriter, r *http.Request) {
 	}, "")
 }
 
+func (s *Server) listOutsideInvalidATMailEmails(w http.ResponseWriter, r *http.Request) {
+	emails, err := s.store.MailOutsideInvalidATEmails()
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, "读取未进入空间的 AT 无效账号失败: "+err.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"emails": emails, "total": len(emails)}, "")
+}
+
 func (s *Server) listMailAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
 		page := s.parsePagination(r)

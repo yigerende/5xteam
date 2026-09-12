@@ -181,6 +181,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/push-settings/cpa/groups", s.getCPAGroups)
 	mux.HandleFunc("GET /api/mail/status", s.mailStatus)
 	mux.HandleFunc("GET /api/mail/accounts", s.listMailAccounts)
+	mux.HandleFunc("GET /api/mail/accounts/invalid-at-outside", s.listOutsideInvalidATMailEmails)
 	mux.HandleFunc("GET /api/pro-accounts", s.listProAccounts)
 	mux.HandleFunc("POST /api/pro-accounts/access-tokens", s.proAccountAccessTokens)
 	mux.HandleFunc("POST /api/pro-accounts/check-plan", s.checkProAccountPlans)

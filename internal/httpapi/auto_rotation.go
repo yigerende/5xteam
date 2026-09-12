@@ -203,6 +203,9 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 		return run, true, nil
 	}
 	run.Status, run.Reason = "running", fmt.Sprintf("7天平均剩余额度 %.1f%% ≤ 阈值 %.1f%%", avg, settings.ThresholdPercent)
+	if spaceCount == 0 {
+		run.Reason = "空空间自动补充：7天平均剩余额度按 0% 计算"
+	}
 	_ = s.store.SaveAutoRotationRun(run)
 	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "decision", Stage: "seat_snapshot", Message: run.Reason, Details: map[string]any{"average_percent": avg, "threshold_percent": settings.ThresholdPercent, "seat_total": seatTotal, "seat_remaining": seatRemaining, "inside_premium": insidePremium, "reserved": reserved, "available": availableSeats}})
 	s.autoRunning = true
@@ -250,18 +253,21 @@ func availablePremiumFromSnapshot(total, inside, reserved int) int {
 }
 
 func averageFreeQuota(accounts []model.FreeAccountProfile, seatTotal int) float64 {
-	if seatTotal < 1 {
-		return -1
-	}
 	var total float64
-	count := 0
+	count, inside := 0, 0
 	for _, a := range accounts {
-		if a.AcceptStatus == "completed" && a.RemoveStatus != "completed" && a.Quota7D != nil {
-			total += 100 - a.Quota7D.UsedPercent
-			count++
+		if a.AcceptStatus == "completed" && a.RemoveStatus != "completed" {
+			inside++
+			if a.Quota7D != nil {
+				total += 100 - a.Quota7D.UsedPercent
+				count++
+			}
 		}
 	}
-	if count == 0 {
+	if inside == 0 {
+		return 0
+	}
+	if count == 0 || seatTotal < 1 {
 		return -1
 	}
 	return total / float64(seatTotal)
@@ -316,7 +322,8 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 	need := s.availablePremiumSlots(ctx, admins, run.ID)
 	run.DecisionAvailableSeats = need
 	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "plan", Stage: "seat_snapshot", Message: "自动补充前实时席位快照", Details: map[string]any{"available_after_reservation": need, "max_per_run": settings.MaxPerRun}})
-	need = autoRotationPlan(settings.MaxPerRun, need, 0, len(candidates))
+	// Mailbox candidates have not been imported yet, so the rotation list is not a candidate cap.
+	need = autoRotationPlan(settings.MaxPerRun, need, 0, need)
 	for len(selected) < need {
 		for _, mail := range s.store.MailAccountsByManagementScope("mail") {
 			if len(selected) >= need {

@@ -1,5 +1,8 @@
 """Offline contract tests for the ChatGPT temporary-AT protocol mode."""
 from pathlib import Path
+import contextlib
+import io
+import json
 import sys
 import unittest
 from unittest.mock import patch
@@ -10,6 +13,93 @@ from manager_oauth import adapter
 
 
 class ChatGPTATFlowTests(unittest.TestCase):
+    def test_swallowed_429_stops_requests_and_cannot_report_success(self):
+        original = adapter.ProjectProtocolLogin
+        response = adapter.upstream.ProtocolResponse(429, "https://auth.openai.com/test", {}, '{"error":{"code":"rate_limit_exceeded"}}')
+        requests = []
+
+        class Flow(original):
+            def login(self):
+                with patch.object(self, "_web_session_request", side_effect=lambda *a, **k: requests.append(a) or response):
+                    for _ in range(2):
+                        try:
+                            self.request("https://auth.openai.com/test")
+                        except adapter.upstream.LoginFlowError:
+                            pass
+                return {"access_token": "must-not-be-saved"}
+
+        with patch.object(adapter, "ProjectProtocolLogin", Flow), patch.object(adapter.bridge, "emit"):
+            result = adapter._run_once({"email": "a@example.com", "credential_mode": "chatgpt_at", "proxy": "http://proxy.example:8080"})
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "chatgpt_rate_limited", result)
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("access_token", result)
+
+    def test_429_creates_new_session_then_succeeds_on_same_proxy(self):
+        instances, emitted = [], []
+        original = adapter.ProjectProtocolLogin
+        response = adapter.upstream.ProtocolResponse(429, "https://auth.openai.com/api/accounts/authorize/continue",
+            {"Retry-After": "7"}, json.dumps({"error": {"code": "rate_limit_exceeded"}}))
+
+        class Flow(original):
+            def __init__(self, job, payload):
+                super().__init__(job, payload)
+                instances.append(self)
+
+            def login(self):
+                if len(instances) == 1:
+                    with patch.object(self, "_web_session_request", return_value=response):
+                        return self.authorize_continue("a@example.com")
+                return {"access_token": "new-at"}
+
+        with patch.object(adapter, "ProjectProtocolLogin", Flow), \
+                patch.object(adapter.time, "sleep") as sleep, \
+                patch.object(adapter.bridge, "emit", side_effect=lambda *a, **k: emitted.append((a, k))), \
+                contextlib.redirect_stderr(io.StringIO()):
+            result = adapter.run({"email": "a@example.com", "credential_mode": "chatgpt_at", "proxy": "http://proxy.example:8080"})
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["rate_limit_retries"], 1)
+        self.assertEqual(result["access_token"], "new-at")
+        self.assertEqual(len(instances), 2)
+        self.assertIsNot(instances[0].web_session, instances[1].web_session)
+        self.assertEqual(instances[0].proxy_url, instances[1].proxy_url)
+        sleep.assert_called_once_with(7)
+        self.assertTrue(any(a[1] == "retry_wait" for a, _ in emitted))
+
+    def test_429_retries_are_bounded_and_non_rate_errors_are_not_retried(self):
+        limited = {"success": False, "error_code": "chatgpt_rate_limited", "retryable": False, "error": "HTTP 429"}
+        with patch.object(adapter, "_run_once", side_effect=lambda *a: dict(limited)) as run, \
+                patch.object(adapter.time, "sleep") as sleep, patch.object(adapter.random, "randint", return_value=0), \
+                patch.object(adapter.bridge, "emit"):
+            result = adapter.run({"credential_mode": "chatgpt_at"})
+        self.assertFalse(result["success"])
+        self.assertFalse(result["retryable"])
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [30, 60])
+        for failure in [{**limited, "retry_after_seconds": 301},
+                        {"success": False, "error_code": "bad_password"},
+                        {"success": False, "dead": True}]:
+            with self.subTest(failure=failure), patch.object(adapter, "_run_once", return_value=failure) as run, \
+                    patch.object(adapter.time, "sleep") as sleep:
+                result = adapter.run({"credential_mode": "chatgpt_at"})
+                self.assertFalse(result["success"])
+                run.assert_called_once()
+                sleep.assert_not_called()
+        with patch.object(adapter, "_run_once", return_value=limited) as run, patch.object(adapter.time, "sleep") as sleep:
+            adapter.run({"credential_mode": "codex_rt"})
+            run.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_retry_after_formats(self):
+        self.assertEqual(adapter.parse_retry_after({"Retry-After": "12"}), 12)
+        self.assertEqual(adapter.parse_retry_after({"retry-after": "invalid"}), 0)
+        self.assertEqual(adapter.parse_retry_after({"Retry-After": "-1"}), 0)
+        self.assertEqual(adapter.parse_retry_after({}), 0)
+        from datetime import datetime, timezone
+        with patch.object(adapter, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 12, 0, 0, tzinfo=timezone.utc)
+            self.assertEqual(adapter.parse_retry_after({"retry-after": "Sat, 12 Sep 2026 00:01:00 GMT"}), 60)
+
     def test_web_mode_uses_chatgpt_authorize_and_session(self):
         flow = adapter.ProjectProtocolLogin("test", {
             "email": "a@example.com",

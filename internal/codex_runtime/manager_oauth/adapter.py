@@ -1,8 +1,12 @@
 """Keep project diagnostics, dead-account handling and SMS persistence local."""
 import json
+import math
+import random
 import re
 import time
 import uuid
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 from . import bridge, upstream
@@ -41,6 +45,7 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
             )
         self.last_stage = "oauth_init"
         self.last_status = 0
+        self.rate_limit_error = None
         self.login_details = {
             "configured_login_mode": payload.get("configured_login_mode", "email_otp"),
             "selected_login_mode": payload.get("selected_login_mode", "email_otp"),
@@ -381,6 +386,8 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         super().log(step, message, level)
 
     def request(self, url, **kwargs):
+        if self.is_chatgpt_at() and self.rate_limit_error is not None:
+            raise self.rate_limit_error
         stage = urlsplit(url).path.strip("/").replace("/", "_") or "authorize"
         self.last_stage, self.last_status = stage, 0
         headers = kwargs.get("headers") or {}
@@ -410,6 +417,14 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         code = bridge.dead_code(response.text) if response.status >= 400 else ""
         if code:
             raise bridge.DeadAccountError(code, stage, response.status, upstream.protocol_compact_error(response.json()))
+        if self.is_chatgpt_at() and response.status == 429:
+            error = upstream.LoginFlowError(
+                "ChatGPT 临时 AT 请求被限流（HTTP 429）：" + upstream.protocol_compact_error(response.json()),
+                code="chatgpt_rate_limited", status=429, retryable=False,
+            )
+            error.retry_after_seconds = parse_retry_after(response.headers)
+            self.rate_limit_error = error
+            raise error
         return response
 
     def _web_session_request(self, url, **kwargs):
@@ -501,7 +516,47 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
             self.log("phone_pool", "写绑定关系失败：" + str(exc), "warning")
 
 
+def parse_retry_after(headers):
+    value = next((str(v).strip() for k, v in headers.items() if k.lower() == "retry-after"), "")
+    if not value:
+        return 0
+    try:
+        return max(0, int(value))
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            return max(0, math.ceil((date - datetime.now(timezone.utc)).total_seconds()))
+        except (ValueError, TypeError, OverflowError):
+            return 0
+
+
 def run(payload, rpc=None):
+    if payload.get("credential_mode") != "chatgpt_at":
+        return _run_once(payload, rpc)
+    # Keep one proxy and the Go job deadline, but discard the rate-limited login session.
+    for attempt in range(1, 4):
+        result = _run_once(payload, rpc)
+        result["attempts"] = attempt
+        result["rate_limit_retries"] = attempt - 1
+        if result.get("success") or result.get("dead") or result.get("error_code") != "chatgpt_rate_limited":
+            return result
+        if attempt == 3:
+            result["error"] = "临时 AT 获取失败：HTTP 429，已重试 2 次。" + str(result.get("error") or "")
+            return result
+        delay = result.get("retry_after_seconds") or (30 * attempt + random.randint(0, 5))
+        if delay > 300:
+            result["error"] = f"OpenAI 要求等待 {delay} 秒，超过单次自动等待上限 300 秒，请稍后重试。"
+            return result
+        bridge.emit("rate_limit", "retry_wait", f"临时 AT 遇到 HTTP 429，等待 {delay} 秒后重试（第 {attempt}/2 次）",
+                    http_status=429, level="warning", details={"retry_number": attempt, "retry_after_seconds": delay})
+        time.sleep(delay)
+        bridge.emit("rate_limit", "retry_start", f"开始第 {attempt}/2 次重试：重新建立 ChatGPT 登录会话",
+                    details={"retry_number": attempt})
+
+
+def _run_once(payload, rpc=None):
     # Allowlisted input prevents an injected manager URL from enabling remote OAuth.
     email = str(payload.get("email") or "").strip()
     pickup = str(payload.get("pickup_url") or "").strip()
@@ -530,6 +585,8 @@ def run(payload, rpc=None):
         flow = ProjectProtocolLogin("local", local)
         bridge.emit("login_method", "login_start", "开始本次 ChatGPT 登录" if credential_mode == "chatgpt_at" else "开始本次 OAuth 登录")
         session = flow.login()
+        if credential_mode == "chatgpt_at" and getattr(flow, "rate_limit_error", None) is not None:
+            raise flow.rate_limit_error
         token = upstream.jwt_payload(session.get("id_token") or session.get("access_token") or "")
         auth = token.get("https://api.openai.com/auth") or {}
         return {**session, "success": True, "account_id": auth.get("chatgpt_account_id", ""), **flow.login_details}
@@ -540,15 +597,19 @@ def run(payload, rpc=None):
                 "error_code": exc.code, "stage": exc.stage, "http_status": exc.status, "error": bridge.redact(exc),
                 **(flow.login_details if flow else {})}
     except Exception as exc:
+        if credential_mode == "chatgpt_at" and flow is not None and getattr(flow, "rate_limit_error", None) is not None:
+            exc = flow.rate_limit_error
         typed = isinstance(exc, upstream.LoginFlowError)
         retryable = bool(exc.retryable) if typed else upstream._is_transient_login_error(str(exc))
         stage = flow.last_stage if flow else "oauth_init"
         status = (exc.status or 0) if typed else (flow.last_status if flow else 0)
-        bridge.emit(stage, "exception", "Codex OAuth 失败", http_status=status,
+        message = "本次临时 AT 登录尝试失败" if credential_mode == "chatgpt_at" else "Codex OAuth 失败"
+        bridge.emit(stage, "exception", message, http_status=status,
                     details={"error": bridge.redact(exc)[:800], "error_type": type(exc).__name__,
                              "retryable": retryable, "cookie_jar": cookie_snapshot(flow) if flow else []}, level="error")
         return {"success": False, "error": bridge.redact(exc), "retryable": retryable,
                 "error_code": exc.code if typed else "login_failed", "stage": stage, "http_status": status,
+                "retry_after_seconds": getattr(exc, "retry_after_seconds", 0),
                 "hint": bridge.redact(exc.hint) if typed else "", **(flow.login_details if flow else {})}
     finally:
         if flow is not None:

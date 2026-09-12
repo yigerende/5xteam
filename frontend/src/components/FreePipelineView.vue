@@ -107,8 +107,10 @@ const premiumSeatSummary = computed(() => {
   return { total, remaining }
 })
 const average7DRemaining = computed(() => {
+  if (!Number(accountSummary.inside || 0)) return '0%'
   const seatTotal = premiumSeatSummary.value.total
-  if (!Number(accountSummary.quota_7d_count || 0) || !seatTotal) return '未查询'
+  if (!seatTotal) return '未查询'
+  if (!Number(accountSummary.quota_7d_count || 0)) return '未查询'
   const remainingTotal = Number(accountSummary.quota_7d_remaining_total || 0)
   const average = remainingTotal / seatTotal
   return `${average.toFixed(average % 1 ? 1 : 0)}%`
