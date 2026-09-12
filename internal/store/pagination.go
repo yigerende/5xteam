@@ -57,7 +57,6 @@ type HistoryPageSummary struct {
 const mailAccountPageCTE = `
 WITH pipeline_sources AS (
 	SELECT id,profile,updated_at,1 AS active FROM free_accounts
-	UNION ALL SELECT id,profile,updated_at,0 AS active FROM team_cycles
 ), latest_pipeline AS (
 	SELECT profile,
 		LOWER(COALESCE(json_extract(profile, '$.email'), '')) AS pipeline_email,
@@ -283,9 +282,12 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 		spaceState = ""
 	}
 	limit, offset = normalizeLimitOffset(limit, offset)
-	const cte = `WITH accounts AS (
+	const cte = `WITH mail_dead AS (
+		SELECT LOWER(email) AS email, MAX(CASE WHEN json_extract(profile,'$.chatgpt_status')='dead' OR json_extract(profile,'$.registration_status')='dead' THEN 1 ELSE 0 END) AS dead
+		FROM mail_accounts GROUP BY LOWER(email)
+	), accounts AS (
 		SELECT id, profile,
-			CASE WHEN json_extract(profile,'$.dead')=1 OR EXISTS (SELECT 1 FROM mail_accounts m WHERE LOWER(m.email)=LOWER(json_extract(f.profile,'$.email')) AND (json_extract(m.profile,'$.chatgpt_status')='dead' OR json_extract(m.profile,'$.registration_status')='dead')) THEN 'dead'
+			CASE WHEN json_extract(profile,'$.dead')=1 OR COALESCE(md.dead,0)=1 THEN 'dead'
 			WHEN json_extract(profile,'$.remove_status')='completed' OR json_extract(profile,'$.remote_removed_at') IS NOT NULL THEN 'removed' WHEN json_extract(profile,'$.accept_status')='completed' THEN 'inside'
 			WHEN COALESCE(json_extract(profile,'$.visited_team_count'),0)>0 THEN 'removed' ELSE 'outside' END AS space_state,
 			COALESCE(
@@ -293,7 +295,7 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 				julianday(NULLIF(json_extract(profile,'$.created_at'),'0001-01-01T00:00:00Z')),
 				julianday(updated_at)
 			) AS entered_at
-		FROM free_accounts f
+		FROM free_accounts f LEFT JOIN mail_dead md ON md.email=LOWER(json_extract(f.profile,'$.email'))
 	)`
 	var summary FreeAccountsPageSummary
 	err := s.db.QueryRow(cte+` SELECT COUNT(*),

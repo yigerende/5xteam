@@ -202,6 +202,7 @@ func (s *Store) initSchema() error {
 			COALESCE(NULLIF(json_extract(profile, '$.created_at'), ''), updated_at) DESC
 		);
 		CREATE INDEX IF NOT EXISTS free_accounts_email_idx ON free_accounts(LOWER(COALESCE(json_extract(profile, '$.email'), '')));
+		CREATE INDEX IF NOT EXISTS mail_accounts_email_idx ON mail_accounts(LOWER(email));
 	`)
 	return err
 }
@@ -742,14 +743,51 @@ func (s *Store) UpdateMailAccountPlanCheck(email string, result model.AccountPla
 func (s *Store) DeleteMailAccount(email string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result, err := s.db.Exec("DELETE FROM mail_accounts WHERE email=?", strings.ToLower(strings.TrimSpace(email)))
+	email = strings.ToLower(strings.TrimSpace(email))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Remove the current Team-rotation projection with the mailbox. Keep the
+	// permanent workspace ledger so a later re-import cannot reuse old Teams.
+	rows, err := tx.Query(`SELECT id FROM free_accounts WHERE LOWER(json_extract(profile,'$.email'))=?`, email)
+	if err != nil {
+		return err
+	}
+	var accountIDs []string
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		accountIDs = append(accountIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, id := range accountIDs {
+		if _, err = tx.Exec("DELETE FROM auto_rotation_claims WHERE account_id=?", id); err != nil {
+			return err
+		}
+		if _, err = tx.Exec("DELETE FROM auto_rotation_seat_reservations WHERE account_id=?", id); err != nil {
+			return err
+		}
+		if _, err = tx.Exec("DELETE FROM free_accounts WHERE id=?", id); err != nil {
+			return err
+		}
+	}
+	result, err := tx.Exec("DELETE FROM mail_accounts WHERE email=?", email)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		return errors.New("邮箱账号不存在")
 	}
-	return nil
+	return tx.Commit()
 }
 
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }

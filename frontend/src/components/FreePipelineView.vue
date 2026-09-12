@@ -464,7 +464,8 @@ async function loadSub2() {
       quotaRemainingThresholdPercent: Number(settings.quota_remaining_threshold_percent ?? 0),
       passwordPresent: !!settings.password_present,
     })
-    if (pushProvider.value === 'sub2' && settings.url && settings.password_present) await testSub2(false)
+    // Keep page loading local and fast. Connection tests remain explicit
+    // actions so a slow downstream API cannot block the rotation list.
   } catch (error) { setMessage(error.message, 'error') }
 }
 async function loadPushSettings() {
