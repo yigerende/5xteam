@@ -31,6 +31,12 @@ func (s *Store) AutoRotationSettings() model.AutoRotationSettings {
 	if settings.IntervalSeconds < 10 {
 		settings.IntervalSeconds = 300
 	}
+	if settings.TeamOperationIntervalSeconds < 0 {
+		settings.TeamOperationIntervalSeconds = 10
+	}
+	if settings.TeamOperationIntervalSeconds > 120 {
+		settings.TeamOperationIntervalSeconds = 120
+	}
 	if settings.Concurrency < 1 {
 		settings.Concurrency = 2
 	}
@@ -60,6 +66,9 @@ func (s *Store) SaveAutoRotationSettings(settings model.AutoRotationSettings) (m
 	}
 	if settings.IntervalSeconds < 10 || settings.IntervalSeconds > 86400 {
 		return settings, errors.New("检查间隔必须在 10 到 86400 秒之间")
+	}
+	if settings.TeamOperationIntervalSeconds < 0 || settings.TeamOperationIntervalSeconds > 120 {
+		return settings, errors.New("同母号操作间隔必须在 0 到 120 秒之间")
 	}
 	if settings.Concurrency < 1 || settings.Concurrency > 20 {
 		return settings, errors.New("自动轮转并发数必须在 1 到 20 之间")

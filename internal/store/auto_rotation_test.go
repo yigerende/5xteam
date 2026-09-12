@@ -60,12 +60,19 @@ func TestAutoRotationSettingsAndRunPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	got, err := s.SaveAutoRotationSettings(model.AutoRotationSettings{Enabled: true, ThresholdPercent: 42, IntervalSeconds: 60, Concurrency: 4, MaxPerRun: 3, RetryCount: 2})
+	got, err := s.SaveAutoRotationSettings(model.AutoRotationSettings{Enabled: true, ThresholdPercent: 42, IntervalSeconds: 60, TeamOperationIntervalSeconds: 10, Concurrency: 4, MaxPerRun: 3, RetryCount: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.MaxPerRun != 3 || !s.AutoRotationSettings().Enabled {
 		t.Fatalf("settings not persisted: %+v", got)
+	}
+	if s.AutoRotationSettings().TeamOperationIntervalSeconds != 10 {
+		t.Fatalf("missing team operation interval must default to 10 seconds: %+v", s.AutoRotationSettings())
+	}
+	got.TeamOperationIntervalSeconds = 25
+	if got, err = s.SaveAutoRotationSettings(got); err != nil || got.TeamOperationIntervalSeconds != 25 || s.AutoRotationSettings().TeamOperationIntervalSeconds != 25 {
+		t.Fatalf("team operation interval was not persisted: %+v, %v", got, err)
 	}
 	run := model.AutoRotationRun{ID: "run-1", Status: "running", StartedAt: time.Now()}
 	if err := s.SaveAutoRotationRun(run); err != nil {

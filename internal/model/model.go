@@ -353,18 +353,19 @@ type AccountProgress struct {
 }
 
 type AutoRotationSettings struct {
-	Enabled          bool    `json:"enabled"`
-	ThresholdPercent float64 `json:"threshold_percent"`
-	IntervalSeconds  int     `json:"interval_seconds"`
-	Concurrency      int     `json:"concurrency"`
-	MaxPerRun        int     `json:"max_per_run"`
-	RetryCount       int     `json:"retry_count"`
-	RemoveMethod     string  `json:"remove_method"`
-	OAuthLoginMode   string  `json:"oauth_login_mode"`
+	Enabled                      bool    `json:"enabled"`
+	ThresholdPercent             float64 `json:"threshold_percent"`
+	IntervalSeconds              int     `json:"interval_seconds"`
+	TeamOperationIntervalSeconds int     `json:"team_operation_interval_seconds"`
+	Concurrency                  int     `json:"concurrency"`
+	MaxPerRun                    int     `json:"max_per_run"`
+	RetryCount                   int     `json:"retry_count"`
+	RemoveMethod                 string  `json:"remove_method"`
+	OAuthLoginMode               string  `json:"oauth_login_mode"`
 }
 
 func DefaultAutoRotationSettings() AutoRotationSettings {
-	return AutoRotationSettings{ThresholdPercent: 50, IntervalSeconds: 300, Concurrency: 2, MaxPerRun: 0, RetryCount: 1, RemoveMethod: "mother_kick", OAuthLoginMode: "email_otp"}
+	return AutoRotationSettings{ThresholdPercent: 50, IntervalSeconds: 300, TeamOperationIntervalSeconds: 10, Concurrency: 2, MaxPerRun: 0, RetryCount: 1, RemoveMethod: "mother_kick", OAuthLoginMode: "email_otp"}
 }
 
 type AutoRotationRun struct {

@@ -9,7 +9,7 @@ import { formatTime } from '../utils'
 import { oauthLoginSummary } from '../oauthLoginLog'
 
 const props = defineProps({ adminAccounts: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
-const settings = ref({ enabled: false, threshold_percent: 50, interval_seconds: 300, concurrency: 2, max_per_run: 0, retry_count: 1, remove_method: 'mother_kick', oauth_login_mode: 'email_otp' })
+const settings = ref({ enabled: false, threshold_percent: 50, interval_seconds: 300, team_operation_interval_seconds: 10, concurrency: 2, max_per_run: 0, retry_count: 1, remove_method: 'mother_kick', oauth_login_mode: 'email_otp' })
 const runs = ref([]); const tasks = ref([]); const events = ref([]); const selectedRun = ref(null); const busy = ref(''); const message = ref({ text: '', type: '' })
 const runPage = ref(1); const runPageSize = ref(props.defaultPageSize); const runTotal = ref(0)
 const taskPage = ref(1); const taskPageSize = ref(props.defaultPageSize); const taskTotal = ref(0)
@@ -48,7 +48,7 @@ async function load() {
     const jobs = [api('/api/auto-rotation/settings'), loadRuns()]
     if (selectedRun.value) jobs.push(loadTasks(), loadEvents())
     const [settingsData] = await Promise.all(jobs)
-    settings.value = { oauth_login_mode: 'email_otp', ...settingsData }
+    settings.value = { oauth_login_mode: 'email_otp', team_operation_interval_seconds: 10, ...settingsData }
   } catch (e) { setMessage(e.message, 'error') }
 }
 function setRunPage(value) { runPage.value = value; loadRuns().catch((e) => setMessage(e.message, 'error')) }
@@ -118,6 +118,7 @@ onBeforeUnmount(() => window.clearInterval(countdownTimer))
         <label class="field checkbox-field"><span>自动轮转开关<small>后台定时检查并补充账号</small></span><input v-model="settings.enabled" type="checkbox" /></label>
         <label class="field"><span>7天平均剩余额度阈值（%）</span><input v-model.number="settings.threshold_percent" type="number" min="1" max="100" required /></label>
         <label class="field"><span>检查间隔（秒）</span><input v-model.number="settings.interval_seconds" type="number" min="10" max="86400" required /></label>
+        <label class="field"><span>同母号操作间隔（秒）<small>邀请、确认、移出按母号串行，成功后等待</small></span><input v-model.number="settings.team_operation_interval_seconds" type="number" min="0" max="120" required /></label>
         <label class="field"><span>最大并发数</span><input v-model.number="settings.concurrency" type="number" min="1" max="20" required /></label>
         <label class="field"><span>每轮最大补充数（0 不限制）</span><input v-model.number="settings.max_per_run" type="number" min="0" max="500" required /></label>
         <label class="field"><span>单账号重试次数</span><input v-model.number="settings.retry_count" type="number" min="0" max="10" required /></label>

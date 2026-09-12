@@ -274,6 +274,10 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 			item.InviteStatus, item.AcceptStatus = "completed", "running"
 		})
+		// Team membership mutations are rate-limited per mother account. Keep
+		// the Team lock during the configured cooldown before accepting the next
+		// mutation for this mother.
+		s.waitTeamOperationInterval(r.Context())
 	}
 	acceptStarted := time.Now()
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_start", map[string]any{"user_id": profile.UserID, "team_account_id": admin.TeamAccountID, "proxy": acceptProxy})
@@ -304,6 +308,7 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "joined", map[string]any{"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus})
 	s.auditAccountEvent(r.Context(), profile.ID, "join", "accept", "manual_single", "", "邀请并进入空间成功", map[string]any{"admin_account_id": admin.ID, "team_account_id": admin.TeamAccountID})
+	s.waitTeamOperationInterval(r.Context())
 	writeAPI(w, http.StatusOK, profile, "")
 }
 
@@ -1909,6 +1914,7 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	})
 	_ = s.store.ReleaseSeatReservationByAccount(id)
 	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "seat_released", Source: "remove", Operation: "remove", Stage: "remove", Message: "账号移出空间，释放席位预占"})
+	s.waitTeamOperationInterval(ctx)
 	return updated, updateErr
 }
 
@@ -1935,6 +1941,9 @@ func (s *Server) performFreeAccountChildLeave(ctx context.Context, profile model
 		s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "child_leave_error", Level: "error", Message: "子号自行退出失败", DurationMS: time.Since(started).Milliseconds(), Response: map[string]any{"error": err.Error(), "method": method}, Details: map[string]any{"error": err.Error(), "method": method}})
 		return profile, err
 	}
+	// The child-leave request is also a Team membership mutation and shares the
+	// same mother Team lock with invitations and mother kicks.
+	s.waitTeamOperationInterval(ctx)
 	if deleteErr := s.deleteLinkedDownstream(ctx, profile); deleteErr != nil {
 		return profile, deleteErr
 	}
@@ -2822,4 +2831,20 @@ func (s *Server) lockTeamAccountRemove(teamID string) func() {
 	mutex := value.(*sync.Mutex)
 	mutex.Lock()
 	return mutex.Unlock
+}
+
+// waitTeamOperationInterval holds the Team lock for the configured cooldown
+// after a successful membership mutation. This prevents OpenAI's per-Team
+// subscription-update 429 when different children are processed back to back.
+func (s *Server) waitTeamOperationInterval(ctx context.Context) {
+	seconds := s.store.AutoRotationSettings().TeamOperationIntervalSeconds
+	if seconds <= 0 {
+		return
+	}
+	timer := time.NewTimer(time.Duration(seconds) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
