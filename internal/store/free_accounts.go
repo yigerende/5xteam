@@ -124,12 +124,17 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 	var existingRaw string
 	var existing model.FreeAccountProfile
 	created := true
-	if err := s.db.QueryRow("SELECT profile FROM free_accounts WHERE user_id=?", profile.UserID).Scan(&existingRaw); err == nil {
+	if err := s.db.QueryRow("SELECT profile FROM free_accounts WHERE user_id=? OR LOWER(json_extract(profile,'$.email'))=? ORDER BY updated_at DESC LIMIT 1", profile.UserID, strings.ToLower(strings.TrimSpace(profile.Email))).Scan(&existingRaw); err == nil {
 		if err := json.Unmarshal([]byte(existingRaw), &existing); err != nil {
 			return model.FreeAccountProfile{}, false, err
 		}
 		created = false
 		profile.ID = existing.ID
+		profile.UserID = existing.UserID
+		profile.CycleID, profile.VisitedTeamCount, profile.HistoryUncertain = existing.CycleID, existing.VisitedTeamCount, existing.HistoryUncertain
+		profile.ReusePending, profile.RemoteRemovedAt, profile.RemovalReason = existing.ReusePending, existing.RemoteRemovedAt, existing.RemovalReason
+		profile.RemoveMethod = existing.RemoveMethod
+		profile.DownstreamCleaned = existing.DownstreamCleaned
 		profile.Status, profile.InviteStatus, profile.AcceptStatus = existing.Status, existing.InviteStatus, existing.AcceptStatus
 		profile.OAuthStatus, profile.PushStatus, profile.QuotaStatus, profile.RemoveStatus = existing.OAuthStatus, existing.PushStatus, existing.QuotaStatus, existing.RemoveStatus
 		profile.Dead, profile.DeadReason, profile.DeadDetectedAt = existing.Dead, existing.DeadReason, existing.DeadDetectedAt
@@ -162,20 +167,30 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		return model.FreeAccountProfile{}, false, err
 	}
 	if created {
-		profile.ID = strconv.FormatInt(now.UnixNano(), 36)
-		profile.Status = "imported"
-		if pureImport {
-			// not_started is deliberately distinct from pending: pending means
-			// the stage is queued for the Team rotation workflow.
-			profile.InviteStatus, profile.AcceptStatus = "not_started", "not_started"
-			profile.OAuthStatus, profile.PushStatus = "not_started", "not_started"
-			profile.QuotaStatus, profile.RemoveStatus = "not_started", "not_started"
-		} else {
-			profile.InviteStatus, profile.AcceptStatus, profile.OAuthStatus = "pending", "pending", "pending"
-			profile.PushStatus, profile.QuotaStatus, profile.RemoveStatus = "pending", "pending", "pending"
+		// Deleting a list row must not erase its workspace usage or dead status.
+		var archived string
+		if s.db.QueryRow(`SELECT profile FROM team_cycles WHERE user_id=? OR email=? ORDER BY updated_at DESC LIMIT 1`, profile.UserID, strings.ToLower(strings.TrimSpace(profile.Email))).Scan(&archived) == nil {
+			if err := json.Unmarshal([]byte(archived), &profile); err != nil {
+				return profile, false, err
+			}
+			profile.OAuthAccessTokenPresent, profile.OAuthRefreshTokenPresent = false, false
 		}
-		profile.ExhaustionPolicy, profile.AutoRemove = "7d", true
-		profile.ImportedAt, profile.CreatedAt = now, now
+		profile.ID = strconv.FormatInt(now.UnixNano(), 36)
+		if profile.Status == "" {
+			profile.Status = "imported"
+			if pureImport {
+				// not_started is deliberately distinct from pending: pending means
+				// the stage is queued for the Team rotation workflow.
+				profile.InviteStatus, profile.AcceptStatus = "not_started", "not_started"
+				profile.OAuthStatus, profile.PushStatus = "not_started", "not_started"
+				profile.QuotaStatus, profile.RemoveStatus = "not_started", "not_started"
+			} else {
+				profile.InviteStatus, profile.AcceptStatus, profile.OAuthStatus = "pending", "pending", "pending"
+				profile.PushStatus, profile.QuotaStatus, profile.RemoveStatus = "pending", "pending", "pending"
+			}
+			profile.ExhaustionPolicy, profile.AutoRemove = "7d", true
+			profile.ImportedAt, profile.CreatedAt = now, now
+		}
 	}
 	if pureImport {
 		profile.ImportMode = "pure"
@@ -186,14 +201,28 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 	if err != nil {
 		return model.FreeAccountProfile{}, false, err
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return profile, created, err
+	}
+	defer tx.Rollback()
+	if err = s.syncTeamHistory(tx, profile, &profile); err != nil {
+		return profile, created, err
+	}
+	if created && profile.VisitedTeamCount > 0 && profile.TeamAccountID == "" {
+		profile.HistoryUncertain = true
+	}
 	raw, err := json.Marshal(profile)
 	if err != nil {
 		return model.FreeAccountProfile{}, false, err
 	}
 	if created {
-		_, err = s.db.Exec(`INSERT INTO free_accounts(id, user_id, profile, encrypted_source_token, updated_at) VALUES(?, ?, ?, ?, ?)`, profile.ID, profile.UserID, string(raw), encrypted, formatTime(now))
+		_, err = tx.Exec(`INSERT INTO free_accounts(id, user_id, profile, encrypted_source_token, updated_at) VALUES(?, ?, ?, ?, ?)`, profile.ID, profile.UserID, string(raw), encrypted, formatTime(now))
 	} else {
-		_, err = s.db.Exec(`UPDATE free_accounts SET profile=?, encrypted_source_token=?, updated_at=? WHERE id=?`, string(raw), encrypted, formatTime(now), profile.ID)
+		_, err = tx.Exec(`UPDATE free_accounts SET profile=?, encrypted_source_token=?, updated_at=? WHERE id=?`, string(raw), encrypted, formatTime(now), profile.ID)
+	}
+	if err == nil {
+		err = tx.Commit()
 	}
 	return profile, created, err
 }
@@ -227,6 +256,14 @@ func (s *Store) FreeAccountCredential(id string) (model.FreeAccountProfile, Free
 }
 
 func (s *Store) UpdateFreeAccount(id string, mutate func(*model.FreeAccountProfile)) (model.FreeAccountProfile, error) {
+	return s.updateFreeAccountCycle(id, "", mutate)
+}
+
+func (s *Store) UpdateFreeAccountCycle(id, cycleID string, mutate func(*model.FreeAccountProfile)) (model.FreeAccountProfile, error) {
+	return s.updateFreeAccountCycle(id, cycleID, mutate)
+}
+
+func (s *Store) updateFreeAccountCycle(id, cycleID string, mutate func(*model.FreeAccountProfile)) (model.FreeAccountProfile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var raw string
@@ -240,19 +277,34 @@ func (s *Store) UpdateFreeAccount(id string, mutate func(*model.FreeAccountProfi
 	if err := json.Unmarshal([]byte(raw), &profile); err != nil {
 		return profile, err
 	}
+	if cycleID != "" && profile.CycleID != cycleID {
+		return profile, ErrStaleCycle
+	}
+	before := profile
 	if mutate != nil {
 		mutate(&profile)
 	}
 	profile.UpdatedAt = time.Now()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return profile, err
+	}
+	defer tx.Rollback()
+	if err = s.syncTeamHistory(tx, before, &profile); err != nil {
+		return profile, err
+	}
 	encoded, err := json.Marshal(profile)
 	if err != nil {
 		return profile, err
 	}
-	_, err = s.db.Exec("UPDATE free_accounts SET profile=?, updated_at=? WHERE id=?", string(encoded), formatTime(profile.UpdatedAt), id)
+	_, err = tx.Exec("UPDATE free_accounts SET profile=?, updated_at=? WHERE id=?", string(encoded), formatTime(profile.UpdatedAt), id)
+	if err == nil {
+		err = tx.Commit()
+	}
 	return profile, err
 }
 
-func (s *Store) SaveFreeAccountOAuth(id, accessToken, refreshToken, accountID string) (model.FreeAccountProfile, error) {
+func (s *Store) SaveFreeAccountOAuth(id, accessToken, refreshToken, accountID string, cycleID ...string) (model.FreeAccountProfile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var raw, existingAccess, existingRefresh string
@@ -280,14 +332,31 @@ func (s *Store) SaveFreeAccountOAuth(id, accessToken, refreshToken, accountID st
 	if err := json.Unmarshal([]byte(raw), &profile); err != nil {
 		return profile, err
 	}
+	if len(cycleID) > 0 && cycleID[0] != "" && cycleID[0] != profile.CycleID {
+		return profile, ErrStaleCycle
+	}
+	if profile.VisitedTeamCount > 1 && (profile.RemoveStatus == "completed" || strings.TrimSpace(accountID) != profile.TeamAccountID) {
+		return profile, errors.New("OAuth 返回的空间与本轮 Team 不一致，不能保存或推送旧空间凭据")
+	}
 	now := time.Now()
 	profile.OAuthAccessTokenPresent, profile.OAuthRefreshTokenPresent = existingAccess != "", existingRefresh != ""
 	if strings.TrimSpace(accountID) != "" {
 		profile.OAuthAccountID = strings.TrimSpace(accountID)
 	}
 	profile.OAuthStatus, profile.Status, profile.LastError, profile.OAuthReadyAt, profile.UpdatedAt = "completed", "oauth_ready", "", &now, now
+	tx, err := s.db.Begin()
+	if err != nil {
+		return profile, err
+	}
+	defer tx.Rollback()
+	if err = s.syncTeamHistory(tx, profile, &profile); err != nil {
+		return profile, err
+	}
 	encoded, _ := json.Marshal(profile)
-	_, err := s.db.Exec(`UPDATE free_accounts SET profile=?, encrypted_oauth_access_token=?, encrypted_oauth_refresh_token=?, updated_at=? WHERE id=?`, string(encoded), existingAccess, existingRefresh, formatTime(now), id)
+	_, err = tx.Exec(`UPDATE free_accounts SET profile=?, encrypted_oauth_access_token=?, encrypted_oauth_refresh_token=?, updated_at=? WHERE id=?`, string(encoded), existingAccess, existingRefresh, formatTime(now), id)
+	if err == nil {
+		err = tx.Commit()
+	}
 	return profile, err
 }
 

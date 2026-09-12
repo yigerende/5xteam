@@ -22,6 +22,7 @@ type FreeAccountsPageSummary struct {
 	Outside               int                       `json:"outside"`
 	Inside                int                       `json:"inside"`
 	Removed               int                       `json:"removed"`
+	Dead                  int                       `json:"dead"`
 	OAuthReady            int                       `json:"oauth_ready"`
 	Monitoring            int                       `json:"monitoring"`
 	InsidePremium         int                       `json:"inside_premium"`
@@ -54,20 +55,28 @@ type HistoryPageSummary struct {
 }
 
 const mailAccountPageCTE = `
-WITH latest_pipeline AS (
+WITH pipeline_sources AS (
+	SELECT id,profile,updated_at,1 AS active FROM free_accounts
+	UNION ALL SELECT id,profile,updated_at,0 AS active FROM team_cycles
+), latest_pipeline AS (
 	SELECT profile,
 		LOWER(COALESCE(json_extract(profile, '$.email'), '')) AS pipeline_email,
 		ROW_NUMBER() OVER (
 			PARTITION BY LOWER(COALESCE(json_extract(profile, '$.email'), ''))
-			ORDER BY COALESCE(NULLIF(json_extract(profile, '$.imported_at'), ''), NULLIF(json_extract(profile, '$.created_at'), ''), updated_at) DESC, id DESC
+			ORDER BY active DESC, updated_at DESC, id DESC
 		) AS row_number
-	FROM free_accounts
+	FROM pipeline_sources
+), visits AS (
+	SELECT email,COUNT(DISTINCT team_id) AS visited FROM team_visits GROUP BY email
 ), joined AS (
-	SELECT m.profile, m.encrypted_credentials, m.updated_at, p.profile AS pipeline_profile,
+	SELECT json_set(m.profile,'$.visited_team_count',COALESCE(v.visited,0),'$.history_uncertain',json(CASE WHEN COALESCE(json_extract(p.profile,'$.history_uncertain'),0)=1 THEN 'true' ELSE 'false' END)) AS profile, m.encrypted_credentials, m.updated_at, p.profile AS pipeline_profile,
 		CASE WHEN LOWER(COALESCE(json_extract(m.profile, '$.management_scope'), '')) = 'pro' THEN 'pro' ELSE 'mail' END AS management_scope,
 		CASE
+			WHEN COALESCE(json_extract(p.profile,'$.dead'),0)=1 OR json_extract(m.profile,'$.chatgpt_status')='dead' OR json_extract(m.profile,'$.registration_status')='dead' THEN 'dead'
+			WHEN json_extract(p.profile, '$.remote_removed_at') IS NOT NULL THEN 'removed'
 			WHEN json_extract(p.profile, '$.remove_status') = 'completed' THEN 'removed'
 			WHEN json_extract(p.profile, '$.accept_status') = 'completed' THEN 'inside'
+			WHEN COALESCE(v.visited,0)>0 THEN 'removed'
 			ELSE 'outside'
 		END AS space_state,
 		LOWER(m.email || ' ' || m.label || ' ' || COALESCE(json_extract(m.profile, '$.login_method'), '')) AS search_text,
@@ -75,6 +84,7 @@ WITH latest_pipeline AS (
 		LOWER(COALESCE(json_extract(m.profile, '$.login_method'), 'mailtoken')) AS login_method
 	FROM mail_accounts m
 	LEFT JOIN latest_pipeline p ON p.pipeline_email = LOWER(m.email) AND p.row_number = 1
+	LEFT JOIN visits v ON v.email=LOWER(m.email)
 )
 `
 
@@ -87,6 +97,7 @@ type MailAccountSelection struct {
 	RequireRT       bool     `json:"require_rt"`
 	RequirePassword bool     `json:"require_password"`
 	RequireTOTP     bool     `json:"require_totp"`
+	RequireDead     bool     `json:"require_dead"`
 	Emails          []string `json:"-"`
 }
 
@@ -102,10 +113,17 @@ func (s *Store) SelectOutsideMailAccounts(filter MailAccountSelection) ([]string
 	defer s.mu.Unlock()
 	query := mailAccountPageCTE + `
 		SELECT LOWER(TRIM(json_extract(profile,'$.email'))) FROM joined
-		WHERE management_scope='mail' AND space_state='outside'
+		WHERE management_scope='mail'`
+	if filter.RequireDead {
+		query += ` AND (COALESCE(json_extract(profile,'$.chatgpt_status'),'')='dead'
+			OR COALESCE(json_extract(profile,'$.registration_status'),'')='dead'
+			OR COALESCE(json_extract(pipeline_profile,'$.dead'),0)=1)`
+	} else {
+		query += ` AND space_state='outside'
 			AND COALESCE(json_extract(profile,'$.chatgpt_status'),'')!='dead'
 			AND COALESCE(json_extract(profile,'$.registration_status'),'')!='dead'
 			AND COALESCE(json_extract(pipeline_profile,'$.dead'),0)=0`
+	}
 	args := []any{}
 	if filter.ATStatus == "not_logged_in" {
 		// Match the mail list's persisted "not logged in" status, not an invalid AT.
@@ -160,7 +178,7 @@ func (s *Store) MailAccountsPage(scope, query, spaceState string, limit, offset 
 	scope = normalizeMailManagementScope(scope)
 	query = strings.ToLower(strings.TrimSpace(query))
 	spaceState = strings.ToLower(strings.TrimSpace(spaceState))
-	if spaceState != "outside" && spaceState != "inside" && spaceState != "removed" {
+	if spaceState != "outside" && spaceState != "inside" && spaceState != "removed" && spaceState != "dead" {
 		spaceState = ""
 	}
 	limit, offset = normalizeLimitOffset(limit, offset)
@@ -175,18 +193,19 @@ func (s *Store) MailAccountsPage(scope, query, spaceState string, limit, offset 
 		scope, query, like, spaceState, spaceState).Scan(&result.Total); err != nil {
 		return result, err
 	}
-	var all, outside, inside, removed, outlook, mailcom, totp, mailtoken, directurl, none int
+	var all, outside, inside, removed, dead, outlook, mailcom, totp, mailtoken, directurl, none int
 	if err := s.db.QueryRow(mailAccountPageCTE+`
 		SELECT COUNT(*),
 			COALESCE(SUM(space_state='outside'),0), COALESCE(SUM(space_state='inside'),0), COALESCE(SUM(space_state='removed'),0),
+			COALESCE(SUM(space_state='dead'),0),
 			COALESCE(SUM(login_method='outlook'),0), COALESCE(SUM(login_method='mailcom'),0), COALESCE(SUM(login_method='totp'),0),
 			COALESCE(SUM(login_method='mailtoken'),0), COALESCE(SUM(login_method='directurl'),0),
 			COALESCE(SUM(login_method NOT IN ('outlook','mailcom','totp','mailtoken','directurl')),0)
-		FROM joined WHERE management_scope=?`, scope).Scan(&all, &outside, &inside, &removed, &outlook, &mailcom, &totp, &mailtoken, &directurl, &none); err != nil {
+		FROM joined WHERE management_scope=?`, scope).Scan(&all, &outside, &inside, &removed, &dead, &outlook, &mailcom, &totp, &mailtoken, &directurl, &none); err != nil {
 		return result, err
 	}
 	result.Counts = map[string]int{"all": all, "outlook": outlook, "mailcom": mailcom, "totp": totp, "mailtoken": mailtoken, "directurl": directurl, "none": none}
-	result.SpaceCounts = map[string]int{"outside": outside, "inside": inside, "removed": removed}
+	result.SpaceCounts = map[string]int{"outside": outside, "inside": inside, "removed": removed, "dead": dead}
 
 	rows, err := s.db.Query(mailAccountPageCTE+`
 		SELECT profile, encrypted_credentials, updated_at, COALESCE(pipeline_profile,'') FROM joined`+filteredWhere+`
@@ -260,26 +279,29 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spaceState = strings.ToLower(strings.TrimSpace(spaceState))
-	if spaceState != "outside" && spaceState != "inside" && spaceState != "removed" {
+	if spaceState != "outside" && spaceState != "inside" && spaceState != "removed" && spaceState != "dead" {
 		spaceState = ""
 	}
 	limit, offset = normalizeLimitOffset(limit, offset)
 	const cte = `WITH accounts AS (
 		SELECT id, profile,
-			CASE WHEN json_extract(profile,'$.remove_status')='completed' THEN 'removed' WHEN json_extract(profile,'$.accept_status')='completed' THEN 'inside' ELSE 'outside' END AS space_state,
+			CASE WHEN json_extract(profile,'$.dead')=1 OR EXISTS (SELECT 1 FROM mail_accounts m WHERE LOWER(m.email)=LOWER(json_extract(f.profile,'$.email')) AND (json_extract(m.profile,'$.chatgpt_status')='dead' OR json_extract(m.profile,'$.registration_status')='dead')) THEN 'dead'
+			WHEN json_extract(profile,'$.remove_status')='completed' OR json_extract(profile,'$.remote_removed_at') IS NOT NULL THEN 'removed' WHEN json_extract(profile,'$.accept_status')='completed' THEN 'inside'
+			WHEN COALESCE(json_extract(profile,'$.visited_team_count'),0)>0 THEN 'removed' ELSE 'outside' END AS space_state,
 			COALESCE(
 				julianday(NULLIF(json_extract(profile,'$.imported_at'),'0001-01-01T00:00:00Z')),
 				julianday(NULLIF(json_extract(profile,'$.created_at'),'0001-01-01T00:00:00Z')),
 				julianday(updated_at)
 			) AS entered_at
-		FROM free_accounts
+		FROM free_accounts f
 	)`
 	var summary FreeAccountsPageSummary
 	err := s.db.QueryRow(cte+` SELECT COUNT(*),
 		COALESCE(SUM(space_state='outside'),0), COALESCE(SUM(space_state='inside'),0), COALESCE(SUM(space_state='removed'),0),
+		COALESCE(SUM(space_state='dead'),0),
 		COALESCE(SUM(json_extract(profile,'$.oauth_status')='completed'),0),
 		COALESCE(SUM(json_extract(profile,'$.push_status')='completed' AND space_state!='removed'),0),
-		COALESCE(SUM(space_state='inside' AND LOWER(COALESCE(json_extract(profile,'$.seat_type'),'')) IN ('prolite','premium','5x')),0),
+		COALESCE(SUM(json_extract(profile,'$.accept_status')='completed' AND json_extract(profile,'$.remove_status')!='completed' AND json_extract(profile,'$.remote_removed_at') IS NULL AND LOWER(COALESCE(json_extract(profile,'$.seat_type'),'')) IN ('prolite','premium','5x')),0),
 		COALESCE(SUM(CASE WHEN space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL THEN MAX(0,100-CAST(json_extract(profile,'$.quota_7d.used_percent') AS REAL)) ELSE 0 END),0),
 		COALESCE(SUM(space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL),0),
 		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' THEN json_extract(profile,'$.status_checked_at') END),''),
@@ -287,7 +309,7 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 		COALESCE(SUM(space_state!='removed' AND json_extract(profile,'$.accept_status')!='completed'
 			AND json_extract(profile,'$.invite_status') IN ('pending','running','completed')
 			AND COALESCE(json_extract(profile,'$.admin_account_id'),'')!=''),0)
-		FROM accounts`).Scan(&summary.All, &summary.Outside, &summary.Inside, &summary.Removed, &summary.OAuthReady, &summary.Monitoring,
+		FROM accounts`).Scan(&summary.All, &summary.Outside, &summary.Inside, &summary.Removed, &summary.Dead, &summary.OAuthReady, &summary.Monitoring,
 		&summary.InsidePremium, &summary.Quota7DRemainingTotal, &summary.Quota7DCount, &summary.OldestStatusCheckedAt, &summary.OldestQuotaCheckedAt, &summary.InvitePending)
 	if err != nil {
 		return nil, 0, summary, err
@@ -326,6 +348,7 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 			COALESCE(CASE space_state
 				WHEN 'removed' THEN julianday(NULLIF(json_extract(profile,'$.removed_at'),'0001-01-01T00:00:00Z'))
 				WHEN 'inside' THEN julianday(NULLIF(json_extract(profile,'$.joined_at'),'0001-01-01T00:00:00Z'))
+				WHEN 'dead' THEN julianday(NULLIF(json_extract(profile,'$.dead_detected_at'),'0001-01-01T00:00:00Z'))
 				ELSE entered_at END, entered_at) DESC,
 			id DESC LIMIT ? OFFSET ?`, spaceState, spaceState, limit, offset)
 	if err != nil {

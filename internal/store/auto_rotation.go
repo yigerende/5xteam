@@ -369,7 +369,7 @@ func (s *Store) ClaimAutoRotationAccount(accountID, taskID string) (bool, error)
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		return false, err
 	}
-	if p.InviteStatus == "running" || p.AcceptStatus == "running" || (p.TeamAccountID != "" && p.InviteStatus == "completed") {
+	if p.Dead || p.HistoryUncertain || (p.RemoveStatus != "completed" && (p.InviteStatus == "running" || p.AcceptStatus == "running" || (p.TeamAccountID != "" && p.InviteStatus == "completed"))) {
 		return false, nil
 	}
 	// Keep the user-visible pipeline error untouched while the task is claimed.

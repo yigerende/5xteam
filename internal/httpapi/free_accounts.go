@@ -131,6 +131,7 @@ func (s *Server) importFreeAccounts(w http.ResponseWriter, r *http.Request) {
 			updated++
 		}
 		items = append(items, profile)
+		s.accountCycles.Store(profile.ID, profile.CycleID)
 		_, _ = s.store.EnsureFreeAccountLifecycleTask(profile)
 		s.auditAccountEvent(r.Context(), profile.ID, "lifecycle", "rotation", "manual_single", "", "账号已进入 Team 轮转", map[string]any{"email": profile.Email})
 	}
@@ -177,9 +178,18 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
+	trace, _ := r.Context().Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
+	if claim := s.store.FreeAccountClaim(id); claim != "" && claim != trace.TaskID {
+		writeAPI(w, http.StatusConflict, nil, "该账号正在自动轮转，请等待本轮结束")
+		return
+	}
 	s.auditAccountEvent(r.Context(), profile.ID, "join", "invite", "manual_single", "", "开始邀请/进入空间", map[string]any{"seat_type": input.SeatType, "admin_account_id": input.AdminAccountID})
 	if profile.Dead {
 		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不能再次进入空间")
+		return
+	}
+	if mail, _, mailErr := s.store.MailAccountCredential(profile.Email); mailErr == nil && !eligibleAutoRotationMail(mail) {
+		writeAPI(w, 409, nil, "邮件管理已将该账号标记为死号")
 		return
 	}
 	// Once an invitation or acceptance has started, the child is bound to the
@@ -211,7 +221,42 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, "母号缺少团队 Account ID")
 		return
 	}
+	if err = s.checkUnusedTeam(profile, admin.TeamAccountID); err != nil {
+		writeAPI(w, http.StatusConflict, nil, err.Error())
+		return
+	}
+	if profile.RemoveStatus == "completed" {
+		profile, err = s.prepareAccountReuse(r.Context(), profile)
+		if err != nil {
+			s.auditAccountEvent(r.Context(), id, "reuse_waiting", "prepare", "reuse", "", err.Error(), nil)
+			writeAPI(w, http.StatusConflict, nil, err.Error())
+			return
+		}
+		_, sourceCredentials, err = s.store.FreeAccountCredential(id)
+		if err != nil {
+			writeAPI(w, 500, nil, err.Error())
+			return
+		}
+	}
 	runInvite, runAccept := freeAccountJoinSteps(profile)
+	s.seatAssignmentMu.Lock()
+	if runInvite {
+		if capacity, ok := s.store.AdminCapacitySnapshots()[admin.ID]; ok {
+			accounts := s.store.FreeAccounts()
+			filtered := make([]model.FreeAccountProfile, 0, len(accounts))
+			for _, a := range accounts {
+				if a.ID != id {
+					filtered = append(filtered, a)
+				}
+			}
+			inside, inFlight := s.premiumUsageForAdminWithTasks(admin.ID, filtered, s.store.AutoRotationTasks(""))
+			if isPremiumSeatType(input.SeatType) && capacity.Premium.Total-inside-inFlight <= 0 {
+				s.seatAssignmentMu.Unlock()
+				writeAPI(w, http.StatusConflict, nil, "该母号 5x 席位已用完或已在邀请途中")
+				return
+			}
+		}
+	}
 	profile, err = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.AdminAccountID, item.AdminEmail = admin.ID, admin.Email
 		item.TeamAccountID, item.SeatType = admin.TeamAccountID, input.SeatType
@@ -226,6 +271,7 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 			item.RemoveStatus, item.RemovedAt = "pending", nil
 		}
 	})
+	s.seatAssignmentMu.Unlock()
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
@@ -296,15 +342,11 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 	profile, err = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.InviteStatus, item.AcceptStatus = "joined", "completed", "completed"
 		item.LastError, item.JoinedAt = "", &now
+		item.ReusePending = false
 	})
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
-	}
-	if profile.AdminAccountID != "" {
-		if _, countErr := s.store.IncrementAdminTeamRotationChildCount(profile.AdminAccountID); countErr != nil {
-			s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "counter_update_failed", Source: "join", Operation: "accept", Stage: "accept", Level: "warning", Message: "进入空间成功但母号累计次数更新失败", Details: map[string]any{"error": countErr.Error()}})
-		}
 	}
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "joined", map[string]any{"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus})
 	s.auditAccountEvent(r.Context(), profile.ID, "join", "accept", "manual_single", "", "邀请并进入空间成功", map[string]any{"admin_account_id": admin.ID, "team_account_id": admin.TeamAccountID})
@@ -381,7 +423,7 @@ func (s *Server) attachFreeAccountOAuth(w http.ResponseWriter, r *http.Request) 
 		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
-	if profile.AcceptStatus != "completed" {
+	if profile.AcceptStatus != "completed" || profile.RemoveStatus == "completed" || profile.RemoteRemovedAt != nil {
 		writeAPI(w, http.StatusConflict, nil, "请先完成邀请并进入空间")
 		return
 	}
@@ -442,7 +484,7 @@ func (s *Server) startFreeAccountOAuth(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
-	if profile.AcceptStatus != "completed" {
+	if profile.AcceptStatus != "completed" || profile.RemoveStatus == "completed" || profile.RemoteRemovedAt != nil {
 		writeAPI(w, http.StatusConflict, nil, "请先完成邀请并进入空间")
 		return
 	}
@@ -466,7 +508,7 @@ func (s *Server) startFreeAccountOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := randomRegistrationID()
-	job := map[string]any{"job_id": jobID, "account_id": id, "email": profile.Email, "trigger": "oauth", "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
+	job := map[string]any{"cycle_id": profile.CycleID, "job_id": jobID, "account_id": id, "email": profile.Email, "trigger": "oauth", "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
 	s.oauthMu.Lock()
 	s.oauthJobs[jobID] = job
 	s.oauthMu.Unlock()
@@ -506,6 +548,17 @@ func (s *Server) updateOAuthJob(id, status, message string) {
 }
 
 func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, runErr error) {
+	s.oauthMu.RLock()
+	cycleID, _ := s.oauthJobs[jobID]["cycle_id"].(string)
+	s.oauthMu.RUnlock()
+	if p, _, err := s.store.FreeAccountCredential(accountID); err != nil || (cycleID != "" && cycleID != p.CycleID) {
+		s.oauthMu.Lock()
+		if job := s.oauthJobs[jobID]; job != nil {
+			job["status"], job["state"], job["error"] = "failed", "failed", store.ErrStaleCycle.Error()
+		}
+		s.oauthMu.Unlock()
+		return
+	}
 	status, message := "success", ""
 	if runErr != nil || result == nil || result["success"] != true {
 		status = "failed"
@@ -521,7 +574,7 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 		aid, _ := result["account_id"].(string)
 		if strings.TrimSpace(at) == "" || strings.TrimSpace(rt) == "" {
 			status, message = "failed", "OAuth 结果缺少 Access Token 或 Refresh Token"
-		} else if _, err := s.store.SaveFreeAccountOAuth(accountID, at, rt, aid); err != nil {
+		} else if _, err := s.store.SaveFreeAccountOAuth(accountID, at, rt, aid, cycleID); err != nil {
 			status, message = "failed", err.Error()
 		} else if profile, _, err := s.store.FreeAccountCredential(accountID); err == nil {
 			if info, decodeErr := workflow.DecodeUserInfo(at); decodeErr == nil && strings.TrimSpace(info.PlanType) != "" {
@@ -683,6 +736,17 @@ func (s *Server) runFreeAccountOAuthUnlocked(jobID, accountID, email string) {
 	}
 	if strings.TrimSpace(creds.SourceAccessToken) == "" {
 		s.finishOAuthJob(jobID, accountID, nil, errors.New("账号缺少源 Access Token"))
+		return
+	}
+	s.oauthMu.Lock()
+	job := s.oauthJobs[jobID]
+	cycle, _ := job["cycle_id"].(string)
+	if job != nil && cycle == "" {
+		job["cycle_id"] = profile.CycleID
+	}
+	s.oauthMu.Unlock()
+	if cycle != "" && cycle != profile.CycleID {
+		s.finishOAuthJob(jobID, accountID, nil, store.ErrStaleCycle)
 		return
 	}
 	trigger := s.oauthJobTrigger(jobID)
@@ -1064,6 +1128,10 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不再推送到 Sub2")
 		return
 	}
+	if profile.RemoveStatus == "completed" || profile.RemoteRemovedAt != nil {
+		writeAPI(w, 409, nil, "账号已退出空间，请先完成下一轮进入及授权")
+		return
+	}
 	settings, password, err := s.store.Sub2Settings()
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
@@ -1309,6 +1377,9 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	}
 	if profile.Dead {
 		return profile, profile.RemoveStatus == "completed", errors.New("该账号已判定为死号")
+	}
+	if profile.RemoveStatus == "completed" || profile.RemoteRemovedAt != nil {
+		return profile, true, errors.New("账号已退出空间")
 	}
 	settings, password, err := s.store.Sub2Settings()
 	if err != nil {
@@ -1686,7 +1757,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 		return errDeadAccountHandled
 	}
 	jobID := randomRegistrationID()
-	job := map[string]any{"job_id": jobID, "account_id": accountID, "email": profile.Email, "trigger": "relogin", "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
+	job := map[string]any{"cycle_id": profile.CycleID, "job_id": jobID, "account_id": accountID, "email": profile.Email, "trigger": "relogin", "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
 	s.oauthMu.Lock()
 	s.oauthJobs[jobID] = job
 	s.oauthMu.Unlock()
@@ -1842,6 +1913,9 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	if profile.RemoveStatus == "completed" {
 		return profile, nil
 	}
+	if profile.RemoteRemovedAt != nil {
+		return s.finishRemovedCycle(ctx, profile)
+	}
 	if profile.AcceptStatus != "completed" || profile.AdminAccountID == "" || profile.TeamAccountID == "" {
 		return profile, errors.New("账号没有可移出的团队空间记录")
 	}
@@ -1902,20 +1976,19 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	// Removing a Team member also removes the corresponding downstream
 	// credential from the currently enabled provider. This prevents the old
 	// CPA/Sub2 account from continuing to receive traffic after rotation.
-	if deleteErr := s.deleteLinkedDownstream(ctx, profile); deleteErr != nil {
-		s.failFreeAccount(profile.ID, "remove", deleteErr)
-		return profile, deleteErr
-	}
 	now := time.Now()
-	updated, updateErr := s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
-		item.Status, item.RemoveStatus, item.LastError = "removed", "completed", ""
+	profile, err = s.store.UpdateFreeAccountCycle(profile.ID, profile.CycleID, func(item *model.FreeAccountProfile) {
+		item.Status, item.RemoveStatus = "cleanup_pending", "cleanup_pending"
 		item.RemoveMethod = "mother_kick"
-		item.AutoRemove, item.RemovedAt = false, &now
+		item.AutoRemove, item.RemoteRemovedAt, item.RemovedAt = false, &now, &now
 	})
+	if err != nil {
+		return profile, err
+	}
 	_ = s.store.ReleaseSeatReservationByAccount(id)
 	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "seat_released", Source: "remove", Operation: "remove", Stage: "remove", Message: "账号移出空间，释放席位预占"})
 	s.waitTeamOperationInterval(ctx)
-	return updated, updateErr
+	return s.finishRemovedCycle(ctx, profile)
 }
 
 // performFreeAccountChildLeave uses the same Team membership DELETE request as
@@ -1944,18 +2017,35 @@ func (s *Server) performFreeAccountChildLeave(ctx context.Context, profile model
 	// The child-leave request is also a Team membership mutation and shares the
 	// same mother Team lock with invitations and mother kicks.
 	s.waitTeamOperationInterval(ctx)
-	if deleteErr := s.deleteLinkedDownstream(ctx, profile); deleteErr != nil {
-		return profile, deleteErr
-	}
 	now := time.Now()
 	updated, updateErr := s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
-		item.Status, item.RemoveStatus, item.LastError = "removed", "completed", ""
+		item.Status, item.RemoveStatus, item.LastError = "cleanup_pending", "cleanup_pending", ""
 		item.RemoveMethod = method
-		item.AutoRemove, item.RemovedAt = false, &now
+		item.AutoRemove, item.RemoteRemovedAt, item.RemovedAt = false, &now, &now
 	})
 	_ = s.store.ReleaseSeatReservationByAccount(profile.ID)
 	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "child_leave_success", Message: "子号自行退出成功", DurationMS: time.Since(started).Milliseconds(), Response: map[string]any{"method": method}, Details: map[string]any{"method": method}})
-	return updated, updateErr
+	if updateErr != nil {
+		return updated, updateErr
+	}
+	return s.finishRemovedCycle(ctx, updated)
+}
+
+func (s *Server) finishRemovedCycle(ctx context.Context, p model.FreeAccountProfile) (model.FreeAccountProfile, error) {
+	if err := s.deleteLinkedDownstream(ctx, p); err != nil {
+		_, _ = s.store.UpdateFreeAccountCycle(p.ID, p.CycleID, func(item *model.FreeAccountProfile) {
+			item.Status = "cleanup_pending"
+			item.RemoveStatus = "cleanup_pending"
+			item.LastError = err.Error()
+		})
+		return p, err
+	}
+	return s.store.UpdateFreeAccountCycle(p.ID, p.CycleID, func(item *model.FreeAccountProfile) {
+		item.Status = "removed"
+		item.RemoveStatus = "completed"
+		item.LastError = ""
+		item.DownstreamCleaned = true
+	})
 }
 
 // retryTeamRequest retries only transport/proxy failures. HTTP business
@@ -2065,7 +2155,6 @@ func (s *Server) updateFreeAccountStage(w http.ResponseWriter, r *http.Request) 
 	// make that recovery impossible.
 	now := time.Now()
 	before, _, beforeErr := s.store.FreeAccountCredential(id)
-	wasAccepted := beforeErr == nil && before.AcceptStatus == "completed"
 	profile, err := s.store.UpdateFreeAccount(id, func(item *model.FreeAccountProfile) {
 		applyManualFreeAccountStage(item, input.Stage, input.Status, input.Message, now)
 		if input.Stage == "push" && input.Status == "completed" {
@@ -2087,11 +2176,6 @@ func (s *Server) updateFreeAccountStage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if beforeErr == nil {
-		if input.Stage == "accept" && input.Status == "completed" && !wasAccepted && profile.AdminAccountID != "" {
-			if _, countErr := s.store.IncrementAdminTeamRotationChildCount(profile.AdminAccountID); countErr != nil {
-				s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "counter_update_failed", Source: "manual_single", Operation: "accept", Stage: "accept", Level: "warning", Message: "手动确认进入成功但母号累计次数更新失败", Details: map[string]any{"error": countErr.Error()}})
-			}
-		}
 		s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: id, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "manual_stage", Source: "manual_single", Operation: "stage", Stage: input.Stage, FromStatus: stageStatus(before, input.Stage), ToStatus: input.Status, Message: "手动修正流程状态", Details: map[string]any{"message": input.Message}})
 	}
 	writeAPI(w, http.StatusOK, profile, "")
@@ -2755,7 +2839,7 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 			for _, account := range s.store.FreeAccounts() {
 				// Monitoring is intentionally limited to accounts that are both in
 				// the Team space and successfully pushed to the active downstream.
-				if account.Dead || account.AcceptStatus != "completed" || account.PushStatus != "completed" || account.RemoveStatus == "completed" {
+				if account.Dead || account.AcceptStatus != "completed" || account.PushStatus != "completed" || account.RemoveStatus == "completed" || account.RemoteRemovedAt != nil {
 					continue
 				}
 				hasDownstream := provider == "cpa" && strings.TrimSpace(account.CPAAuthFileName) != ""

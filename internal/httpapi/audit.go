@@ -64,6 +64,11 @@ func (s *Server) auditWriter() {
 // temporarily full, preserve high-value events by replacing their payload
 // with a compact summary and retrying once; normal business flow still wins.
 func (s *Server) enqueueAuditEvent(event model.AutoRotationEvent) {
+	if event.CycleID == "" && event.AccountID != "" {
+		if cycle, ok := s.accountCycles.Load(event.AccountID); ok {
+			event.CycleID, _ = cycle.(string)
+		}
+	}
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now()
 	}
@@ -102,7 +107,8 @@ func (s *Server) auditAccountEvent(ctx context.Context, accountID, operation, st
 func (s *Server) auditAccountEventWithIO(ctx context.Context, accountID, operation, stage, source, provider, message string, details, request, response map[string]any) {
 	trace, _ := ctx.Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
 	s.enqueueAuditEvent(model.AutoRotationEvent{
-		RunID: trace.RunID, TaskID: trace.TaskID, AccountID: accountID,
+		CycleID: trace.CycleID,
+		RunID:   trace.RunID, TaskID: trace.TaskID, AccountID: accountID,
 		Operation: operation, Stage: stage, Source: source, Provider: provider,
 		Type: "audit", Message: message, Details: details, Request: request, Response: response,
 	})

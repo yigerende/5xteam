@@ -116,6 +116,7 @@ onBeforeUnmount(() => window.clearInterval(countdownTimer))
     <form class="panel auto-config" @submit.prevent="save">
       <div class="auto-fields">
         <label class="field checkbox-field"><span>自动轮转开关<small>后台定时检查并补充账号</small></span><input v-model="settings.enabled" type="checkbox" /></label>
+        <label class="field checkbox-field"><span>允许一子多母复用</span><input v-model="settings.allow_multi_mother_reuse" type="checkbox" /></label>
         <label class="field"><span>7天平均剩余额度阈值（%）</span><input v-model.number="settings.threshold_percent" type="number" min="1" max="100" required /></label>
         <label class="field"><span>检查间隔（秒）</span><input v-model.number="settings.interval_seconds" type="number" min="10" max="86400" required /></label>
         <label class="field"><span>同母号操作间隔（秒）<small>邀请、确认、移出按母号串行，成功后等待</small></span><input v-model.number="settings.team_operation_interval_seconds" type="number" min="0" max="120" required /></label>

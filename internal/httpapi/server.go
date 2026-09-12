@@ -52,6 +52,8 @@ type Server struct {
 	sessions          map[string]time.Time
 	autoMu            sync.Mutex
 	autoAdminLocks    sync.Map
+	seatAssignmentMu  sync.Mutex
+	accountCycles     sync.Map
 	autoRunning       bool
 	auditQueue        chan model.AutoRotationEvent
 	auditWG           sync.WaitGroup
@@ -87,6 +89,9 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 	_ = dataStore.PurgeAutoRotationHistory(time.Now().Add(-48 * time.Hour))
 	server := &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), cpa: cpa.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any), oauthProxyActive: make(map[string]int), auditQueue: make(chan model.AutoRotationEvent, 2048), auditStop: make(chan struct{})}
 	server.auditWG.Add(1)
+	for _, account := range dataStore.FreeAccounts() {
+		server.accountCycles.Store(account.ID, account.CycleID)
+	}
 	go server.auditWriter()
 	return server, nil
 }
@@ -163,6 +168,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/free-accounts/import", s.importFreeAccounts)
 	mux.HandleFunc("DELETE /api/free-accounts/{id}", s.deleteFreeAccount)
 	mux.HandleFunc("POST /api/free-accounts/{id}/join", s.joinFreeAccount)
+	mux.HandleFunc("GET /api/team-visits", s.listTeamVisits)
+	mux.HandleFunc("POST /api/free-accounts/{id}/review-history", s.reviewTeamHistory)
 	mux.HandleFunc("POST /api/free-accounts/{id}/oauth/start", s.startFreeAccountOAuth)
 	mux.HandleFunc("GET /api/free-accounts/{id}/oauth/status/{job_id}", s.freeAccountOAuthStatus)
 	mux.HandleFunc("POST /api/free-accounts/{id}/oauth", s.attachFreeAccountOAuth)

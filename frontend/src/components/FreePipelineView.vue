@@ -12,6 +12,7 @@ import IconButton from './IconButton.vue'
 import MessageBar from './MessageBar.vue'
 import StatusPill from './StatusPill.vue'
 import Pagination from './Pagination.vue'
+import TeamVisitCount from './TeamVisitCount.vue'
 import AutoRotationView from './AutoRotationView.vue'
 import ExecutionHistoryView from './ExecutionHistoryView.vue'
 
@@ -32,6 +33,28 @@ const pushProvider = ref('sub2')
 const activeProviderLabel = computed(() => pushProvider.value === 'cpa' ? 'CPA' : 'Sub2')
 const activeReloginFailureLimit = computed(() => pushProvider.value === 'cpa' ? cpaForm.reloginFailureLimit : sub2Form.reloginFailureLimit)
 const joinForm = reactive({ account: null, adminAccountID: '', seatType: 'default' })
+const joinVisits = ref([])
+const joinAdmins = computed(() => props.adminAccounts.filter((admin) => {
+  const account = joinForm.account
+  if (!account) return false
+  if (account.remove_status !== 'completed' && account.accept_status === 'completed') return admin.team_account_id === account.team_account_id
+  return !joinVisits.value.some((visit) => visit.team_account_id === admin.team_account_id)
+}))
+const historyReview = reactive({ account: null, teamIDs: [], extraIDs: '', confirmed: false })
+async function openHistoryReview(account) {
+  try {
+    const visits = await api(`/api/team-visits?email=${encodeURIComponent(account.email)}`)
+    historyReview.account = account; historyReview.teamIDs = visits.map((v) => v.team_account_id)
+    historyReview.extraIDs = visits.filter((v) => !props.adminAccounts.some((a) => a.team_account_id === v.team_account_id)).map((v) => v.team_account_id).join('\n')
+    historyReview.confirmed = false
+  } catch (e) { setMessage(e.message, 'error') }
+}
+async function saveHistoryReview() {
+  try {
+    await api(`/api/free-accounts/${encodeURIComponent(historyReview.account.id)}/review-history`, { method: 'POST', body: { confirmed: historyReview.confirmed, team_ids: [...historyReview.teamIDs, ...historyReview.extraIDs.split(/\s+/).filter(Boolean)] } })
+    historyReview.account = null; await refreshLiveAccounts(); setMessage('历史进入空间已确认', 'success')
+  } catch (e) { setMessage(e.message, 'error') }
+}
 const manualPushForm = reactive({ account: null, sub2AccountID: '' })
 const groups = ref([])
 const message = reactive({ text: '', type: '' })
@@ -75,8 +98,11 @@ const lifecycleView = reactive({ account: null, events: [], task: null, loading:
 const lifecycleLoginSummary = computed(() => latestOAuthLoginSummary(lifecycleView.events))
 
 function teamSpaceStatus(account) {
+  if (account?.dead) return 'dead'
+  if (account?.remote_removed_at) return 'removed'
   if (account?.remove_status === 'completed') return 'removed'
   if (account?.accept_status === 'completed') return 'inside'
+  if (account?.visited_team_count > 0) return 'removed'
   return 'outside'
 }
 function isPremiumSeatType(seatType) {
@@ -538,6 +564,7 @@ async function persistStageValue(account, stage, status, sub2AccountID = 0) {
   finally { busy.value = '' }
 }
 function joinActionLabel(account) {
+  if (account?.remove_status === 'completed' || account?.reuse_pending) return '进入下一母号'
   if (account?.accept_status === 'completed') return '更新团队关联'
   return account?.invite_status === 'completed' ? '接受团队邀请' : '邀请并进入空间'
 }
@@ -561,14 +588,21 @@ async function openJoin(account) {
   // OpenAI for every mother account.
   await Promise.all([refreshLiveAccounts().catch(() => {}), loadCapacitySnapshots().catch(() => {})])
   joinForm.account = account
-  joinForm.adminAccountID = account.admin_account_id || props.adminAccounts[0]?.id || ''
+  try {
+    const [visits, settings] = await Promise.all([api(`/api/team-visits?email=${encodeURIComponent(account.email)}`), api('/api/auto-rotation/settings')])
+    joinVisits.value = visits || []
+    if (account.remove_status === 'completed' && !settings.allow_multi_mother_reuse) return setMessage('请先开启允许一子多母复用', 'error')
+    if (account.history_uncertain) return openHistoryReview(account)
+    if (!joinAdmins.value.length) return setMessage('没有尚未使用的母号，等待新增空间', 'error')
+  } catch (e) { return setMessage(e.message, 'error') }
+  joinForm.adminAccountID = joinAdmins.value.find((a) => a.id === account.admin_account_id)?.id || joinAdmins.value[0]?.id || ''
   joinForm.seatType = account.seat_type || 'default'
   joinOpen.value = true
 }
 async function joinAccount() {
   if (!joinForm.adminAccountID) return setMessage('请选择邀请母号', 'error')
   const account = joinForm.account
-  const associationOnly = account.accept_status === 'completed'
+  const associationOnly = account.accept_status === 'completed' && account.remove_status !== 'completed'
   const id = account.id
   const payload = { admin_account_id: joinForm.adminAccountID, seat_type: joinForm.seatType }
   joinOpen.value = false
@@ -850,10 +884,11 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
       <div class="space-filter-tabs" role="tablist" aria-label="空间状态筛选">
         <button type="button" :class="{ active: teamSpaceFilter === 'outside' }" @click="setTeamSpaceFilter('outside')">未进入空间 <span>{{ accountSummary.outside }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'inside' }" @click="setTeamSpaceFilter('inside')">在空间里面 <span>{{ accountSummary.inside }}</span></button>
-        <button type="button" :class="{ active: teamSpaceFilter === 'removed' }" @click="setTeamSpaceFilter('removed')">已移出空间 <span>{{ accountSummary.removed }}</span></button>
+        <button type="button" :class="{ active: teamSpaceFilter === 'removed' }" @click="setTeamSpaceFilter('removed')">已使用过 <span>{{ accountSummary.removed }}</span></button>
+        <button type="button" :class="{ active: teamSpaceFilter === 'dead' }" @click="setTeamSpaceFilter('dead')">死号 <span>{{ accountSummary.dead || 0 }}</span></button>
       </div>
-      <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>累计消耗</th><th>5小时</th><th>7天</th><th>移出策略</th><th>重登成功 / 连续失败</th><th class="actions-column">操作</th></tr></thead><tbody>
-        <tr v-if="!displayedAccounts.length"><td colspan="10" class="empty-cell">暂无 Free 账号</td></tr>
+      <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>累计消耗</th><th>5小时</th><th>7天</th><th>移出策略</th><th>重登成功 / 连续失败</th><th>进入母号数</th><th class="actions-column">操作</th></tr></thead><tbody>
+        <tr v-if="!displayedAccounts.length"><td colspan="11" class="empty-cell">暂无 Free 账号</td></tr>
         <tr v-for="account in displayedAccounts" :key="account.id" :class="{ 'row-running': activityFor(account), 'row-highlighted': entryEmail && account.email === entryEmail }">
           <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="account.dead" class="danger-text" :title="account.dead_reason">死号{{ account.remove_status === 'completed' ? ' · 已自动移出空间' : ' · 自动移出失败' }}</small><small v-else-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>
           <td><small class="table-note">{{ account.imported_at ? formatTime(account.imported_at) : '未知' }}</small></td>
@@ -863,6 +898,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
           <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small class="table-note">{{ removeMethodText(account) }}</small><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
           <td><strong>{{ account.relogin_count || 0 }} / {{ account.relogin_failure_count || 0 }}</strong><small class="table-note">成功 / 失败阈值 {{ activeReloginFailureLimit }}</small></td>
+          <td><TeamVisitCount :email="account.email" :count="account.visited_team_count" :uncertain="account.history_uncertain" /></td>
           <td><div class="row-actions"><IconButton label="更多操作" @mouseenter="showPipelineMenu(account, $event)" @mouseleave="closePipelineMenu()"><MoreHorizontal :size="15" /></IconButton><IconButton label="刷新 5小时/7天额度" :disabled="account.dead || isAccountBusy(account) || !hasDownstream(account)" @click="runAction(account, 'quota')"><LoaderCircle v-if="activityFor(account)?.action === 'quota'" class="spin" :size="15" /><Gauge v-else :size="15" /></IconButton><IconButton label="删除流水线记录" danger :disabled="isAccountBusy(account)" @click="removeRecord(account)"><Trash2 :size="15" /></IconButton></div></td>
         </tr>
       </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="accountTotal" @update:page="setAccountPage" @update:page-size="setAccountPageSize" />
@@ -871,7 +907,8 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
     <Teleport to="body">
       <div v-if="pipelineMenu.open && pipelineMenu.account" class="pipeline-action-menu" :style="{ top: `${pipelineMenu.top}px`, left: `${pipelineMenu.left}px` }" @mouseenter="keepPipelineMenuOpen" @mouseleave="closePipelineMenu()">
         <button type="button" @click="runPipelineMenuAction('lifecycle')"><History :size="14" />查看账号全流程</button>
-        <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || joinCapacityRefreshing || !adminAccounts.length || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('join')"><DoorOpen :size="14" />{{ joinActionLabel(pipelineMenu.account) }}</button>
+        <button v-if="pipelineMenu.account.history_uncertain" type="button" @click="openHistoryReview(pipelineMenu.account); pipelineMenu.open = false"><History :size="14" />核对历史空间</button>
+        <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || joinCapacityRefreshing || !adminAccounts.length" @click="runPipelineMenuAction('join')"><DoorOpen :size="14" />{{ joinActionLabel(pipelineMenu.account) }}</button>
         <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('oauth')"><KeyRound :size="14" />获取 Codex AT / RT</button>
         <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || !hasDownstream(pipelineMenu.account) || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('relogin')"><RefreshCw :size="14" />重登并重新推送</button>
         <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.oauth_status !== 'completed' || hasDownstream(pipelineMenu.account)" @click="runPipelineMenuAction('push')"><Send :size="14" />推送到{{ activeProviderLabel }}</button>
@@ -879,7 +916,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
       </div>
     </Teleport>
 
-    <div v-if="joinOpen" class="modal-backdrop" @click.self="joinOpen = false"><form class="modal" @submit.prevent="joinAccount"><span class="overline">JOIN TEAM SPACE</span><h2>{{ joinActionLabel(joinForm.account) }}</h2><p>{{ joinForm.account?.email }}</p><label class="field"><span>邀请母号</span><select v-model="joinForm.adminAccountID" required><option value="">请选择母号</option><option v-for="admin in adminAccounts" :key="admin.id" :value="admin.id">{{ adminOptionLabel(admin) }}</option></select></label><label class="field"><span>本次邀请席位</span><select v-model="joinForm.seatType"><option value="default">Standard（标准）</option><option value="prolite">Premium（5x）</option></select></label><div class="panel-actions"><button class="btn ghost" type="button" @click="joinOpen = false">取消</button><button class="btn primary" type="submit"><DoorOpen :size="15" />确认执行</button></div></form></div>
+    <div v-if="joinOpen" class="modal-backdrop" @click.self="joinOpen = false"><form class="modal" @submit.prevent="joinAccount"><span class="overline">JOIN TEAM SPACE</span><h2>{{ joinActionLabel(joinForm.account) }}</h2><p>{{ joinForm.account?.email }}</p><label class="field"><span>邀请母号</span><select v-model="joinForm.adminAccountID" required><option value="">请选择母号</option><option v-for="admin in joinAdmins" :key="admin.id" :value="admin.id">{{ adminOptionLabel(admin) }}</option></select></label><label class="field"><span>本次邀请席位</span><select v-model="joinForm.seatType"><option value="default">Standard（标准）</option><option value="prolite">Premium（5x）</option></select></label><div class="panel-actions"><button class="btn ghost" type="button" @click="joinOpen = false">取消</button><button class="btn primary" type="submit"><DoorOpen :size="15" />确认执行</button></div></form></div>
 
     <div v-if="manualPushForm.account" class="modal-backdrop" @click.self="manualPushForm.account = null"><form class="modal" @submit.prevent="saveManualPushStage"><span class="overline">LINK SUB2 ACCOUNT</span><h2>标记推送成功</h2><p>{{ manualPushForm.account?.email }}</p><label class="field"><span>Sub2 账号 ID</span><input v-model="manualPushForm.sub2AccountID" type="number" min="1" step="1" required placeholder="例如 1024" /></label><div class="panel-actions"><button class="btn ghost" type="button" @click="manualPushForm.account = null">取消</button><button class="btn primary" type="submit"><Link2 :size="15" />关联并标记成功</button></div></form></div>
 
@@ -894,6 +931,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
             <div v-if="!lifecycleView.events.length" class="empty-cell">暂无详细事件</div>
             <article v-for="event in lifecycleView.events" :key="event.id" class="lifecycle-event"><i></i><div>
               <time>{{ formatTime(event.created_at) }}</time><strong>{{ event.stage || event.operation || event.type || '系统事件' }}</strong><span>{{ event.message || '-' }}</span>
+              <small v-if="event.cycle_id">轮次：{{ event.cycle_id }}</small>
               <small v-if="oauthLoginSummary(event.details)">{{ oauthLoginSummary(event.details) }}</small>
               <small v-if="event.details?.proxy?.name || event.details?.proxy_name">代理：{{ event.details?.proxy?.name || event.details?.proxy_name }}</small>
               <small v-if="event.attempt || event.duration_ms">{{ event.attempt ? `第 ${event.attempt} 次` : '' }} {{ event.duration_ms ? `· ${event.duration_ms} ms` : '' }}</small>
@@ -904,6 +942,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
       </section>
     </div>
 
+    <div v-if="historyReview.account" class="modal-backdrop" @click.self="historyReview.account = null"><form class="modal" @submit.prevent="saveHistoryReview"><h2>核对历史进入空间</h2><p>{{ historyReview.account.email }}</p><label v-for="admin in adminAccounts" :key="admin.id" class="field"><span><input v-model="historyReview.teamIDs" type="checkbox" :value="admin.team_account_id" /> {{ admin.label || admin.email }}</span></label><label class="field"><span>其他已使用 Team ID</span><textarea v-model="historyReview.extraIDs" rows="3"></textarea></label><label class="field"><span><input v-model="historyReview.confirmed" type="checkbox" required /> 已核对历史进入的空间</span></label><div class="panel-actions"><button class="btn ghost" type="button" @click="historyReview.account = null">取消</button><button class="btn primary" type="submit" :disabled="!historyReview.confirmed"><Save :size="15" />确认历史</button></div></form></div>
   </section>
 </template>
 

@@ -26,6 +26,8 @@ type Settings struct {
 // MailAccountProfile is the local mailbox projection used by registration.
 // Secrets are encrypted in Store and never returned by list APIs.
 type MailAccountProfile struct {
+	VisitedTeamCount      int              `json:"visited_team_count"`
+	HistoryUncertain      bool             `json:"history_uncertain,omitempty"`
 	ID                    string           `json:"id"`
 	Email                 string           `json:"email"`
 	Label                 string           `json:"label"`
@@ -353,6 +355,7 @@ type AccountProgress struct {
 }
 
 type AutoRotationSettings struct {
+	AllowMultiMotherReuse        bool    `json:"allow_multi_mother_reuse"`
 	Enabled                      bool    `json:"enabled"`
 	ThresholdPercent             float64 `json:"threshold_percent"`
 	IntervalSeconds              int     `json:"interval_seconds"`
@@ -391,6 +394,7 @@ type AutoRotationRun struct {
 }
 
 type AutoRotationTask struct {
+	CycleID         string             `json:"cycle_id,omitempty"`
 	ID              string             `json:"id"`
 	RunID           string             `json:"run_id"`
 	AccountID       string             `json:"account_id"`
@@ -423,6 +427,7 @@ type AutoRotationStep struct {
 }
 
 type AutoRotationEvent struct {
+	CycleID        string         `json:"cycle_id,omitempty"`
 	ID             string         `json:"id"`
 	RunID          string         `json:"run_id,omitempty"`
 	TaskID         string         `json:"task_id,omitempty"`

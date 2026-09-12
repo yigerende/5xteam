@@ -14,13 +14,15 @@ import (
 	"time"
 
 	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/store"
 	"chatgpt-space-merge/internal/workflow"
 )
 
 type autoRotationTraceContextKey struct{}
 type autoRotationTraceContext struct {
-	RunID  string
-	TaskID string
+	CycleID string
+	RunID   string
+	TaskID  string
 }
 
 func (s *Server) getAutoRotationSettings(w http.ResponseWriter, _ *http.Request) {
@@ -179,7 +181,7 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 	avg := averageFreeQuota(accounts, seatTotal)
 	spaceCount, quotaCount := 0, 0
 	for _, a := range accounts {
-		if a.AcceptStatus == "completed" && a.RemoveStatus != "completed" {
+		if a.AcceptStatus == "completed" && a.RemoveStatus != "completed" && a.RemoteRemovedAt == nil {
 			spaceCount++
 			if a.Quota7D != nil {
 				quotaCount++
@@ -238,7 +240,7 @@ func premiumSeatSnapshot(admins []model.AdminAccountProfile, snapshots map[strin
 		}
 	}
 	for _, account := range accounts {
-		if account.AcceptStatus == "completed" && account.RemoveStatus != "completed" && isPremiumSeatType(account.SeatType) {
+		if account.AcceptStatus == "completed" && account.RemoveStatus != "completed" && account.RemoteRemovedAt == nil && isPremiumSeatType(account.SeatType) {
 			inside++
 		}
 	}
@@ -257,7 +259,7 @@ func averageFreeQuota(accounts []model.FreeAccountProfile, seatTotal int) float6
 	var total float64
 	count, inside := 0, 0
 	for _, a := range accounts {
-		if a.AcceptStatus == "completed" && a.RemoveStatus != "completed" {
+		if a.AcceptStatus == "completed" && a.RemoveStatus != "completed" && a.RemoteRemovedAt == nil {
 			inside++
 			if a.Quota7D != nil {
 				total += 100 - a.Quota7D.UsedPercent
@@ -320,22 +322,47 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 		}
 	}
 	run.CandidateRotationCount = len(selected)
+	if settings.AllowMultiMotherReuse {
+		reused := make([]model.FreeAccountProfile, 0)
+		for _, a := range candidates {
+			if reusableAccount(a) {
+				if _, pro := proEmails[strings.ToLower(strings.TrimSpace(a.Email))]; !pro {
+					reused = append(reused, a)
+				}
+			}
+		}
+		sort.SliceStable(reused, func(i, j int) bool {
+			if reused[i].RemovedAt == nil {
+				return reused[j].RemovedAt != nil
+			}
+			if reused[j].RemovedAt == nil {
+				return false
+			}
+			return reused[i].RemovedAt.Before(*reused[j].RemovedAt)
+		})
+		selected = append(selected, reused...)
+	}
 	need := s.availablePremiumSlots(ctx, admins, run.ID)
 	run.DecisionAvailableSeats = need
 	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "plan", Stage: "seat_snapshot", Message: "自动补充前实时席位快照", Details: map[string]any{"available_after_reservation": need, "max_per_run": settings.MaxPerRun}})
 	// Mailbox candidates have not been imported yet, so the rotation list is not a candidate cap.
 	need = autoRotationPlan(settings.MaxPerRun, need, 0, need)
-	for len(selected) < need {
-		mailCandidates := s.store.MailAccountsByManagementScope("mail")
-		// Replenish oldest entries first without changing the mail list's display order.
-		// Stable sorting preserves the store's email tie-breaker for equal timestamps.
-		sort.SliceStable(mailCandidates, func(i, j int) bool {
-			return mailCandidates[i].CreatedAt.Before(mailCandidates[j].CreatedAt)
-		})
-		for _, mail := range mailCandidates {
-			if len(selected) >= need {
-				break
-			}
+	mailCandidates := s.store.MailAccountsByManagementScope("mail")
+	// Replenish oldest entries first without changing the mail list's display order.
+	// Stable sorting preserves the store's email tie-breaker for equal timestamps.
+	sort.SliceStable(mailCandidates, func(i, j int) bool {
+		return mailCandidates[i].CreatedAt.Before(mailCandidates[j].CreatedAt)
+	})
+	rotationIndex, mailIndex := 0, 0
+	nextCandidate := func() (model.FreeAccountProfile, bool) {
+		if rotationIndex < len(selected) {
+			a := selected[rotationIndex]
+			rotationIndex++
+			return a, true
+		}
+		for mailIndex < len(mailCandidates) {
+			mail := mailCandidates[mailIndex]
+			mailIndex++
 			if !eligibleAutoRotationMail(mail) {
 				continue
 			}
@@ -344,7 +371,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 			for _, a := range candidates {
 				if strings.EqualFold(a.Email, mail.Email) {
 					found = true
-					if a.ImportMode == "pure" && !a.Dead {
+					if a.ImportMode == "pure" && !a.Dead && a.VisitedTeamCount == 0 {
 						copy := a
 						pureCandidate = &copy
 					}
@@ -352,24 +379,22 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 				}
 			}
 			if pureCandidate != nil {
-				selected = append(selected, *pureCandidate)
-				continue
+				return *pureCandidate, true
 			}
 			if found {
 				continue
 			}
 			profile, err := s.importMailAccountToTeam(ctx, mail.Email)
 			if err == nil {
-				selected = append(selected, profile)
+				// Re-importing an old email can restore a durable removed cycle.
+				if profile.VisitedTeamCount == 0 || (settings.AllowMultiMotherReuse && reusableAccount(profile)) {
+					return profile, true
+				}
 			}
 		}
-		break
+		return model.FreeAccountProfile{}, false
 	}
-	run.CandidateMailCount = len(selected) - run.CandidateRotationCount
-	if len(selected) > need {
-		selected = selected[:need]
-	}
-	if len(selected) == 0 {
+	if need == 0 {
 		run.Status, run.Reason = "completed", "没有符合条件的候选账号"
 		now := time.Now()
 		run.CompletedAt = &now
@@ -391,8 +416,14 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	actualTasks := 0
-	for _, account := range selected {
-		account := account
+	for actualTasks < need {
+		account, ok := nextCandidate()
+		if !ok {
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
 		taskID := randomRegistrationID()
 		claimed, err := s.store.ClaimAutoRotationAccount(account.ID, taskID)
 		if err != nil || !claimed {
@@ -401,17 +432,37 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 		adminID, err := s.selectPremiumAdmin(ctx, admins, account.ID, run.ID)
 		if err != nil {
 			_ = s.store.ReleaseAutoRotationClaim(account.ID)
+			s.auditAccountEvent(ctx, account.ID, "candidate_skipped", "prepare", "auto_rotation", "", err.Error(), nil)
+			continue
+		}
+		if account.RemoveStatus == "completed" {
+			unlock := s.lockFreeAccount(account.ID)
+			account, err = s.prepareAccountReuse(ctx, account)
+			unlock()
+			if err != nil {
+				_ = s.store.ReleaseAutoRotationClaim(account.ID)
+				s.auditAccountEvent(ctx, account.ID, "reuse_waiting", "prepare", "auto_rotation", "", err.Error(), nil)
+				continue
+			}
+		}
+		s.seatAssignmentMu.Lock()
+		adminID, err = s.selectPremiumAdmin(ctx, admins, account.ID, run.ID)
+		if err != nil {
+			s.seatAssignmentMu.Unlock()
+			_ = s.store.ReleaseAutoRotationClaim(account.ID)
 			continue
 		}
 		source := "rotation"
 		if account.ImportMode == "pure" {
 			source = "mail"
 		}
-		task := model.AutoRotationTask{ID: taskID, RunID: run.ID, AccountID: account.ID, Email: account.Email, Source: source, AdminAccountID: adminID, SeatType: "prolite", Status: "queued", SeatReserved: false, StartedAt: time.Now(), Steps: autoSteps()}
+		task := model.AutoRotationTask{CycleID: account.CycleID, ID: taskID, RunID: run.ID, AccountID: account.ID, Email: account.Email, Source: source, AdminAccountID: adminID, SeatType: "prolite", Status: "queued", SeatReserved: false, StartedAt: time.Now(), Steps: autoSteps()}
 		if err := s.store.SaveAutoRotationTask(task); err != nil {
+			s.seatAssignmentMu.Unlock()
 			_ = s.store.ReleaseAutoRotationClaim(account.ID)
 			continue
 		}
+		s.seatAssignmentMu.Unlock()
 		actualTasks++
 		wg.Add(1)
 		go func() {
@@ -421,8 +472,10 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 			s.executeAutoTask(ctx, task, &run, &mu, settings)
 		}()
 	}
+	mu.Lock()
 	run.Planned = actualTasks
 	_ = s.store.UpdateAutoRotationRun(run)
+	mu.Unlock()
 	wg.Wait()
 	now := time.Now()
 	run.CompletedAt = &now
@@ -438,7 +491,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 }
 
 func eligibleAutoRotationAccount(account model.FreeAccountProfile) bool {
-	return !account.Dead && account.ImportMode != "pure" && account.AcceptStatus != "completed" && account.RemoveStatus != "completed"
+	return !account.Dead && !account.HistoryUncertain && (account.VisitedTeamCount == 0 || account.ReusePending) && account.ImportMode != "pure" && account.AcceptStatus != "completed" && account.RemoveStatus != "completed"
 }
 
 func eligibleAutoRotationMail(account model.MailAccountProfile) bool {
@@ -494,7 +547,17 @@ func (s *Server) selectPremiumAdmin(ctx context.Context, admins []model.AdminAcc
 	snapshots := s.store.AdminCapacitySnapshots()
 	accounts := s.store.FreeAccounts()
 	tasks := s.store.AutoRotationTasks("")
+	account, _, err := s.store.FreeAccountCredential(accountID)
+	if err != nil {
+		return "", err
+	}
 	for _, a := range admins {
+		if err := s.checkUnusedTeam(account, a.TeamAccountID); err != nil {
+			continue
+		}
+		if activeTeamMembership(account) && account.TeamAccountID != a.TeamAccountID {
+			continue
+		}
 		v, _ := s.autoAdminLocks.LoadOrStore(a.ID, &sync.Mutex{})
 		lock := v.(*sync.Mutex)
 		lock.Lock()
@@ -509,7 +572,7 @@ func (s *Server) selectPremiumAdmin(ctx context.Context, admins []model.AdminAcc
 		}
 		lock.Unlock()
 	}
-	return "", errors.New("没有可分配的 5x 席位")
+	return "", errors.New("没有尚未使用且有空闲 5x 席位的母号，等待可用母号")
 }
 
 func (s *Server) premiumUsageForAdmin(adminID string, accounts []model.FreeAccountProfile) (inside, inFlight int) {
@@ -519,7 +582,7 @@ func (s *Server) premiumUsageForAdmin(adminID string, accounts []model.FreeAccou
 
 func (s *Server) premiumUsageForAdminWithTasks(adminID string, accounts []model.FreeAccountProfile, tasks []model.AutoRotationTask) (inside, inFlight int) {
 	for _, account := range accounts {
-		if account.AdminAccountID != adminID || !isPremiumSeatType(account.SeatType) || account.RemoveStatus == "completed" {
+		if account.AdminAccountID != adminID || !isPremiumSeatType(account.SeatType) || account.RemoveStatus == "completed" || account.RemoteRemovedAt != nil {
 			continue
 		}
 		if account.AcceptStatus == "completed" {
@@ -562,24 +625,32 @@ func pendingAutoInviteCountForAdmin(tasks []model.AutoRotationTask, accounts []m
 		byID[account.ID] = account
 	}
 	count := 0
+	counted := map[string]bool{}
+	for _, a := range accounts {
+		if a.AdminAccountID == adminID && isPremiumSeatType(a.SeatType) && a.AcceptStatus != "completed" && a.RemoveStatus != "completed" && a.RemoteRemovedAt == nil && (a.InviteStatus == "running" || a.InviteStatus == "completed") {
+			count++
+			counted[a.ID] = true
+		}
+	}
 	for _, task := range tasks {
 		if task.AdminAccountID != adminID || task.SeatType != "prolite" || (task.Status != "queued" && task.Status != "running") {
 			continue
 		}
 		account, ok := byID[task.AccountID]
-		if !ok {
+		if !ok || counted[task.AccountID] || (task.CycleID != "" && task.CycleID != account.CycleID) {
 			continue
 		}
 		if account.AcceptStatus == "completed" || account.RemoveStatus == "completed" {
 			continue
 		}
 		count++
+		counted[task.AccountID] = true
 	}
 	return count
 }
 
 func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTask, run *model.AutoRotationRun, runMu *sync.Mutex, settings model.AutoRotationSettings) {
-	taskCtx := context.WithValue(ctx, autoRotationTraceContextKey{}, autoRotationTraceContext{RunID: task.RunID, TaskID: task.ID})
+	taskCtx := context.WithValue(ctx, autoRotationTraceContextKey{}, autoRotationTraceContext{RunID: task.RunID, TaskID: task.ID, CycleID: task.CycleID})
 	provider := "sub2"
 	if subSettings, _, settingsErr := s.store.Sub2Settings(); settingsErr == nil {
 		provider = providerForSettings(subSettings)
@@ -607,6 +678,9 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 	attemptStep := func(fn func() error) error {
 		var err error
 		for attempt := 0; attempt <= settings.RetryCount; attempt++ {
+			if p, _, e := s.store.FreeAccountCredential(task.AccountID); e != nil || (task.CycleID != "" && p.CycleID != task.CycleID) {
+				return store.ErrStaleCycle
+			}
 			if attempt > 0 {
 				task.RetryCount++
 				_ = s.store.UpdateAutoRotationTask(task)
@@ -714,6 +788,9 @@ func (s *Server) cleanupFailedAutoTask(ctx context.Context, task *model.AutoRota
 	if err != nil {
 		return
 	}
+	if task.CycleID != "" && task.CycleID != profile.CycleID {
+		return
+	}
 	now := time.Now()
 	task.CompletedAt = &now
 	task.Status = "failed"
@@ -752,6 +829,7 @@ func (s *Server) cleanupFailedAutoTask(ctx context.Context, task *model.AutoRota
 		Message: "自动轮转重试耗尽，开始自动移出空间", Details: map[string]any{"failed_stage": failedStage, "error": cause.Error()},
 	})
 
+	_, _ = s.store.UpdateFreeAccountCycle(profile.ID, profile.CycleID, func(item *model.FreeAccountProfile) { item.RemovalReason = failedStage + ": " + cause.Error() })
 	_, removeErr := s.performFreeAccountRemove(ctx, task.AccountID)
 	completedAt := time.Now()
 	task.CompletedAt = &completedAt

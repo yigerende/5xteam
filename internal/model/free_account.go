@@ -40,13 +40,20 @@ type FreeQuotaWindow struct {
 // FreeAccountProfile is the durable, non-secret projection of one account in
 // the Free -> Team -> Codex OAuth -> Sub2 lifecycle.
 type FreeAccountProfile struct {
-	ID                string `json:"id"`
-	Label             string `json:"label"`
-	Email             string `json:"email"`
-	Name              string `json:"name"`
-	UserID            string `json:"user_id"`
-	PersonalAccountID string `json:"personal_account_id"`
-	PlanType          string `json:"plan_type"`
+	CycleID           string     `json:"cycle_id"`
+	VisitedTeamCount  int        `json:"visited_team_count"`
+	HistoryUncertain  bool       `json:"history_uncertain,omitempty"`
+	ReusePending      bool       `json:"reuse_pending,omitempty"`
+	RemoteRemovedAt   *time.Time `json:"remote_removed_at,omitempty"`
+	RemovalReason     string     `json:"removal_reason,omitempty"`
+	DownstreamCleaned bool       `json:"downstream_cleaned,omitempty"`
+	ID                string     `json:"id"`
+	Label             string     `json:"label"`
+	Email             string     `json:"email"`
+	Name              string     `json:"name"`
+	UserID            string     `json:"user_id"`
+	PersonalAccountID string     `json:"personal_account_id"`
+	PlanType          string     `json:"plan_type"`
 	// ImportMode identifies records received from an integration that must not
 	// be treated as queued Team-rotation work.
 	ImportMode                 string             `json:"import_mode,omitempty"`

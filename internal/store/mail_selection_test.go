@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -184,6 +185,106 @@ func TestMailAccountSelectionAllConditionCombinations(t *testing.T) {
 	}
 	if _, err := s.SelectOutsideMailAccounts(MailAccountSelection{ATStatus: "bad"}); err == nil {
 		t.Fatal("invalid condition was accepted")
+	}
+}
+
+func TestMailAccountSelectionDeadConditionIncludesDeadAcrossWorkspaceStates(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now()
+	fixtures := []struct {
+		email  string
+		dead   bool
+		inside bool
+	}{
+		{email: "dead-mail@example.com", dead: true},
+		{email: "dead-pipeline@example.com", inside: true},
+		{email: "live-outside@example.com"},
+		{email: "live-inside@example.com", inside: true},
+	}
+	for _, fixture := range fixtures {
+		profile := model.MailAccountProfile{Email: fixture.email, ChatGPTStatus: ""}
+		if fixture.email == "dead-mail@example.com" {
+			profile.ChatGPTStatus = "dead"
+		}
+		if _, err := s.SaveMailAccount(profile, model.MailAccountCredentials{Email: fixture.email, AccessToken: "fixture-at"}); err != nil {
+			t.Fatal(err)
+		}
+		p, _, err := s.SaveImportedFreeAccount(model.FreeAccountProfile{Email: fixture.email, UserID: fixture.email}, "fixture-at")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fixture.inside || fixture.dead {
+			if _, err := s.UpdateFreeAccount(p.ID, func(item *model.FreeAccountProfile) {
+				item.InviteStatus, item.AcceptStatus = "completed", "completed"
+				item.TeamAccountID = "team-" + fixture.email
+				if fixture.inside {
+					item.RemovedAt = &now
+					item.RemoveStatus = "completed"
+				}
+				if fixture.email == "dead-pipeline@example.com" {
+					item.Dead = true
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	dead, err := s.SelectOutsideMailAccounts(MailAccountSelection{RequireDead: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadSet := map[string]bool{}
+	for _, email := range dead {
+		deadSet[email] = true
+	}
+	if len(dead) != 2 || !deadSet["dead-mail@example.com"] || !deadSet["dead-pipeline@example.com"] {
+		t.Fatalf("dead selection=%v", dead)
+	}
+	live, err := s.SelectOutsideMailAccounts(MailAccountSelection{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 1 || live[0] != "live-outside@example.com" {
+		t.Fatalf("default selection changed unexpectedly: %v", live)
+	}
+}
+
+func TestMailAccountSelectionDeadConcurrentReadsAreConsistent(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i := 0; i < 40; i++ {
+		email := fmt.Sprintf("concurrent-dead-%02d@example.com", i)
+		if _, err := s.SaveMailAccount(model.MailAccountProfile{Email: email, ChatGPTStatus: "dead"}, model.MailAccountCredentials{Email: email}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	results := make(chan int, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			items, readErr := s.SelectOutsideMailAccounts(MailAccountSelection{RequireDead: true})
+			if readErr != nil {
+				t.Errorf("concurrent selection failed: %v", readErr)
+				return
+			}
+			results <- len(items)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for count := range results {
+		if count != 40 {
+			t.Fatalf("concurrent dead selection returned %d, want 40", count)
+		}
 	}
 }
 

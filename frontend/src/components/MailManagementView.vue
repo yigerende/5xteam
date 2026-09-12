@@ -46,6 +46,7 @@ import IconButton from "./IconButton.vue";
 import MessageBar from "./MessageBar.vue";
 import StatusPill from "./StatusPill.vue";
 import Pagination from "./Pagination.vue";
+import TeamVisitCount from "./TeamVisitCount.vue";
 
 const emit = defineEmits(["open-team", "pro-changed"]);
 const props = defineProps({ defaultPageSize: { type: Number, default: 10 } });
@@ -137,7 +138,7 @@ const accountTotal = ref(0);
 const selectedEmails = ref(new Set());
 const selectionOpen = ref(false);
 const selectionError = ref("");
-const selectionConditions = reactive({ at_status: "invalid", require_rt: false, require_password: false, require_totp: false });
+const selectionConditions = reactive({ at_status: "invalid", require_rt: false, require_password: false, require_totp: false, require_dead: false });
 const textExportDialog = reactive({ open: false, emails: [], includeAT: false, includeRT: false, error: "" });
 const exportProgress = reactive({ open: false, label: "", stage: "processing", total: 0, processed: 0, received: 0, size: 0, error: "", summary: "" });
 const exportProgressPercent = computed(() => exportProgress.total ? Math.floor(exportProgress.processed * 100 / exportProgress.total) : 0);
@@ -325,7 +326,7 @@ function mailSpaceStatus(account) {
   if (pipeline?.accept_status === "completed") return "inside";
   return "outside";
 }
-const spaceFilterCounts = reactive({ outside: 0, inside: 0, removed: 0 });
+const spaceFilterCounts = reactive({ outside: 0, inside: 0, removed: 0, dead: 0 });
 let accountSearchTimer;
 function isInTeamPipeline(account) {
   return !!pipelineFor(account);
@@ -360,7 +361,7 @@ function openSelection() {
   selectionOpen.value = true;
 }
 function resetSelectionConditions() {
-  Object.assign(selectionConditions, { at_status: "", require_rt: false, require_password: false, require_totp: false });
+  Object.assign(selectionConditions, { at_status: "", require_rt: false, require_password: false, require_totp: false, require_dead: false });
 }
 async function selectMatchingAccounts(scope) {
   busy.value = "select-accounts";
@@ -1456,7 +1457,8 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
         <div class="space-filter-tabs" role="tablist" aria-label="空间状态筛选">
           <button type="button" :class="{ active: spaceFilter === 'outside' }" @click="setSpaceFilter('outside')">未进入空间 <span>{{ spaceFilterCounts.outside }}</span></button>
           <button type="button" :class="{ active: spaceFilter === 'inside' }" @click="setSpaceFilter('inside')">在空间里面 <span>{{ spaceFilterCounts.inside }}</span></button>
-          <button type="button" :class="{ active: spaceFilter === 'removed' }" @click="setSpaceFilter('removed')">已移出空间 <span>{{ spaceFilterCounts.removed }}</span></button>
+          <button type="button" :class="{ active: spaceFilter === 'removed' }" @click="setSpaceFilter('removed')">已使用过 <span>{{ spaceFilterCounts.removed }}</span></button>
+          <button type="button" :class="{ active: spaceFilter === 'dead' }" @click="setSpaceFilter('dead')">死号 <span>{{ spaceFilterCounts.dead }}</span></button>
         </div>
         <div class="mail-method-summary">
           <span v-if="selectedAccounts.length">已选 {{ selectedAccounts.length }}</span>
@@ -1481,12 +1483,13 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                 <th>ChatGPT</th>
                 <th>母号空间</th>
                 <th>完整状态</th>
+                <th>进入母号数</th>
                 <th class="actions-column">操作</th>
               </tr>
             </thead>
             <tbody>
                         <tr v-if="!pagedFilteredAccounts.length">
-                <td colspan="9" class="empty-cell">暂无邮件账号</td>
+                <td colspan="10" class="empty-cell">暂无邮件账号</td>
               </tr>
               <tr
                 v-for="account in pagedFilteredAccounts"
@@ -1601,6 +1604,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                   </div>
                   <small v-else class="table-note">尚无轮转记录</small>
                 </td>
+                <td><TeamVisitCount :email="account.email" :count="account.visited_team_count" :uncertain="account.history_uncertain" :mask="maskSensitive" /></td>
                 <td class="actions-cell">
                   <div class="row-actions">
                     <button
@@ -1832,6 +1836,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             <label class="mail-option-check"><input v-model="selectionConditions.require_rt" type="checkbox" />有 RT</label>
             <label class="mail-option-check"><input v-model="selectionConditions.require_password" type="checkbox" />有 ChatGPT 密码</label>
             <label class="mail-option-check"><input v-model="selectionConditions.require_totp" type="checkbox" />有 2FA</label>
+            <label class="mail-option-check"><input v-model="selectionConditions.require_dead" type="checkbox" />死号</label>
           </fieldset>
           <p v-if="selectionError" class="danger-text" role="alert">{{ selectionError }}</p>
           <footer class="panel-actions mail-options-actions">
@@ -2561,6 +2566,10 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .mail-account-table th:nth-child(9),
 .mail-account-table td:nth-child(9) {
+  width: 90px;
+}
+.mail-account-table th:nth-child(10),
+.mail-account-table td:nth-child(10) {
   width: 280px;
 }
 .copy-account-trigger { cursor: pointer; }
