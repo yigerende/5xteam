@@ -138,7 +138,7 @@ const accountTotal = ref(0);
 const selectedEmails = ref(new Set());
 const selectionOpen = ref(false);
 const selectionError = ref("");
-const selectionConditions = reactive({ at_status: "invalid", require_rt: false, require_password: false, require_totp: false, require_dead: false });
+const selectionConditions = reactive({ at_status: "invalid", require_rt: false, require_password: false, require_totp: false, require_dead: false, include_used: true });
 const textExportDialog = reactive({ open: false, emails: [], includeAT: false, includeRT: false, error: "" });
 const exportProgress = reactive({ open: false, label: "", stage: "processing", total: 0, processed: 0, received: 0, size: 0, error: "", summary: "" });
 const exportProgressPercent = computed(() => exportProgress.total ? Math.floor(exportProgress.processed * 100 / exportProgress.total) : 0);
@@ -368,7 +368,7 @@ function openSelection() {
   selectionOpen.value = true;
 }
 function resetSelectionConditions() {
-  Object.assign(selectionConditions, { at_status: "", require_rt: false, require_password: false, require_totp: false, require_dead: false });
+  Object.assign(selectionConditions, { at_status: "", require_rt: false, require_password: false, require_totp: false, require_dead: false, include_used: true });
 }
 async function selectMatchingAccounts(scope) {
   busy.value = "select-accounts";
@@ -380,8 +380,8 @@ async function selectMatchingAccounts(scope) {
     });
     selectedEmails.value = new Set((result.emails || []).map((email) => accountEmailKey({ email })).filter(Boolean));
     setMessage(selectedEmails.value.size
-      ? `已选中 ${selectedEmails.value.size} 个符合条件的未进入空间账号（${scope === 'page' ? '本页' : '全部分页'}）`
-      : "没有符合条件的未进入空间账号", "success");
+      ? `已选中 ${selectedEmails.value.size} 个符合条件的账号（${scope === 'page' ? '本页' : '全部分页'}）`
+      : "没有符合条件的账号", "success");
     selectionOpen.value = false;
   } catch (error) {
     selectionError.value = error.message;
@@ -1837,9 +1837,10 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
       <div v-if="selectionOpen" class="modal-backdrop mail-options-backdrop" @click.self="!busy && (selectionOpen = false)" @keydown.esc="!busy && (selectionOpen = false)">
         <section class="modal mail-options-dialog" role="dialog" aria-modal="true" aria-labelledby="mail-selection-title">
           <header><h2 id="mail-selection-title">条件选择</h2><IconButton label="关闭条件选择" :disabled="!!busy" @click="selectionOpen = false"><X :size="16" /></IconButton></header>
-          <div class="mail-options-scope"><span>账号范围</span><strong>未进入空间</strong></div>
+          <div class="mail-options-scope"><span>账号范围</span><strong>未进入、在空间、已使用过（不含死号）</strong></div>
           <fieldset :disabled="!!busy" class="mail-options-fields">
             <label class="field"><span>ChatGPT / AT 状态</span><select v-model="selectionConditions.at_status"><option value="">不限</option><option value="invalid">AT 无效</option><option value="valid">AT 有效</option><option value="not_logged_in">ChatGPT 未登录</option></select></label>
+            <label class="mail-option-check"><input v-model="selectionConditions.include_used" type="checkbox" />包括已使用过账号</label>
             <label class="mail-option-check"><input v-model="selectionConditions.require_rt" type="checkbox" />有 RT</label>
             <label class="mail-option-check"><input v-model="selectionConditions.require_password" type="checkbox" />有 ChatGPT 密码</label>
             <label class="mail-option-check"><input v-model="selectionConditions.require_totp" type="checkbox" />有 2FA</label>

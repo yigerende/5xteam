@@ -97,6 +97,7 @@ type MailAccountSelection struct {
 	RequirePassword bool     `json:"require_password"`
 	RequireTOTP     bool     `json:"require_totp"`
 	RequireDead     bool     `json:"require_dead"`
+	IncludeUsed     bool     `json:"include_used"`
 	Emails          []string `json:"-"`
 }
 
@@ -118,7 +119,10 @@ func (s *Store) SelectOutsideMailAccounts(filter MailAccountSelection) ([]string
 			OR COALESCE(json_extract(profile,'$.registration_status'),'')='dead'
 			OR COALESCE(json_extract(pipeline_profile,'$.dead'),0)=1)`
 	} else {
-		query += ` AND space_state='outside'
+		if !filter.IncludeUsed {
+			query += ` AND space_state='outside'`
+		}
+		query += `
 			AND COALESCE(json_extract(profile,'$.chatgpt_status'),'')!='dead'
 			AND COALESCE(json_extract(profile,'$.registration_status'),'')!='dead'
 			AND COALESCE(json_extract(pipeline_profile,'$.dead'),0)=0`

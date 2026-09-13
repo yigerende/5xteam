@@ -463,6 +463,17 @@ func (s *Server) runLocalLogin(id, email string) {
 			return
 		}
 	}
+	// A successful protocol login proves that the newly returned AT is usable.
+	// Persist that result as the mailbox AT status so a previous failed check
+	// cannot leave the list showing "AT 无效" after a successful refresh.
+	if _, statusErr := s.store.UpdateMailAccountATStatus(email, time.Now(), true, http.StatusOK, "临时 AT 获取成功"); statusErr != nil {
+		// The credential was already persisted; do not turn a status projection
+		// failure into a false login failure.
+		s.appendRegistrationDiagnostic(id, protocolOAuthDiagnostic{
+			Stage: "mail_account_status", Event: "status_update_failed", Level: "warning",
+			Message: "临时 AT 已保存，但 AT 状态更新失败：" + statusErr.Error(),
+		})
+	}
 	message := "临时 AT 获取成功并已保存"
 	if retries, ok := result["rate_limit_retries"].(float64); ok && retries > 0 {
 		message = fmt.Sprintf("临时 AT 重试 %.0f 次后获取成功并已保存", retries)

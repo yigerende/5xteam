@@ -964,10 +964,32 @@ func (s *Server) mailAccountLoginStatus(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) mailAccountToTeam(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
+	if !strings.Contains(email, "@") {
+		writeAPI(w, http.StatusBadRequest, nil, "邮箱地址无效")
+		return
+	}
+	// Serialize the mailbox entry point so two clicks cannot both import or
+	// prepare the same reused Team-rotation record at the same time.
+	unlockMailTeam := s.lockFreeAccount("mail-team:" + email)
+	defer unlockMailTeam()
 	profile, err := s.importMailAccountToTeam(r.Context(), email)
 	if err != nil {
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
+	}
+	if profile.RemoveStatus == "completed" {
+		// A removed, non-dead account must start a fresh lifecycle cycle before
+		// it can appear under the Team list's waiting-to-enter state. Reuse the
+		// exact preparation path used by automatic rotation, including the
+		// multi-mother setting, old downstream cleanup, and source-AT check.
+		unlockAccount := s.lockFreeAccount(profile.ID)
+		profile, err = s.prepareAccountReuse(r.Context(), profile)
+		unlockAccount()
+		if err != nil {
+			writeAPI(w, http.StatusConflict, nil, err.Error())
+			return
+		}
+		_, _ = s.store.EnsureFreeAccountLifecycleTask(profile)
 	}
 	writeAPI(w, http.StatusOK, profile, "")
 }

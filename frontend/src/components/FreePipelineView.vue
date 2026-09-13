@@ -886,7 +886,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
         </div>
       </div>
       <div class="space-filter-tabs" role="tablist" aria-label="空间状态筛选">
-        <button type="button" :class="{ active: teamSpaceFilter === 'outside' }" @click="setTeamSpaceFilter('outside')">未进入空间 <span>{{ accountSummary.outside }}</span></button>
+        <button type="button" :class="{ active: teamSpaceFilter === 'outside' }" @click="setTeamSpaceFilter('outside')">等待进入空间 <span>{{ accountSummary.outside }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'inside' }" @click="setTeamSpaceFilter('inside')">在空间里面 <span>{{ accountSummary.inside }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'removed' }" @click="setTeamSpaceFilter('removed')">已使用过 <span>{{ accountSummary.removed }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'dead' }" @click="setTeamSpaceFilter('dead')">死号 <span>{{ accountSummary.dead || 0 }}</span></button>
