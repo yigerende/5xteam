@@ -1329,7 +1329,15 @@ func buildCPAAuthPayloadNamed(profile model.FreeAccountProfile, credentials stor
 }
 
 func buildSub2OAuthCredentials(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials) map[string]any {
-	return map[string]any{
+	return buildSub2OAuthCredentialsWithModels(profile, credentials, nil)
+}
+
+// buildSub2OAuthCredentialsWithModels mirrors the credentials payload created
+// during the initial Sub2 push. The in-place OAuth endpoint replaces the
+// credentials object, so model_mapping must be sent again during relogin or
+// the account loses its configured model availability.
+func buildSub2OAuthCredentialsWithModels(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials, models []string) map[string]any {
+	result := map[string]any{
 		"access_token":       credentials.OAuthAccessToken,
 		"refresh_token":      credentials.OAuthRefreshToken,
 		"chatgpt_account_id": profile.OAuthAccountID,
@@ -1337,6 +1345,17 @@ func buildSub2OAuthCredentials(profile model.FreeAccountProfile, credentials sto
 		"plan_type":          downstreamProlitePlanType,
 		"chatgpt_plan_type":  downstreamProlitePlanType,
 	}
+	mapping := make(map[string]string, len(models))
+	for _, modelName := range models {
+		modelName = strings.TrimSpace(modelName)
+		if modelName != "" {
+			mapping[modelName] = modelName
+		}
+	}
+	if len(mapping) > 0 {
+		result["model_mapping"] = mapping
+	}
+	return result
 }
 
 func (s *Server) checkFreeAccountQuota(w http.ResponseWriter, r *http.Request) {
@@ -1838,7 +1857,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	name += "--" + beijingNow().Format("15:04") + "-重登"
 	// Sub2 supports in-place OAuth reauthorization. Keep the original account
 	// ID and let Sub2 clear its error state/invalidate its token cache.
-	if _, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentials(profile, credentials)); err != nil {
+	if _, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentialsWithModels(profile, credentials, settings.Models)); err != nil {
 		return err
 	}
 	if _, err := s.sub2.RestoreScheduling(ctx, settings, password, oldAccountID); err != nil {
