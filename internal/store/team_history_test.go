@@ -123,6 +123,15 @@ func TestTeamHistoryEntryIsPermanentIdempotentAndCycleIsolated(t *testing.T) {
 	if used, err := s.HasVisitedTeam(next, "team-two"); err != nil || used {
 		t.Fatal("new mother incorrectly blocked")
 	}
+	// A reused account keeps its lifetime visit history, but the new cycle
+	// must appear in Team rotation as waiting to enter until it joins again.
+	items, total, summary, err := s.FreeAccountsPage("outside", 10, 0)
+	if err != nil || total != 1 || len(items) != 1 || items[0].ID != next.ID || summary.Outside != 1 {
+		t.Fatalf("reused cycle was not classified as waiting: total=%d items=%v summary=%+v err=%v", total, len(items), summary, err)
+	}
+	if _, removedTotal, _, err := s.FreeAccountsPage("removed", 10, 0); err != nil || removedTotal != 0 {
+		t.Fatalf("reused cycle remained in removed state: total=%d err=%v", removedTotal, err)
+	}
 	if err = s.PurgeAutoRotationHistory(time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}

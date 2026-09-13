@@ -80,6 +80,15 @@ const importProgress = reactive({ total: 0, processed: 0, imported: 0, updated: 
 const importProgressPercent = computed(() => importProgress.total ? Math.round((importProgress.processed / importProgress.total) * 100) : 0);
 const message = reactive({ text: "", type: "" });
 const busy = ref("");
+const teamReuseProgress = reactive({
+  open: false,
+  email: "",
+  stage: "",
+  status: "running",
+  error: "",
+  elapsed: 0,
+});
+let teamReuseTimer;
 const fetchJob = ref(null);
 const loginJobs = reactive({});
 const loginLogList = ref(null);
@@ -1296,22 +1305,54 @@ function confirmLogin() {
 }
 
 async function openTeam(account) {
+  const existingPipeline = pipelineFor(account);
+  const reused = existingPipeline?.remove_status === 'completed';
   busy.value = account.email;
+  Object.assign(teamReuseProgress, {
+    open: true,
+    email: account.email,
+    stage: reused ? "正在准备下一轮轮转" : "正在加入 Team 轮转",
+    status: "running",
+    error: "",
+    elapsed: 0,
+  });
+  window.clearInterval(teamReuseTimer);
+  const startedAt = Date.now();
+  teamReuseTimer = window.setInterval(() => {
+    teamReuseProgress.elapsed = Math.floor((Date.now() - startedAt) / 1000);
+    if (teamReuseProgress.status !== "running") window.clearInterval(teamReuseTimer);
+  }, 1000);
   try {
+    if (reused) {
+      teamReuseProgress.stage = "正在检查源 AT，有效后创建新轮次";
+    }
     const profile = await api(
       `/api/mail/accounts/${encodeURIComponent(account.email)}/team`,
       { method: "POST", body: {} },
     );
-    const reused = pipelineFor(account)?.remove_status === 'completed';
+    teamReuseProgress.status = "success";
+    teamReuseProgress.stage = reused
+      ? "新轮次已创建，已进入等待进入空间"
+      : "已加入 Team 轮转，等待后续流程";
     setMessage(reused ? `${account.email} 已开放下一轮 Team 轮转入口` : `${account.email} 已加入 Team 轮转`, "success");
     // Keep the user on Mail Management. Refresh the local pipeline projection
     // so this button immediately becomes disabled and shows 已进轮转.
     await loadAccounts();
   } catch (error) {
+    teamReuseProgress.status = "failed";
+    teamReuseProgress.stage = "再次轮转失败";
+    teamReuseProgress.error = error.message;
     setMessage(error.message, "error");
   } finally {
+    window.clearInterval(teamReuseTimer);
     busy.value = "";
   }
+}
+
+function closeTeamReuseProgress() {
+  if (busy.value) return;
+  teamReuseProgress.open = false;
+  window.clearInterval(teamReuseTimer);
 }
 
 async function moveToPro(account) {
@@ -1359,6 +1400,7 @@ onBeforeUnmount(() => exportController?.abort());
 onBeforeUnmount(() => { credentialRequestID++; resetTotpCode(); });
 onBeforeUnmount(() => window.clearTimeout(accountSearchTimer));
 onBeforeUnmount(() => window.clearTimeout(actionMenuCloseTimer));
+onBeforeUnmount(() => window.clearInterval(teamReuseTimer));
 onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 </script>
 
@@ -1821,6 +1863,35 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
     </template>
 
     <Teleport to="body">
+      <div v-if="teamReuseProgress.open" class="modal-backdrop mail-options-backdrop" @click.self="closeTeamReuseProgress" @keydown.esc="closeTeamReuseProgress">
+        <section class="modal mail-options-dialog" role="dialog" aria-modal="true" aria-labelledby="team-reuse-progress-title" aria-live="polite">
+          <header>
+            <div>
+              <span class="overline">TEAM ROTATION</span>
+              <h2 id="team-reuse-progress-title">再次轮转</h2>
+            </div>
+            <IconButton label="关闭再次轮转进度" :disabled="!!busy" @click="closeTeamReuseProgress"><X :size="16" /></IconButton>
+          </header>
+          <div class="mail-options-scope"><span>账号</span><strong>{{ teamReuseProgress.email }}</strong></div>
+          <div class="mail-import-progress" :class="{ 'reuse-progress-failed': teamReuseProgress.status === 'failed' }">
+            <div class="mail-import-progress-heading">
+              <span>{{ teamReuseProgress.stage }}</span>
+              <strong>{{ teamReuseProgress.elapsed }}s</strong>
+            </div>
+            <div class="mail-import-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-label="teamReuseProgress.stage">
+              <i :class="{ danger: teamReuseProgress.status === 'failed', success: teamReuseProgress.status === 'success', indeterminate: teamReuseProgress.status === 'running' }" :style="teamReuseProgress.status === 'running' ? {} : { width: '100%' }"></i>
+            </div>
+            <div class="mail-import-progress-stats">
+              <span v-if="teamReuseProgress.status === 'running'">服务端正在处理，若源 AT 失效会自动重新获取临时 AT</span>
+              <span v-else-if="teamReuseProgress.status === 'success'">请到 Team 轮转查看“等待进入空间”状态</span>
+              <span v-else class="danger-text">{{ teamReuseProgress.error }}</span>
+            </div>
+          </div>
+          <footer class="panel-actions mail-options-actions">
+            <button class="btn ghost" type="button" :disabled="!!busy" @click="closeTeamReuseProgress">{{ teamReuseProgress.status === 'running' ? '后台处理' : '关闭' }}</button>
+          </footer>
+        </section>
+      </div>
       <div v-if="exportProgress.open" class="modal-backdrop mail-options-backdrop" @click.self="!busy && (exportProgress.open = false)" @keydown.esc="!busy && (exportProgress.open = false)">
         <section class="modal mail-options-dialog" role="dialog" aria-modal="true" aria-labelledby="mail-export-progress-title" aria-live="polite">
           <header><h2 id="mail-export-progress-title">{{ exportProgress.label }}导出</h2><IconButton label="关闭导出进度" :disabled="!!busy" @click="exportProgress.open = false"><X :size="16" /></IconButton></header>
@@ -2843,6 +2914,21 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 }
 .mail-import-progress-track i.danger {
   background: var(--red);
+}
+.mail-import-progress-track i.success {
+  background: var(--green);
+}
+.mail-import-progress-track i.indeterminate {
+  width: 42%;
+  animation: mail-progress-indeterminate 1.25s ease-in-out infinite;
+}
+.reuse-progress-failed .mail-import-progress-track {
+  background: var(--red-bg);
+}
+@keyframes mail-progress-indeterminate {
+  0% { transform: translateX(-115%); }
+  50% { transform: translateX(120%); }
+  100% { transform: translateX(250%); }
 }
 .login-confirm-dialog {
   width: min(500px, 100%);

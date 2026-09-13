@@ -293,6 +293,7 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 		SELECT id, profile,
 			CASE WHEN json_extract(profile,'$.dead')=1 OR COALESCE(md.dead,0)=1 THEN 'dead'
 			WHEN json_extract(profile,'$.remove_status')='completed' OR json_extract(profile,'$.remote_removed_at') IS NOT NULL THEN 'removed' WHEN json_extract(profile,'$.accept_status')='completed' THEN 'inside'
+			WHEN COALESCE(json_extract(profile,'$.reuse_pending'),0)=1 THEN 'outside'
 			WHEN COALESCE(json_extract(profile,'$.visited_team_count'),0)>0 THEN 'removed' ELSE 'outside' END AS space_state,
 			COALESCE(
 				julianday(NULLIF(json_extract(profile,'$.imported_at'),'0001-01-01T00:00:00Z')),
