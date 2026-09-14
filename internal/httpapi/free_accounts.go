@@ -2124,6 +2124,11 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 // cycle started. Only a profile without a valid method (legacy/new record)
 // inherits the current global setting.
 func removalMethodForCycle(profile model.FreeAccountProfile, settings model.AutoRotationSettings) string {
+	// A dead child account can no longer authenticate with its own AT. Always
+	// remove it through the mother account, regardless of the cycle setting.
+	if profile.Dead {
+		return "mother_kick"
+	}
 	if profile.RemoveMethod == "mother_kick" || profile.RemoveMethod == "child_leave" {
 		return profile.RemoveMethod
 	}

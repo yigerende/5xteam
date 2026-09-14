@@ -109,6 +109,9 @@ func TestAutoRotationStepsFollowJoinMethod(t *testing.T) {
 func TestRemovalMethodStaysPinnedToActiveCycle(t *testing.T) {
 	settings := model.DefaultAutoRotationSettings()
 	settings.RemoveMethod = "child_leave"
+	if got := removalMethodForCycle(model.FreeAccountProfile{Dead: true, RemoveMethod: "child_leave"}, settings); got != "mother_kick" {
+		t.Fatalf("dead account must always use mother kick, got %q", got)
+	}
 	if got := removalMethodForCycle(model.FreeAccountProfile{RemoveMethod: "mother_kick"}, settings); got != "mother_kick" {
 		t.Fatalf("active cycle method changed after settings switch: %q", got)
 	}
