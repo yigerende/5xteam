@@ -12,6 +12,9 @@ const props = defineProps({ accounts: { type: Array, default: () => [] }, proxie
 const emit = defineEmits(['reload'])
 const form = reactive({ id: '', label: '', session: '', refreshToken: '', teamID: '' })
 const parsed = reactive({ accessToken: '', refreshToken: '', preview: null })
+watch(() => form.session, () => {
+  Object.assign(parsed, { accessToken: '', refreshToken: '', preview: null })
+}, { flush: 'sync' })
 const tests = ref(new Map())
 const message = reactive({ text: '', type: '' })
 const busy = ref(false)
@@ -142,7 +145,7 @@ function parseSession() {
       email: session?.user?.email || profile.email || '未知账号',
       plan: session?.account?.planType || auth.chatgpt_plan_type || '未知计划',
       accountID,
-      expires: session?.expires || (claims.exp ? new Date(claims.exp * 1000).toISOString() : ''),
+      expires: typeof claims.exp === 'number' && claims.exp > 0 ? new Date(claims.exp * 1000).toISOString() : '',
     }
     setMessage(`凭据解析成功${refreshToken ? '，已读取 Refresh Token' : '，未找到 Refresh Token'}`, 'success')
   } catch (error) {
@@ -175,7 +178,7 @@ function edit(account) {
 
 async function save() {
   if (!form.label.trim() || (!form.id && !form.session.trim())) return setMessage('母号名称和 Access Token 不能为空', 'error')
-  if (!parsed.accessToken && (form.session.trim().startsWith('{') || form.session.trim().startsWith('['))) {
+  if (form.session.trim()) {
     parseSession()
     if (!parsed.accessToken) return
   }
@@ -195,7 +198,7 @@ async function save() {
 
 async function test(account = null) {
   const useSaved = Boolean(account)
-  if (!useSaved && !parsed.accessToken && form.session.trim()) parseSession()
+  if (!useSaved && form.session.trim()) parseSession()
   const payload = { id: useSaved ? account.id : '', access_token: useSaved ? '' : parsed.accessToken, team_account_id: useSaved ? '' : form.teamID.trim() }
   if (!payload.id && !payload.access_token) return setMessage('请先解析 Access Token', 'error')
   busy.value = true
@@ -269,7 +272,7 @@ onMounted(async () => {
         <div class="field-row"><label class="field"><span>Refresh Token <small>可选</small></span><input v-model="form.refreshToken" type="password" autocomplete="off" /></label><label class="field"><span>团队 Account ID <small>可自动读取</small></span><input v-model="form.teamID" placeholder="account-..." /></label></div>
         <input ref="fileInput" hidden type="file" accept=".json,application/json" @change="importFile" />
         <div class="compact-actions"><button class="btn ghost" type="button" @click="fileInput.click()"><FileJson :size="15" />导入 JSON</button><button class="btn ghost" type="button" @click="parseSession"><CheckCircle2 :size="15" />解析凭据</button><button class="btn ghost" type="button" :disabled="busy" @click="test()"><CheckCircle2 :size="15" />校验</button></div>
-        <div class="parse-preview" :class="{ empty: !parsed.preview }"><template v-if="parsed.preview"><strong>{{ parsed.preview.email }}</strong><span>{{ parsed.preview.plan || '-' }}</span><span>{{ shortID(parsed.preview.accountID) }}</span><small>{{ parsed.preview.saved ? '已保存加密凭据' : (parsed.preview.expires ? `到期 ${formatTime(parsed.preview.expires)}` : '未提供到期时间') }}</small></template><span v-else>解析后的账号信息会显示在这里</span></div>
+        <div class="parse-preview" :class="{ empty: !parsed.preview }"><template v-if="parsed.preview"><strong>{{ parsed.preview.email }}</strong><span>{{ parsed.preview.plan || '-' }}</span><span>{{ shortID(parsed.preview.accountID) }}</span><small>{{ parsed.preview.saved ? '已保存加密凭据' : (parsed.preview.expires ? `AT 到期 ${formatTime(parsed.preview.expires)}` : 'AT 未提供到期时间') }}</small></template><span v-else>解析后的账号信息会显示在这里</span></div>
         <MessageBar :message="message" />
         <div class="panel-actions"><button class="btn primary" type="submit" :disabled="busy"><Save :size="15" />{{ form.id ? '保存修改' : '保存母号' }}</button></div>
       </form>
