@@ -30,6 +30,11 @@ type FreeAccountsPageSummary struct {
 	Quota7DCount          int                       `json:"quota_7d_count"`
 	OldestStatusCheckedAt string                    `json:"oldest_status_checked_at,omitempty"`
 	OldestQuotaCheckedAt  string                    `json:"oldest_quota_checked_at,omitempty"`
+	StatusUnchecked       int                       `json:"status_unchecked"`
+	QuotaUnchecked        int                       `json:"quota_unchecked"`
+	ServerNow             string                    `json:"server_now,omitempty"`
+	NextStatusCheckAt     string                    `json:"next_status_check_at,omitempty"`
+	NextQuotaCheckAt      string                    `json:"next_quota_check_at,omitempty"`
 	PendingSeatsByAdmin   map[string]map[string]int `json:"pending_seats_by_admin"`
 	InvitePending         int                       `json:"invite_pending"`
 }
@@ -313,11 +318,13 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 		COALESCE(SUM(space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL),0),
 		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' THEN json_extract(profile,'$.status_checked_at') END),''),
 		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' THEN json_extract(profile,'$.quota_checked_at') END),''),
+		COALESCE(SUM(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' AND NULLIF(json_extract(profile,'$.status_checked_at'),'') IS NULL THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' AND NULLIF(json_extract(profile,'$.quota_checked_at'),'') IS NULL THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(space_state!='removed' AND json_extract(profile,'$.accept_status')!='completed'
 			AND json_extract(profile,'$.invite_status') IN ('pending','running','completed')
 			AND COALESCE(json_extract(profile,'$.admin_account_id'),'')!=''),0)
 		FROM accounts`).Scan(&summary.All, &summary.Outside, &summary.Inside, &summary.Removed, &summary.Dead, &summary.OAuthReady, &summary.Monitoring,
-		&summary.InsidePremium, &summary.Quota7DRemainingTotal, &summary.Quota7DCount, &summary.OldestStatusCheckedAt, &summary.OldestQuotaCheckedAt, &summary.InvitePending)
+		&summary.InsidePremium, &summary.Quota7DRemainingTotal, &summary.Quota7DCount, &summary.OldestStatusCheckedAt, &summary.OldestQuotaCheckedAt, &summary.StatusUnchecked, &summary.QuotaUnchecked, &summary.InvitePending)
 	if err != nil {
 		return nil, 0, summary, err
 	}

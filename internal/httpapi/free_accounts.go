@@ -37,6 +37,7 @@ func (s *Server) listFreeAccounts(w http.ResponseWriter, r *http.Request) {
 		for _, account := range accounts {
 			_, _ = s.store.EnsureFreeAccountLifecycleTask(account)
 		}
+		s.decorateFreeAccountSummary(&summary)
 		writeAPI(w, http.StatusOK, paginatedData(accounts, total, page, map[string]any{"summary": summary}), "")
 		return
 	}
@@ -45,6 +46,54 @@ func (s *Server) listFreeAccounts(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.store.EnsureFreeAccountLifecycleTask(account)
 	}
 	writeAPI(w, http.StatusOK, accounts, "")
+}
+
+// decorateFreeAccountSummary adds server-clock based monitor deadlines to the
+// paginated response. The monitor itself remains per-account and unchanged;
+// these fields are only for an accurate client-side countdown.
+func (s *Server) decorateFreeAccountSummary(summary *store.FreeAccountsPageSummary) {
+	if summary == nil {
+		return
+	}
+	now := time.Now().UTC()
+	summary.ServerNow = now.Format(time.RFC3339Nano)
+	settings, _, err := s.store.Sub2Settings()
+	if err != nil {
+		return
+	}
+	statusInterval := time.Duration(settings.StatusCheckIntervalSeconds) * time.Second
+	quotaInterval := time.Duration(settings.QuotaCheckIntervalSeconds) * time.Second
+	if strings.EqualFold(settings.Provider, "cpa") {
+		if cpa, _, cpaErr := s.store.CPASettings(); cpaErr == nil {
+			statusInterval = time.Duration(cpa.StatusCheckIntervalSeconds) * time.Second
+			quotaInterval = time.Duration(cpa.QuotaCheckIntervalSeconds) * time.Second
+		}
+	}
+	if statusInterval < 10*time.Second {
+		statusInterval = 120 * time.Second
+	}
+	if quotaInterval < 10*time.Second {
+		quotaInterval = 120 * time.Second
+	}
+	if summary.Monitoring > 0 {
+		summary.NextStatusCheckAt = monitorNextDeadline(now, summary.OldestStatusCheckedAt, summary.StatusUnchecked, statusInterval)
+		summary.NextQuotaCheckAt = monitorNextDeadline(now, summary.OldestQuotaCheckedAt, summary.QuotaUnchecked, quotaInterval)
+	}
+}
+
+func monitorNextDeadline(now time.Time, oldest string, unchecked int, interval time.Duration) string {
+	// An account without a prior check is due on the next monitor tick (the
+	// worker wakes every ten seconds), rather than being rendered as 0s.
+	if unchecked > 0 || strings.TrimSpace(oldest) == "" {
+		return now.Add(10 * time.Second).Format(time.RFC3339Nano)
+	}
+	checked, err := time.Parse(time.RFC3339Nano, oldest)
+	if err != nil {
+		if checked, err = time.Parse(time.RFC3339, oldest); err != nil {
+			return now.Add(10 * time.Second).Format(time.RFC3339Nano)
+		}
+	}
+	return checked.Add(interval).UTC().Format(time.RFC3339Nano)
 }
 
 func (s *Server) listFreeAccountEvents(w http.ResponseWriter, r *http.Request) {

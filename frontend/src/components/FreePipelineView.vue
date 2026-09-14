@@ -62,6 +62,7 @@ const busy = ref('')
 const liveAccounts = ref([])
 const activities = reactive({})
 const clock = ref(Date.now())
+const serverClockOffset = ref(0)
 const joinOpen = ref(false)
 const fileInput = ref(null)
 const folderInput = ref(null)
@@ -91,7 +92,7 @@ const joinCapacityRefreshing = ref(false)
 const page = ref(1)
 const pageSize = ref(props.defaultPageSize)
 const accountTotal = ref(0)
-const accountSummary = reactive({ all: 0, outside: 0, inside: 0, removed: 0, oauth_ready: 0, invite_pending: 0, monitoring: 0, inside_premium: 0, quota_7d_remaining_total: 0, quota_7d_count: 0, oldest_status_checked_at: '', oldest_quota_checked_at: '', pending_seats_by_admin: {} })
+const accountSummary = reactive({ all: 0, outside: 0, inside: 0, removed: 0, oauth_ready: 0, invite_pending: 0, monitoring: 0, inside_premium: 0, quota_7d_remaining_total: 0, quota_7d_count: 0, oldest_status_checked_at: '', oldest_quota_checked_at: '', status_unchecked: 0, quota_unchecked: 0, server_now: '', next_status_check_at: '', next_quota_check_at: '', pending_seats_by_admin: {} })
 const teamSpaceFilter = ref('')
 const selectedAccountIDs = ref(new Set())
 const lifecycleView = reactive({ account: null, events: [], task: null, loading: false, error: '' })
@@ -145,12 +146,14 @@ function nextCheckSeconds(timestampKey, intervalSeconds, enabled = true) {
   if (!enabled) return null
   const interval = Math.max(10, Number(intervalSeconds) || 120)
   if (!Number(accountSummary.monitoring || 0)) return null
+  const nextKey = timestampKey === 'status_checked_at' ? 'next_status_check_at' : 'next_quota_check_at'
   const summaryKey = timestampKey === 'status_checked_at' ? 'oldest_status_checked_at' : 'oldest_quota_checked_at'
-  const value = accountSummary[summaryKey]
-  if (!value) return 0
-  const checkedAt = new Date(value).getTime()
-  if (!Number.isFinite(checkedAt)) return 0
-  return Math.max(0, Math.ceil(interval - (clock.value - checkedAt) / 1000))
+  const nextAt = Date.parse(accountSummary[nextKey] || '')
+  if (Number.isFinite(nextAt)) return Math.max(0, Math.ceil((nextAt - (clock.value + serverClockOffset.value)) / 1000))
+  // Compatibility fallback for older servers that do not return a deadline.
+  const checkedAt = Date.parse(accountSummary[summaryKey] || '')
+  if (Number.isFinite(checkedAt)) return Math.max(0, Math.ceil(interval - (clock.value + serverClockOffset.value - checkedAt) / 1000))
+  return 10
 }
 const statusCountdown = computed(() => nextCheckSeconds('status_checked_at', pushProvider.value === 'cpa' ? cpaForm.statusCheckIntervalSeconds : sub2Form.statusCheckIntervalSeconds, pushProvider.value === 'cpa' ? cpaForm.enable401Check : sub2Form.enable401Check))
 const activeQuotaEnabled = computed(() => pushProvider.value === 'cpa' ? cpaForm.quotaEnabled : sub2Form.quotaEnabled)
@@ -158,6 +161,7 @@ const quotaCountdown = computed(() => nextCheckSeconds('quota_checked_at', pushP
 function countdownText(value, disabled = false) {
   if (disabled) return '已关闭'
   if (value == null) return '暂无账号'
+  if (value <= 0) return '即将检测'
   return `${value}s`
 }
 
@@ -372,6 +376,8 @@ async function refreshLiveAccounts() {
   liveAccounts.value = data.items || []
   accountTotal.value = Number(data.total || 0)
   Object.assign(accountSummary, data.summary || {})
+  const serverNow = Date.parse(accountSummary.server_now || '')
+  if (Number.isFinite(serverNow)) serverClockOffset.value = serverNow - Date.now()
   const lastPage = Math.max(1, Math.ceil(accountTotal.value / pageSize.value))
   if (page.value > lastPage) {
     page.value = lastPage
