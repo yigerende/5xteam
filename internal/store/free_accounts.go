@@ -134,6 +134,7 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		profile.CycleID, profile.VisitedTeamCount, profile.HistoryUncertain = existing.CycleID, existing.VisitedTeamCount, existing.HistoryUncertain
 		profile.ReusePending, profile.RemoteRemovedAt, profile.RemovalReason = existing.ReusePending, existing.RemoteRemovedAt, existing.RemovalReason
 		profile.RemoveMethod = existing.RemoveMethod
+		profile.JoinMethod = existing.JoinMethod
 		profile.DownstreamCleaned = existing.DownstreamCleaned
 		profile.Status, profile.InviteStatus, profile.AcceptStatus = existing.Status, existing.InviteStatus, existing.AcceptStatus
 		profile.OAuthStatus, profile.PushStatus, profile.QuotaStatus, profile.RemoveStatus = existing.OAuthStatus, existing.PushStatus, existing.QuotaStatus, existing.RemoveStatus

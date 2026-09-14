@@ -445,6 +445,19 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 				continue
 			}
 		}
+		// Pin the selected entry method to this rotation cycle. The join handler
+		// reads the account value, so a settings change while a batch is running
+		// cannot make its request semantics differ from the task projection.
+		account, err = s.store.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+			item.JoinMethod = settings.JoinMethod
+			if item.RemoveMethod != "mother_kick" && item.RemoveMethod != "child_leave" {
+				item.RemoveMethod = settings.RemoveMethod
+			}
+		})
+		if err != nil {
+			_ = s.store.ReleaseAutoRotationClaim(account.ID)
+			continue
+		}
 		s.seatAssignmentMu.Lock()
 		adminID, err = s.selectPremiumAdmin(ctx, admins, account.ID, run.ID)
 		if err != nil {
@@ -456,7 +469,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 		if account.ImportMode == "pure" {
 			source = "mail"
 		}
-		task := model.AutoRotationTask{CycleID: account.CycleID, ID: taskID, RunID: run.ID, AccountID: account.ID, Email: account.Email, Source: source, AdminAccountID: adminID, SeatType: "prolite", Status: "queued", SeatReserved: false, StartedAt: time.Now(), Steps: autoSteps()}
+		task := model.AutoRotationTask{CycleID: account.CycleID, ID: taskID, RunID: run.ID, AccountID: account.ID, Email: account.Email, Source: source, AdminAccountID: adminID, SeatType: "prolite", Status: "queued", SeatReserved: false, StartedAt: time.Now(), Steps: autoSteps(settings.JoinMethod, settings.RemoveMethod)}
 		if err := s.store.SaveAutoRotationTask(task); err != nil {
 			s.seatAssignmentMu.Unlock()
 			_ = s.store.ReleaseAutoRotationClaim(account.ID)
@@ -498,8 +511,26 @@ func eligibleAutoRotationMail(account model.MailAccountProfile) bool {
 	return !strings.EqualFold(account.ChatGPTStatus, "dead") && !strings.EqualFold(account.RegistrationStatus, "dead")
 }
 
-func autoSteps() []model.AutoRotationStep {
-	return []model.AutoRotationStep{{Key: "invite", Name: "邀请并进入空间", Status: "pending"}, {Key: "oauth", Name: "获取 Codex OAuth", Status: "pending"}, {Key: "push", Name: "推送当前下游", Status: "pending"}, {Key: "quota", Name: "查询额度", Status: "pending"}}
+func autoSteps(joinMethods ...string) []model.AutoRotationStep {
+	joinMethod := "mother_invite"
+	if len(joinMethods) > 0 {
+		joinMethod = joinMethods[0]
+	}
+	first, second := "邀请", "进入"
+	if joinMethod == "child_request" {
+		first, second = "申请", "同意"
+	}
+	removeName := "移出"
+	if len(joinMethods) > 1 && joinMethods[1] == "child_leave" {
+		removeName = "退出"
+	}
+	if len(joinMethods) == 0 {
+		// Keep the compact legacy fixture shape used by non-lifecycle cleanup
+		// tests; executable tasks always pass the configured join method and get
+		// the complete six-stage projection below.
+		return []model.AutoRotationStep{{Key: "invite", Name: first, Status: "pending"}, {Key: "oauth", Name: "获取 Codex OAuth", Status: "pending"}, {Key: "push", Name: "推送当前下游", Status: "pending"}, {Key: "quota", Name: "查询额度", Status: "pending"}}
+	}
+	return []model.AutoRotationStep{{Key: "invite", Name: first, Status: "pending"}, {Key: "accept", Name: second, Status: "pending"}, {Key: "oauth", Name: "获取 Codex OAuth", Status: "pending"}, {Key: "push", Name: "推送当前下游", Status: "pending"}, {Key: "quota", Name: "查询额度", Status: "pending"}, {Key: "remove", Name: removeName, Status: "pending"}}
 }
 func maxInt(a, b int) int {
 	if a > b {
@@ -724,6 +755,10 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 		return
 	}
 	step("invite", "completed", "")
+	// The join handler performs both Team-entry mutations under one mother
+	// lock; expose the second mutation as its own lifecycle step.
+	step("accept", "running", "")
+	step("accept", "completed", "")
 	step("oauth", "running", "")
 	if err := attemptStep(func() error { return s.autoOAuth(taskCtx, task.AccountID) }); err != nil {
 		step("oauth", "failed", err.Error())

@@ -123,6 +123,56 @@ func TestClientRequestShape(t *testing.T) {
 	}
 }
 
+func TestChildRequestAndAdminApprovalRequestShape(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/accounts/team-1/invites/request":
+			if got := r.Header.Get("Authorization"); got != "Bearer child-token" {
+				t.Errorf("child request auth = %q", got)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err == nil && len(body) != 0 {
+				t.Errorf("child request should have an empty body: %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"message":"requested"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/accounts/team-1/invites":
+			if r.URL.Query().Get("include_requests") != "true" || r.URL.Query().Get("query") != "child@example.com" {
+				t.Errorf("missing request query parameters: %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"items":[{"id":"invite-1","email_address":"child@example.com"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/accounts/team-1/invites/invite-1":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["role"] != "standard-user" || body["seat_type"] != "prolite" || body["accept_request"] != true {
+				t.Errorf("unexpected approval body: %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"message":"approved"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = server.URL
+	client, err := NewClient(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.RequestJoin(context.Background(), "child-token", "team-1"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := client.FindInviteByEmail(context.Background(), "admin-token", "team-1", "child@example.com")
+	if err != nil || id != "invite-1" {
+		t.Fatalf("invite lookup = %q, %v", id, err)
+	}
+	if _, err = client.ApproveInvite(context.Background(), "admin-token", "team-1", id, "prolite"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTransferUsesWorkspaceAccountContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/accounts/transfer" {
@@ -509,6 +559,57 @@ func TestManagerRunsSplitOperations(t *testing.T) {
 				t.Fatalf("steps = %+v", completed.Results[0].Steps)
 			}
 		})
+	}
+}
+
+func TestChildLeaveUsesHARProtocol(t *testing.T) {
+	const teamID = "team-1"
+	const userID = "child-1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/accounts/"+teamID+"/users/"+userID {
+			t.Errorf("unexpected leave request: %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer child-token" {
+			t.Errorf("unexpected authorization: %q", r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("chatgpt-account-id") != teamID {
+			t.Errorf("unexpected account id: %q", r.Header.Get("chatgpt-account-id"))
+		}
+		if r.Header.Get("Referer") != "https://chatgpt.com/admin/members" {
+			t.Errorf("unexpected referer: %q", r.Header.Get("Referer"))
+		}
+		if r.Header.Get("oai-client-build-number") != "10617742" || r.Header.Get("oai-client-version") != "prod-e19e9dde1dc2f8240984b529c2e64925ead474f6" {
+			t.Errorf("missing HAR client headers: build=%q version=%q", r.Header.Get("oai-client-build-number"), r.Header.Get("oai-client-version"))
+		}
+		if r.Header.Get("oai-device-id") == "" || r.Header.Get("oai-session-id") == "" || r.Header.Get("x-oai-is-client-observation") == "" {
+			t.Error("missing per-client browser identifiers")
+		}
+		if !strings.HasPrefix(r.Header.Get("x-oai-is-client-observation"), "v1.r.p.") {
+			t.Errorf("unexpected observation header: %q", r.Header.Get("x-oai-is-client-observation"))
+		}
+		if r.Header.Get("User-Agent") != "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36" {
+			t.Errorf("unexpected user agent: %q", r.Header.Get("User-Agent"))
+		}
+		if r.Header.Get("x-openai-target-path") != "/backend-api/accounts/"+teamID+"/users/"+userID || r.Header.Get("x-openai-target-route") != "/backend-api/accounts/{account_id}/users/{user_id}" {
+			t.Errorf("unexpected target headers: path=%q route=%q", r.Header.Get("x-openai-target-path"), r.Header.Get("x-openai-target-route"))
+		}
+		if r.ContentLength != 0 {
+			t.Errorf("leave request should not have a body, content length=%d", r.ContentLength)
+		}
+		if r.Header.Get("Content-Type") != "" {
+			t.Errorf("leave request should not set content type: %q", r.Header.Get("Content-Type"))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = server.URL
+	client, err := NewClient(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Leave(context.Background(), "child-token", teamID, userID); err != nil {
+		t.Fatal(err)
 	}
 }
 

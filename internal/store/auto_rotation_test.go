@@ -83,6 +83,55 @@ func TestAutoRotationSettingsAndRunPersistence(t *testing.T) {
 	}
 }
 
+func TestAutoRotationJoinMethodDefaultsAndPersistence(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got := s.AutoRotationSettings().JoinMethod; got != "mother_invite" {
+		t.Fatalf("default join method = %q", got)
+	}
+	settings := model.DefaultAutoRotationSettings()
+	settings.JoinMethod = "child_request"
+	if saved, err := s.SaveAutoRotationSettings(settings); err != nil || saved.JoinMethod != "child_request" {
+		t.Fatalf("join method was not saved: %+v, %v", saved, err)
+	}
+	if _, err := s.SaveAutoRotationSettings(model.AutoRotationSettings{ThresholdPercent: 50, IntervalSeconds: 300, Concurrency: 1, RemoveMethod: "mother_kick", JoinMethod: "unsupported"}); err == nil {
+		t.Fatal("unsupported join method was accepted")
+	}
+}
+
+func TestEnsureLifecycleTaskUpgradesExistingRecordWithoutSQLiteDeadlock(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	account, _, err := s.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "legacy-lifecycle@example.com", UserID: "legacy-lifecycle"}, "source-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := model.AutoRotationTask{ID: "lifecycle-legacy", AccountID: account.ID, Email: account.Email, Lifecycle: true, Steps: []model.AutoRotationStep{{Key: "invite", Name: "邀请并进入空间", Status: "pending"}, {Key: "oauth", Status: "pending"}}}
+	if err := s.SaveAutoRotationTask(legacy); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		_, _ = s.EnsureFreeAccountLifecycleTask(account)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("lifecycle upgrade blocked on an open SQLite rows cursor")
+	}
+	got, err := s.EnsureFreeAccountLifecycleTask(account)
+	if err != nil || len(got.Steps) != 6 || got.Steps[1].Key != "accept" {
+		t.Fatalf("lifecycle task was not upgraded: %+v, %v", got, err)
+	}
+}
+
 func TestAdminCapacitySnapshotPersistence(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {

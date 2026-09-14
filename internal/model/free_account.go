@@ -69,6 +69,7 @@ type FreeAccountProfile struct {
 	QuotaStatus                string             `json:"quota_status"`
 	RemoveStatus               string             `json:"remove_status"`
 	RemoveMethod               string             `json:"remove_method,omitempty"`
+	JoinMethod                 string             `json:"join_method,omitempty"`
 	Dead                       bool               `json:"dead,omitempty"`
 	DeadReason                 string             `json:"dead_reason,omitempty"`
 	DeadDetectedAt             *time.Time         `json:"dead_detected_at,omitempty"`

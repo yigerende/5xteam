@@ -52,6 +52,9 @@ func (s *Store) AutoRotationSettings() model.AutoRotationSettings {
 	if settings.RemoveMethod != "child_leave" {
 		settings.RemoveMethod = "mother_kick"
 	}
+	if settings.JoinMethod != "child_request" {
+		settings.JoinMethod = "mother_invite"
+	}
 	if settings.OAuthLoginMode != "password_totp" {
 		settings.OAuthLoginMode = "email_otp"
 	}
@@ -84,6 +87,12 @@ func (s *Store) SaveAutoRotationSettings(settings model.AutoRotationSettings) (m
 	}
 	if settings.RemoveMethod != "mother_kick" && settings.RemoveMethod != "child_leave" {
 		return settings, errors.New("移出方式无效")
+	}
+	if settings.JoinMethod == "" {
+		settings.JoinMethod = "mother_invite"
+	}
+	if settings.JoinMethod != "mother_invite" && settings.JoinMethod != "child_request" {
+		return settings, errors.New("进入方式无效")
 	}
 	if settings.OAuthLoginMode == "" {
 		settings.OAuthLoginMode = "email_otp"
@@ -263,16 +272,56 @@ func (s *Store) EnsureFreeAccountLifecycleTask(account model.FreeAccountProfile)
 	if err != nil {
 		return model.AutoRotationTask{}, err
 	}
-	defer rows.Close()
+	var existing *model.AutoRotationTask
 	for rows.Next() {
 		var raw string
 		var task model.AutoRotationTask
 		if rows.Scan(&raw) == nil && json.Unmarshal([]byte(raw), &task) == nil && task.Lifecycle {
-			return task, nil
+			existing = &task
+			break
 		}
 	}
+	// The store uses a single SQLite connection. Close the SELECT before any
+	// UPDATE/INSERT; otherwise the write waits forever for the same connection.
+	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return model.AutoRotationTask{}, err
+	}
+	if existing != nil {
+		task := *existing
+		first, second := "邀请", "进入"
+		if account.JoinMethod == "child_request" {
+			first, second = "申请", "同意"
+		}
+		removeName := "移出"
+		if account.RemoveMethod == "child_leave" {
+			removeName = "退出"
+		}
+		stepNames := map[string]string{"invite": first, "accept": second, "oauth": "获取 Codex OAuth", "push": "推送当前下游", "quota": "查询额度", "remove": removeName}
+		stored := make(map[string]model.AutoRotationStep, len(task.Steps))
+		for _, step := range task.Steps {
+			if _, known := stepNames[step.Key]; known {
+				step.Name = stepNames[step.Key]
+				stored[step.Key] = step
+			}
+		}
+		statuses := map[string]string{"invite": account.InviteStatus, "accept": account.AcceptStatus, "oauth": account.OAuthStatus, "push": account.PushStatus, "quota": account.QuotaStatus, "remove": account.RemoveStatus}
+		ordered := make([]model.AutoRotationStep, 0, 6)
+		for _, key := range []string{"invite", "accept", "oauth", "push", "quota", "remove"} {
+			step, ok := stored[key]
+			if !ok {
+				step = model.AutoRotationStep{Key: key, Status: statuses[key]}
+			}
+			step.Name = stepNames[key]
+			ordered = append(ordered, step)
+		}
+		task.Steps = ordered
+		if updated, marshalErr := json.Marshal(task); marshalErr == nil {
+			if _, updateErr := s.db.Exec("UPDATE auto_rotation_tasks SET payload=?, updated_at=? WHERE id=?", string(updated), formatTime(time.Now()), task.ID); updateErr != nil {
+				return task, updateErr
+			}
+		}
+		return task, nil
 	}
 	started := account.ImportedAt
 	if started.IsZero() {
@@ -281,15 +330,24 @@ func (s *Store) EnsureFreeAccountLifecycleTask(account model.FreeAccountProfile)
 	if started.IsZero() {
 		started = time.Now()
 	}
+	first, second := "邀请", "进入"
+	if account.JoinMethod == "child_request" {
+		first, second = "申请", "同意"
+	}
+	removeName := "移出"
+	if account.RemoveMethod == "child_leave" {
+		removeName = "退出"
+	}
 	task := model.AutoRotationTask{
 		ID: "lifecycle-" + account.ID, AccountID: account.ID, Email: account.Email,
 		Source: "lifecycle", Status: "lifecycle", Lifecycle: true, StartedAt: started,
 		Steps: []model.AutoRotationStep{
-			{Key: "invite", Name: "邀请并进入空间", Status: account.InviteStatus},
+			{Key: "invite", Name: first, Status: account.InviteStatus},
+			{Key: "accept", Name: second, Status: account.AcceptStatus},
 			{Key: "oauth", Name: "获取 Codex OAuth", Status: account.OAuthStatus},
 			{Key: "push", Name: "推送当前下游", Status: account.PushStatus},
 			{Key: "quota", Name: "查询额度", Status: account.QuotaStatus},
-			{Key: "remove", Name: "移出空间", Status: account.RemoveStatus},
+			{Key: "remove", Name: removeName, Status: account.RemoveStatus},
 		},
 	}
 	b, err := json.Marshal(task)

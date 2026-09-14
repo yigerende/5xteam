@@ -92,6 +92,31 @@ func TestFreeAccountJoinSkipsCompletedStages(t *testing.T) {
 	}
 }
 
+func TestAutoRotationStepsFollowJoinMethod(t *testing.T) {
+	for _, tc := range []struct {
+		method, first, second string
+	}{
+		{"mother_invite", "邀请", "进入"},
+		{"child_request", "申请", "同意"},
+	} {
+		steps := autoSteps(tc.method)
+		if len(steps) != 6 || steps[0].Name != tc.first || steps[1].Name != tc.second || steps[5].Key != "remove" {
+			t.Fatalf("steps for %s = %+v", tc.method, steps)
+		}
+	}
+}
+
+func TestRemovalMethodStaysPinnedToActiveCycle(t *testing.T) {
+	settings := model.DefaultAutoRotationSettings()
+	settings.RemoveMethod = "child_leave"
+	if got := removalMethodForCycle(model.FreeAccountProfile{RemoveMethod: "mother_kick"}, settings); got != "mother_kick" {
+		t.Fatalf("active cycle method changed after settings switch: %q", got)
+	}
+	if got := removalMethodForCycle(model.FreeAccountProfile{}, settings); got != "child_leave" {
+		t.Fatalf("new cycle did not inherit configured method: %q", got)
+	}
+}
+
 func TestDeadOAuthDetectionRequiresExplicitAccountSignal(t *testing.T) {
 	dead := []struct {
 		name    string

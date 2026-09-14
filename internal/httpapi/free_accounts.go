@@ -238,6 +238,14 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	rotationSettings := s.store.AutoRotationSettings()
+	joinMethod := profile.JoinMethod
+	if joinMethod != "child_request" && joinMethod != "mother_invite" {
+		joinMethod = rotationSettings.JoinMethod
+		if joinMethod != "child_request" {
+			joinMethod = "mother_invite"
+		}
+	}
 	runInvite, runAccept := freeAccountJoinSteps(profile)
 	s.seatAssignmentMu.Lock()
 	if runInvite {
@@ -261,6 +269,10 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		item.AdminAccountID, item.AdminEmail = admin.ID, admin.Email
 		item.TeamAccountID, item.SeatType = admin.TeamAccountID, input.SeatType
 		item.LastError = ""
+		item.JoinMethod = joinMethod
+		if item.RemoveMethod != "mother_kick" && item.RemoveMethod != "child_leave" {
+			item.RemoveMethod = rotationSettings.RemoveMethod
+		}
 		if runAccept {
 			item.Status = "joining"
 			if runInvite {
@@ -303,7 +315,7 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 	defer unlockTeam()
 	inviteProxy := s.adminProxyLogDetails(adminSettings, admin)
 	acceptProxy := s.proxyLogDetails(s.store.Settings(), "global")
-	if runInvite {
+	if runInvite && joinMethod == "mother_invite" {
 		inviteStarted := time.Now()
 		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "invite_request_start", map[string]any{"seat_type": input.SeatType, "proxy": inviteProxy})
 		var inviteResponse workflow.Response
@@ -325,19 +337,64 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		// mutation for this mother.
 		s.waitTeamOperationInterval(r.Context())
 	}
-	acceptStarted := time.Now()
-	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_start", map[string]any{"user_id": profile.UserID, "team_account_id": admin.TeamAccountID, "proxy": acceptProxy})
-	var acceptResponse workflow.Response
-	acceptResponse, err = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
-		return userClient.Accept(r.Context(), sourceCredentials.SourceAccessToken, admin.TeamAccountID, profile.UserID)
-	})
-	if err != nil {
-		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_error", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "error": err.Error(), "proxy": acceptProxy})
-		s.failFreeAccount(profile.ID, "accept", err)
-		writeAPI(w, http.StatusBadRequest, nil, err.Error())
-		return
+	if runInvite && joinMethod == "child_request" {
+		requestStarted := time.Now()
+		requestProxy := s.proxyLogDetails(s.store.Settings(), "global")
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "access_request_start", map[string]any{"seat_type": input.SeatType, "proxy": requestProxy})
+		var requestResponse workflow.Response
+		requestResponse, err = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
+			return userClient.RequestJoin(r.Context(), sourceCredentials.SourceAccessToken, admin.TeamAccountID)
+		})
+		if err != nil {
+			s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "access_request_error", map[string]any{"duration_ms": time.Since(requestStarted).Milliseconds(), "http_status": requestResponse.StatusCode, "error": err.Error(), "proxy": requestProxy})
+			s.failFreeAccount(profile.ID, "invite", err)
+			writeAPI(w, http.StatusBadRequest, nil, err.Error())
+			return
+		}
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "access_request_success", map[string]any{"duration_ms": time.Since(requestStarted).Milliseconds(), "http_status": requestResponse.StatusCode, "proxy": requestProxy})
+		_, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) { item.InviteStatus, item.AcceptStatus = "completed", "running" })
+		s.waitTeamOperationInterval(r.Context())
 	}
-	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_success", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "proxy": acceptProxy})
+	if joinMethod == "child_request" {
+		approveStarted := time.Now()
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "approve_request_start", map[string]any{"seat_type": input.SeatType, "proxy": inviteProxy})
+		var inviteID string
+		var approveResponse workflow.Response
+		var approveErr error
+		approveErr = func() error {
+			var findErr error
+			inviteID, findErr = adminClient.FindInviteByEmail(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, profile.Email)
+			if findErr != nil {
+				return findErr
+			}
+			approveResponse, approveErr = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
+				return adminClient.ApproveInvite(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, inviteID, input.SeatType)
+			})
+			return approveErr
+		}()
+		if approveErr != nil {
+			s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "approve_request_error", map[string]any{"duration_ms": time.Since(approveStarted).Milliseconds(), "http_status": approveResponse.StatusCode, "invite_id": inviteID, "error": approveErr.Error(), "proxy": inviteProxy})
+			s.failFreeAccount(profile.ID, "accept", approveErr)
+			writeAPI(w, http.StatusBadRequest, nil, approveErr.Error())
+			return
+		}
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "approve_request_success", map[string]any{"duration_ms": time.Since(approveStarted).Milliseconds(), "http_status": approveResponse.StatusCode, "invite_id": inviteID, "seat_type": input.SeatType, "proxy": inviteProxy})
+	}
+	if joinMethod != "child_request" {
+		acceptStarted := time.Now()
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_start", map[string]any{"user_id": profile.UserID, "team_account_id": admin.TeamAccountID, "proxy": acceptProxy})
+		var acceptResponse workflow.Response
+		acceptResponse, err = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
+			return userClient.Accept(r.Context(), sourceCredentials.SourceAccessToken, admin.TeamAccountID, profile.UserID)
+		})
+		if err != nil {
+			s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_error", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "error": err.Error(), "proxy": acceptProxy})
+			s.failFreeAccount(profile.ID, "accept", err)
+			writeAPI(w, http.StatusBadRequest, nil, err.Error())
+			return
+		}
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "accept_request_success", map[string]any{"duration_ms": time.Since(acceptStarted).Milliseconds(), "http_status": acceptResponse.StatusCode, "proxy": acceptProxy})
+	}
 	now := time.Now()
 	profile, err = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.Status, item.InviteStatus, item.AcceptStatus = "joined", "completed", "completed"
@@ -348,6 +405,9 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
+	// Refresh the durable lifecycle projection so the entry and removal labels
+	// reflect the method selected for this account, including older records.
+	_, _ = s.store.EnsureFreeAccountLifecycleTask(profile)
 	s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "joined", map[string]any{"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus})
 	s.auditAccountEvent(r.Context(), profile.ID, "join", "accept", "manual_single", "", "邀请并进入空间成功", map[string]any{"admin_account_id": admin.ID, "team_account_id": admin.TeamAccountID})
 	s.waitTeamOperationInterval(r.Context())
@@ -1944,7 +2004,8 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	unlockTeam := s.lockTeamAccountRemove(profile.TeamAccountID)
 	defer unlockTeam()
 	profile = s.refreshSub2CostBeforeRemoval(ctx, profile)
-	if s.store.AutoRotationSettings().RemoveMethod == "child_leave" {
+	removeMethod := removalMethodForCycle(profile, s.store.AutoRotationSettings())
+	if removeMethod == "child_leave" {
 		return s.performFreeAccountChildLeave(ctx, profile)
 	}
 	adminProfile, adminCredentials, err := s.currentAdminCredential(ctx, profile.AdminAccountID)
@@ -2010,10 +2071,22 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	return s.finishRemovedCycle(ctx, profile)
 }
 
-// performFreeAccountChildLeave uses the same Team membership DELETE request as
-// a mother kick, but authenticates with the child's source token. The request
-// client still applies the standard ChatGPT headers and the child's global
-// proxy settings.
+// removalMethodForCycle preserves the method captured when the current Team
+// cycle started. Only a profile without a valid method (legacy/new record)
+// inherits the current global setting.
+func removalMethodForCycle(profile model.FreeAccountProfile, settings model.AutoRotationSettings) string {
+	if profile.RemoveMethod == "mother_kick" || profile.RemoveMethod == "child_leave" {
+		return profile.RemoveMethod
+	}
+	if settings.RemoveMethod == "child_leave" {
+		return "child_leave"
+	}
+	return "mother_kick"
+}
+
+// performFreeAccountChildLeave uses the child-side Team membership DELETE
+// protocol captured from the ChatGPT web client, authenticating with the
+// child's source token. The request still uses the configured global proxy.
 func (s *Server) performFreeAccountChildLeave(ctx context.Context, profile model.FreeAccountProfile) (model.FreeAccountProfile, error) {
 	_, credentials, err := s.store.FreeAccountCredential(profile.ID)
 	if err != nil {
@@ -2028,7 +2101,7 @@ func (s *Server) performFreeAccountChildLeave(ctx context.Context, profile model
 	}
 	started := time.Now()
 	method := "child_leave"
-	_, err = client.Kick(ctx, credentials.SourceAccessToken, profile.TeamAccountID, profile.UserID)
+	_, err = client.Leave(ctx, credentials.SourceAccessToken, profile.TeamAccountID, profile.UserID)
 	if err != nil {
 		s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "child_leave_error", Level: "error", Message: "子号自行退出失败", DurationMS: time.Since(started).Milliseconds(), Response: map[string]any{"error": err.Error(), "method": method}, Details: map[string]any{"error": err.Error(), "method": method}})
 		return profile, err

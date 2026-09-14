@@ -23,12 +23,13 @@ import (
 const maxResponseBytes = 64 << 10
 
 type Client struct {
-	baseURL   string
-	settings  model.Settings
-	http      *http.Client
-	deviceID  string
-	sessionID string
-	python    string
+	baseURL       string
+	settings      model.Settings
+	http          *http.Client
+	deviceID      string
+	sessionID     string
+	observationID string
+	python        string
 }
 
 type Response struct {
@@ -48,10 +49,11 @@ func NewClient(settings model.Settings) (*Client, error) {
 	pythonPath := FindPython()
 	return &Client{
 		baseURL: strings.TrimRight(settings.BaseURL, "/"), settings: settings,
-		http:      httpClient,
-		deviceID:  newDeviceID(),
-		sessionID: newDeviceID(),
-		python:    pythonPath,
+		http:          httpClient,
+		deviceID:      newDeviceID(),
+		sessionID:     newDeviceID(),
+		observationID: newObservationID(),
+		python:        pythonPath,
 	}, nil
 }
 
@@ -95,6 +97,14 @@ func newDeviceID() string {
 	raw[8] = (raw[8] & 0x3f) | 0x80
 	encoded := hex.EncodeToString(raw[:])
 	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:]
+}
+
+func newObservationID() string {
+	var raw [12]byte
+	if _, err := cryptorand.Read(raw[:]); err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw[:])
 }
 
 func ValidateProxyURL(value string) (*url.URL, error) {
@@ -203,6 +213,60 @@ func (c *Client) Invite(ctx context.Context, adminToken, teamID, email, seatType
 	return c.do(ctx, http.MethodPost, "/accounts/"+url.PathEscape(teamID)+"/invites", adminToken, teamID, body)
 }
 
+// RequestJoin submits a child-side request to join a Team. Unlike Invite,
+// this endpoint is authenticated with the child's AT and does not assign a
+// seat; the Team admin assigns the seat while approving the request.
+func (c *Client) RequestJoin(ctx context.Context, childToken, teamID string) (Response, error) {
+	return c.do(ctx, http.MethodPost, "/accounts/"+url.PathEscape(teamID)+"/invites/request", childToken, teamID, nil)
+}
+
+// FindInviteByEmail locates a pending child access request in the admin's
+// invite collection. The returned ID is required by ApproveInvite; an email
+// address must never be used as the PATCH path identifier.
+func (c *Client) FindInviteByEmail(ctx context.Context, adminToken, teamID, email string) (string, error) {
+	wanted := strings.ToLower(strings.TrimSpace(email))
+	if wanted == "" {
+		return "", errors.New("子号邮箱不能为空")
+	}
+	for offset := 0; offset < 1000; offset += 25 {
+		path := "/accounts/" + url.PathEscape(teamID) + "/invites?include_pending=false&include_requests=true&offset=" + strconv.Itoa(offset) + "&limit=25&query=" + url.QueryEscape(email)
+		value, err := c.getJSON(ctx, path, adminToken, teamID)
+		if err != nil {
+			return "", err
+		}
+		items := jsonItems(value)
+		for _, item := range items {
+			candidate := strings.ToLower(strings.TrimSpace(fmt.Sprint(item["email_address"])))
+			if candidate == "" {
+				candidate = strings.ToLower(strings.TrimSpace(fmt.Sprint(item["email"])))
+			}
+			if candidate == wanted {
+				id := strings.TrimSpace(fmt.Sprint(item["id"]))
+				if id != "" && id != "<nil>" {
+					return id, nil
+				}
+			}
+		}
+		if len(items) < 25 {
+			break
+		}
+	}
+	return "", fmt.Errorf("未找到子号 %s 的待处理申请", email)
+}
+
+// ApproveInvite accepts a child access request and assigns its Team seat.
+// `seatType` must be `prolite` for the advanced 5x seat.
+func (c *Client) ApproveInvite(ctx context.Context, adminToken, teamID, inviteID, seatType string) (Response, error) {
+	if strings.TrimSpace(inviteID) == "" {
+		return Response{}, errors.New("申请 ID 不能为空")
+	}
+	if strings.TrimSpace(seatType) == "" {
+		seatType = "prolite"
+	}
+	body := map[string]any{"role": "standard-user", "seat_type": seatType, "accept_request": true}
+	return c.do(ctx, http.MethodPatch, "/accounts/"+url.PathEscape(teamID)+"/invites/"+url.PathEscape(inviteID), adminToken, teamID, body)
+}
+
 func (c *Client) Accept(ctx context.Context, userToken, teamID, userID string) (Response, error) {
 	return c.do(ctx, http.MethodPost, "/accounts/"+url.PathEscape(teamID)+"/invites/accept", userToken, teamID, map[string]any{})
 }
@@ -221,6 +285,15 @@ func (c *Client) Transfer(ctx context.Context, userToken, teamID string) (Respon
 
 func (c *Client) Kick(ctx context.Context, adminToken, teamID, userID string) (Response, error) {
 	return c.do(ctx, http.MethodDelete, "/accounts/"+url.PathEscape(teamID)+"/users/"+url.PathEscape(userID), adminToken, teamID, nil)
+}
+
+// Leave removes the authenticated child from a Team. ChatGPT's web client
+// sends this as a child-side membership DELETE from the Admin > Members page.
+// Keep it separate from Kick because the two operations use different
+// principals and browser request metadata.
+func (c *Client) Leave(ctx context.Context, childToken, teamID, userID string) (Response, error) {
+	path := "/accounts/" + url.PathEscape(teamID) + "/users/" + url.PathEscape(userID)
+	return c.doWithOptions(ctx, http.MethodDelete, path, childToken, teamID, nil, requestOptions{childLeave: true})
 }
 
 func (c *Client) CheckAccount(ctx context.Context, token, accountID string) (Response, error) {
@@ -550,6 +623,14 @@ func TestAdminAccount(ctx context.Context, token, teamAccountID string, settings
 }
 
 func (c *Client) do(ctx context.Context, method, path, token, accountID string, payload any) (Response, error) {
+	return c.doWithOptions(ctx, method, path, token, accountID, payload, requestOptions{})
+}
+
+type requestOptions struct {
+	childLeave bool
+}
+
+func (c *Client) doWithOptions(ctx context.Context, method, path, token, accountID string, payload any, options requestOptions) (Response, error) {
 	var body io.Reader
 	var bodyBytes []byte
 	if payload != nil {
@@ -592,11 +673,21 @@ func (c *Client) do(ctx context.Context, method, path, token, accountID string, 
 		req.Header.Set("x-openai-target-route", "/backend-api/me")
 	}
 	setOpenAITargetHeaders(req, path)
+	if options.childLeave {
+		setChildLeaveHeaders(req, path, c)
+	}
 	var statusCode int
 	var data []byte
 	var requestErr error
 	if c.python != "" && strings.HasPrefix(c.baseURL, "https://") && strings.TrimSpace(c.settings.ProxyURL) != "" {
-		statusCode, data, requestErr = c.browserDo(ctx, req, bodyBytes)
+		if options.childLeave {
+			// Keep the same Chrome profile used by the rest of the Team
+			// workflow.  chrome152 is not available in the curl_cffi versions
+			// shipped by some deployments and fails before the request is sent.
+			statusCode, data, requestErr = c.browserDoWithImpersonate(ctx, req, bodyBytes, true, "chrome136")
+		} else {
+			statusCode, data, requestErr = c.browserDo(ctx, req, bodyBytes)
+		}
 	} else {
 		var resp *http.Response
 		resp, requestErr = c.http.Do(req)
@@ -627,6 +718,40 @@ func (c *Client) do(ctx context.Context, method, path, token, accountID string, 
 		result.Message = "请求成功"
 	}
 	return result, nil
+}
+
+// setChildLeaveHeaders mirrors the browser request captured in
+// chatgpt.com子号退出.har. Device/session values remain per Client so a full
+// workflow keeps one browser context while the browser-only observation value
+// is also present as required by the Team endpoint.
+func setChildLeaveHeaders(req *http.Request, path string, c *Client) {
+	req.Header.Set("Accept", "*/*")
+	req.Header.Del("Content-Type")
+	req.Header.Set("Accept-Language", "de-DE,de;q=0.9")
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/admin/members")
+	req.Header.Set("oai-client-build-number", "10617742")
+	req.Header.Set("oai-client-version", "prod-e19e9dde1dc2f8240984b529c2e64925ead474f6")
+	req.Header.Set("oai-language", "de-DE")
+	req.Header.Set("Priority", "u=1, i")
+	req.Header.Set("Sec-CH-UA", `"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	req.Header.Set("Sec-CH-UA-Platform", `"Windows"`)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36")
+	if c != nil {
+		if c.deviceID != "" {
+			req.Header.Set("oai-device-id", c.deviceID)
+		}
+		if c.sessionID != "" {
+			req.Header.Set("oai-session-id", c.sessionID)
+		}
+		if c.observationID != "" {
+			req.Header.Set("x-oai-is-client-observation", "v1.r.p."+c.observationID)
+		}
+	}
+	target := "/backend-api" + path
+	req.Header.Set("x-openai-target-path", target)
+	req.Header.Set("x-openai-target-route", "/backend-api/accounts/{account_id}/users/{user_id}")
 }
 
 // ChatGPT's browser client marks backend-api calls with the target route. In
@@ -660,6 +785,10 @@ func (c *Client) browserDo(ctx context.Context, req *http.Request, body []byte) 
 }
 
 func (c *Client) browserDoWithRedirects(ctx context.Context, req *http.Request, body []byte, allowRedirects bool) (int, []byte, error) {
+	return c.browserDoWithImpersonate(ctx, req, body, allowRedirects, "chrome136")
+}
+
+func (c *Client) browserDoWithImpersonate(ctx context.Context, req *http.Request, body []byte, allowRedirects bool, impersonate string) (int, []byte, error) {
 	headers := make(map[string]string, len(req.Header))
 	for key, values := range req.Header {
 		if len(values) > 0 {
@@ -671,6 +800,7 @@ func (c *Client) browserDoWithRedirects(ctx context.Context, req *http.Request, 
 		"body": string(body), "proxy": c.settings.ProxyURL,
 		"timeout":         c.settings.RequestTimeoutSeconds,
 		"allow_redirects": allowRedirects,
+		"impersonate":     impersonate,
 	}
 	encoded, err := json.Marshal(input)
 	if err != nil {
@@ -679,7 +809,7 @@ func (c *Client) browserDoWithRedirects(ctx context.Context, req *http.Request, 
 	script := `import sys,json,base64
 from curl_cffi import requests
 p=json.load(sys.stdin)
-s=requests.Session(impersonate="chrome136")
+s=requests.Session(impersonate=p.get("impersonate","chrome136"))
 proxy=p.get("proxy","")
 if proxy:
     s.proxies={"http":proxy,"https":proxy}

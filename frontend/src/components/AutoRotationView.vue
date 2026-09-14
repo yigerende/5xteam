@@ -9,7 +9,7 @@ import { formatTime } from '../utils'
 import { oauthLoginSummary } from '../oauthLoginLog'
 
 const props = defineProps({ adminAccounts: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
-const settings = ref({ enabled: false, threshold_percent: 50, interval_seconds: 300, team_operation_interval_seconds: 10, concurrency: 2, max_per_run: 0, retry_count: 1, remove_method: 'mother_kick', oauth_login_mode: 'email_otp' })
+const settings = ref({ enabled: false, threshold_percent: 50, interval_seconds: 300, team_operation_interval_seconds: 10, concurrency: 2, max_per_run: 0, retry_count: 1, join_method: 'mother_invite', remove_method: 'mother_kick', oauth_login_mode: 'email_otp' })
 const runs = ref([]); const tasks = ref([]); const events = ref([]); const selectedRun = ref(null); const busy = ref(''); const message = ref({ text: '', type: '' })
 const runPage = ref(1); const runPageSize = ref(props.defaultPageSize); const runTotal = ref(0)
 const taskPage = ref(1); const taskPageSize = ref(props.defaultPageSize); const taskTotal = ref(0)
@@ -48,7 +48,7 @@ async function load() {
     const jobs = [api('/api/auto-rotation/settings'), loadRuns()]
     if (selectedRun.value) jobs.push(loadTasks(), loadEvents())
     const [settingsData] = await Promise.all(jobs)
-    settings.value = { oauth_login_mode: 'email_otp', team_operation_interval_seconds: 10, ...settingsData }
+    settings.value = { join_method: 'mother_invite', oauth_login_mode: 'email_otp', team_operation_interval_seconds: 10, ...settingsData }
   } catch (e) { setMessage(e.message, 'error') }
 }
 function setRunPage(value) { runPage.value = value; loadRuns().catch((e) => setMessage(e.message, 'error')) }
@@ -67,7 +67,7 @@ async function viewRun(run) {
 }
 function runStatus(value) { return value === 'completed' ? 'success' : value === 'failed' ? 'danger' : value === 'running' ? 'running' : 'pending' }
 const eventTypes = { decision: '自动补充判定', seat_snapshot: '席位决策快照', seat_query: '查询母号席位', seat_check: '实时席位规则检查', seat_reserved: '预占 5x 席位', seat_released: '释放席位', join_trace: '邀请确认诊断', remove_trace: '移出空间诊断', oauth_protocol: 'OAuth 协议诊断', manual_stage: '手动修正阶段', step: '流程步骤', request: '流程请求', retry: '步骤重试', dead_detected: '识别死号', dead_remove_start: '开始移出死号', dead_remove_success: '死号移出成功', dead_remove_failed: '死号移出失败', auto_failure_remove_start: '重试耗尽开始移出', auto_failure_remove_success: '失败账号移出成功', auto_failure_remove_failed: '失败账号移出失败' }
-const stageNames = { invite: '邀请并进入空间', oauth: '获取 Codex OAuth', push: '推送当前下游', quota: '查询额度', status: '401 检测', relogin: '重登', remove: '移出空间', rotation: '进入轮转' }
+const stageNames = { invite: '邀请/申请', accept: '进入/同意', oauth: '获取 Codex OAuth', push: '推送当前下游', quota: '查询额度', status: '401 检测', relogin: '重登', remove: '移出/退出', rotation: '进入轮转' }
 function eventType(value) { return eventTypes[value] || value || '系统事件' }
 function eventStage(value) { return stageNames[value] || value || '-' }
 function taskEmail(taskID) { return tasks.value.find((item) => item.id === taskID)?.email || '-' }
@@ -124,6 +124,7 @@ onBeforeUnmount(() => window.clearInterval(countdownTimer))
         <label class="field"><span>每轮最大补充数（0 不限制）</span><input v-model.number="settings.max_per_run" type="number" min="0" max="500" required /></label>
         <label class="field"><span>单账号重试次数</span><input v-model.number="settings.retry_count" type="number" min="0" max="10" required /></label>
         <label class="field"><span>移出方式</span><select v-model="settings.remove_method"><option value="mother_kick">母号踢出</option><option value="child_leave">子号自己退出</option></select></label>
+        <label class="field"><span>进入方式</span><select v-model="settings.join_method"><option value="mother_invite">母号邀请，子号同意（默认）</option><option value="child_request">子号申请，母号同意（分配 5x）</option></select></label>
         <label class="field"><span>全局 OAuth 登录方式</span><select v-model="settings.oauth_login_mode"><option value="email_otp">邮箱验证码登录（默认）</option><option value="password_totp">优先密码 + OpenAI 2FA 登录</option></select></label>
       </div>
       <div class="panel-actions"><button class="btn primary" :disabled="!!busy" type="submit"><Save :size="15" />保存配置</button></div>

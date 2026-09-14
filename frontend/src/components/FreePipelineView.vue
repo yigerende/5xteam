@@ -162,6 +162,14 @@ function countdownText(value, disabled = false) {
 }
 
 const stageLabels = { invite: '邀请', accept: '进入', oauth: '授权', push: '推送', quota: '额度', remove: '移出' }
+function stageLabel(key, account) {
+  if (account?.join_method === 'child_request') {
+    if (key === 'invite') return '申请'
+    if (key === 'accept') return '同意'
+  }
+  if (key === 'remove' && account?.remove_method === 'child_leave') return '退出'
+  return stageLabels[key] || key
+}
 const stateLabels = { not_started: '未开始', pending: '待处理', running: '处理中', completed: '已完成', failed: '失败' }
 const operationMeta = {
   join: { label: '邀请并进入空间', stage: 'invite' },
@@ -313,6 +321,10 @@ watch(() => props.entryEmail, (value) => {
 function setMessage(text = '', type = '') { Object.assign(message, { text, type }) }
 function stageTone(status) { return status === 'completed' ? 'success' : status === 'running' ? 'running' : status === 'failed' ? 'danger' : 'pending' }
 function activityFor(account) { return activities[account.id] }
+function activityAccount(activity) {
+  const id = activity?.id
+  return liveAccounts.value.find((item) => String(item?.id) === String(id)) || null
+}
 function isAccountBusy(account) { return busy.value === account.id || !!activityFor(account) }
 function isPipelineSelected(account) { return selectedAccountIDs.value.has(String(account.id)) }
 function togglePipelineSelected(account) {
@@ -331,8 +343,9 @@ function toggleAllDisplayed() {
 function elapsedSeconds(activity) { return Math.max(0, Math.floor((clock.value - activity.startedAt) / 1000)) }
 function activityText(activity) {
   if (activity.detail) return activity.detail
-  if (activity.action === 'join' && activity.stage === 'accept') return '正在接受团队邀请'
-  if (activity.action === 'join') return '正在发送团队邀请'
+  const activityAccount = liveAccounts.value.find((item) => String(item?.id) === String(activity?.id)) || null
+  if (activity.action === 'join' && activity.stage === 'accept') return activityAccount?.join_method === 'child_request' ? '正在由母号同意申请' : '正在接受团队邀请'
+  if (activity.action === 'join') return activityAccount?.join_method === 'child_request' ? '正在申请加入空间' : '正在发送团队邀请'
   const label = activity.action === 'push' ? `推送到${activeProviderLabel.value}` : operationMeta[activity.action]?.label
   return `正在${label || '执行操作'}`
 }
@@ -563,13 +576,14 @@ async function persistStageValue(account, stage, status, sub2AccountID = 0) {
     })
     liveAccounts.value = liveAccounts.value.map((item) => item.id === updated.id ? updated : item)
     emit('reload')
-    setMessage(`${account.email}：${stageLabels[stage]}已手动标记为${stateLabels[status]}`, status === 'failed' ? 'error' : 'success')
+    setMessage(`${account.email}：${stageLabel(stage, account)}已手动标记为${stateLabels[status]}`, status === 'failed' ? 'error' : 'success')
   } catch (error) { await refreshLiveAccounts().catch(() => {}); setMessage(error.message, 'error') }
   finally { busy.value = '' }
 }
 function joinActionLabel(account) {
   if (account?.remove_status === 'completed' || account?.reuse_pending) return '进入下一母号'
   if (account?.accept_status === 'completed') return '更新团队关联'
+  if (account?.join_method === 'child_request') return account?.invite_status === 'completed' ? '母号同意申请' : '申请加入空间'
   return account?.invite_status === 'completed' ? '接受团队邀请' : '邀请并进入空间'
 }
 function linkedAdmin(account) {
@@ -881,7 +895,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
         <div v-for="activity in activeActivities" :key="activity.id" class="execution-item">
           <LoaderCircle class="spin" :size="18" />
           <div><strong>{{ activity.email }}</strong><span>{{ activityText(activity) }} · 已用 {{ elapsedSeconds(activity) }} 秒</span></div>
-          <StatusPill tone="running">{{ stageLabels[activity.stage] }}处理中</StatusPill>
+          <StatusPill tone="running">{{ stageLabel(activity.stage, activityAccount(activity)) }}处理中</StatusPill>
           <div class="execution-progress"><i></i></div>
         </div>
       </div>
@@ -896,7 +910,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
         <tr v-for="account in displayedAccounts" :key="account.id" :class="{ 'row-running': activityFor(account), 'row-highlighted': entryEmail && account.email === entryEmail }">
           <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="account.dead" class="danger-text" :title="account.dead_reason">死号{{ account.remove_status === 'completed' ? ' · 已自动移出空间' : ' · 自动移出失败' }}</small><small v-else-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>
           <td><small class="table-note">{{ account.imported_at ? formatTime(account.imported_at) : '未知' }}</small></td>
-          <td><div class="stage-strip"><label v-for="key in ['invite','accept','oauth','push','quota','remove']" :key="key" :class="['stage-select', `tone-${stageTone(visibleStageStatus(account, key))}`]" :title="`${stageLabels[key]}：${stateLabels[visibleStageStatus(account, key)] || '未开始'}${visibleStageStatus(account, key) === 'running' ? '（可手动修正）' : ''}`"><LoaderCircle v-if="visibleStageStatus(account, key) === 'running'" class="spin" :size="10" /><span v-else>{{ stageLabels[key] }}</span><select :value="visibleStageStatus(account, key)" :aria-label="`${stageLabels[key]}阶段状态`" :disabled="isAccountBusy(account)" @change="saveStageValue(account, key, $event.target.value)"><option value="not_started">未开始</option><option value="pending">待处理</option><option value="completed">成功</option><option value="failed">失败</option></select></label></div></td>
+          <td><div class="stage-strip"><label v-for="key in ['invite','accept','oauth','push','quota','remove']" :key="key" :class="['stage-select', `tone-${stageTone(visibleStageStatus(account, key))}`]" :title="`${stageLabel(key, account)}：${stateLabels[visibleStageStatus(account, key)] || '未开始'}${visibleStageStatus(account, key) === 'running' ? '（可手动修正）' : ''}`"><LoaderCircle v-if="visibleStageStatus(account, key) === 'running'" class="spin" :size="10" /><span v-else>{{ stageLabel(key, account) }}</span><select :value="visibleStageStatus(account, key)" :aria-label="`${stageLabel(key, account)}阶段状态`" :disabled="isAccountBusy(account)" @change="saveStageValue(account, key, $event.target.value)"><option value="not_started">未开始</option><option value="pending">待处理</option><option value="completed">成功</option><option value="failed">失败</option></select></label></div></td>
           <td class="cost-cell"><strong>{{ costText(account) }}</strong><small v-if="String(account.push_provider || '').toLowerCase() !== 'cpa'" class="table-note user-cost" title="当前用户消耗额度">{{ userCostText(account) }}</small><small v-if="account.cost_checked_at && account.push_provider !== 'cpa'" class="table-note">{{ formatTime(account.cost_checked_at) }}</small><small v-else-if="account.push_provider === 'cpa'" class="table-note">CPA 不统计</small></td>
           <td><strong>{{ quotaText(account.quota_5h) }}</strong><small v-if="account.quota_5h" class="table-note">剩余</small></td>
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
