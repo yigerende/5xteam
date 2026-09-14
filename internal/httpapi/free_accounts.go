@@ -2134,15 +2134,17 @@ func removalMethodForCycle(profile model.FreeAccountProfile, settings model.Auto
 }
 
 // performFreeAccountChildLeave uses the child-side Team membership DELETE
-// protocol captured from the ChatGPT web client, authenticating with the
-// child's source token. The request still uses the configured global proxy.
+// protocol captured from the ChatGPT web client. The token comes from the
+// mail-management projection because OAuth authorization and relogin update
+// that projection with the newest ChatGPT AT.
 func (s *Server) performFreeAccountChildLeave(ctx context.Context, profile model.FreeAccountProfile) (model.FreeAccountProfile, error) {
-	_, credentials, err := s.store.FreeAccountCredential(profile.ID)
+	_, mailCredentials, err := s.store.MailAccountCredential(profile.Email)
 	if err != nil {
-		return profile, err
+		return profile, fmt.Errorf("邮件管理账号不存在，无法自行退出空间: %w", err)
 	}
-	if strings.TrimSpace(credentials.SourceAccessToken) == "" {
-		return profile, errors.New("子号缺少 Access Token，无法自行退出空间")
+	childToken := strings.TrimSpace(mailCredentials.AccessToken)
+	if childToken == "" {
+		return profile, errors.New("邮件管理账号缺少 AT，无法自行退出空间")
 	}
 	client, err := workflow.NewClient(s.store.Settings())
 	if err != nil {
@@ -2150,7 +2152,7 @@ func (s *Server) performFreeAccountChildLeave(ctx context.Context, profile model
 	}
 	started := time.Now()
 	method := "child_leave"
-	_, err = client.Leave(ctx, credentials.SourceAccessToken, profile.TeamAccountID, profile.UserID)
+	_, err = client.Leave(ctx, childToken, profile.TeamAccountID, profile.UserID)
 	if err != nil {
 		s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID, Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "child_leave_error", Level: "error", Message: "子号自行退出失败", DurationMS: time.Since(started).Milliseconds(), Response: map[string]any{"error": err.Error(), "method": method}, Details: map[string]any{"error": err.Error(), "method": method}})
 		return profile, err

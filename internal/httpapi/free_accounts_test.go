@@ -475,6 +475,62 @@ func TestReloginOAuthCompletionWritesNewTokensToMailAccount(t *testing.T) {
 	}
 }
 
+func TestChildLeaveUsesMailManagementAccessToken(t *testing.T) {
+	dataStore, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	if err := dataStore.SaveSettings(model.Settings{BaseURL: "http://127.0.0.1:18120", RequestTimeoutSeconds: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dataStore.SaveMailAccount(model.MailAccountProfile{Email: "leave-token@example.com"}, model.MailAccountCredentials{
+		Email: "leave-token@example.com", AccessToken: "mail-management-at",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	account, _, err := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{
+		Email: "leave-token@example.com", UserID: "leave-token-user", RemoveMethod: "child_leave",
+	}, "stale-source-at")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := dataStore.SaveAdminAccount(model.AdminAccountProfile{Label: "leave-admin", TeamAccountID: "leave-team"}, "admin-at")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err = dataStore.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+		item.AdminAccountID, item.TeamAccountID = admin.ID, "leave-team"
+		item.InviteStatus, item.AcceptStatus, item.RemoveStatus = "completed", "completed", "pending"
+		item.RemoveMethod = "child_leave"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authorization string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	settings := model.DefaultSettings()
+	settings.BaseURL = upstream.URL
+	if err := dataStore.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(dataStore, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	if _, err := server.performFreeAccountRemove(t.Context(), account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if authorization != "Bearer mail-management-at" {
+		t.Fatalf("child leave used %q, want the mail-management AT", authorization)
+	}
+}
+
 func TestConcurrentRemovalOnlyKicksTeamMemberOnce(t *testing.T) {
 	dataStore, err := store.Open(t.TempDir())
 	if err != nil {
