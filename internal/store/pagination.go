@@ -312,14 +312,14 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 		COALESCE(SUM(space_state='outside'),0), COALESCE(SUM(space_state='inside'),0), COALESCE(SUM(space_state='removed'),0),
 		COALESCE(SUM(space_state='dead'),0),
 		COALESCE(SUM(json_extract(profile,'$.oauth_status')='completed'),0),
-		COALESCE(SUM(json_extract(profile,'$.push_status')='completed' AND space_state!='removed'),0),
+		COALESCE(SUM(json_extract(profile,'$.push_status')='completed' AND space_state='inside'),0),
 		COALESCE(SUM(json_extract(profile,'$.accept_status')='completed' AND json_extract(profile,'$.remove_status')!='completed' AND json_extract(profile,'$.remote_removed_at') IS NULL AND LOWER(COALESCE(json_extract(profile,'$.seat_type'),'')) IN ('prolite','premium','5x')),0),
 		COALESCE(SUM(CASE WHEN space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL THEN MAX(0,100-CAST(json_extract(profile,'$.quota_7d.used_percent') AS REAL)) ELSE 0 END),0),
 		COALESCE(SUM(space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL),0),
-		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' THEN json_extract(profile,'$.status_checked_at') END),''),
-		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' THEN json_extract(profile,'$.quota_checked_at') END),''),
-		COALESCE(SUM(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' AND NULLIF(json_extract(profile,'$.status_checked_at'),'') IS NULL THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state!='removed' AND NULLIF(json_extract(profile,'$.quota_checked_at'),'') IS NULL THEN 1 ELSE 0 END),0),
+		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state='inside' THEN json_extract(profile,'$.status_checked_at') END),''),
+		COALESCE(MIN(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state='inside' THEN json_extract(profile,'$.quota_checked_at') END),''),
+		COALESCE(SUM(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state='inside' AND NULLIF(json_extract(profile,'$.status_checked_at'),'') IS NULL THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN json_extract(profile,'$.push_status')='completed' AND space_state='inside' AND NULLIF(json_extract(profile,'$.quota_checked_at'),'') IS NULL THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(space_state!='removed' AND json_extract(profile,'$.accept_status')!='completed'
 			AND json_extract(profile,'$.invite_status') IN ('pending','running','completed')
 			AND COALESCE(json_extract(profile,'$.admin_account_id'),'')!=''),0)

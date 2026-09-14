@@ -101,6 +101,7 @@ func TestFreeAccountsPageSummaryIsIndependentFromCurrentPage(t *testing.T) {
 			case 0:
 				item.AcceptStatus = "completed"
 				item.SeatType = "prolite"
+				item.PushStatus = "completed"
 				item.Quota7D = &model.FreeQuotaWindow{UsedPercent: 25}
 			case 1:
 				item.AcceptStatus = "completed"
@@ -127,6 +128,9 @@ func TestFreeAccountsPageSummaryIsIndependentFromCurrentPage(t *testing.T) {
 	}
 	if summary.InsidePremium != 1 || summary.Quota7DCount != 1 || summary.Quota7DRemainingTotal != 75 {
 		t.Fatalf("unexpected quota summary: %+v", summary)
+	}
+	if summary.Monitoring != 1 || summary.StatusUnchecked != 1 || summary.QuotaUnchecked != 1 {
+		t.Fatalf("outside pushed account must not affect monitor summary: %+v", summary)
 	}
 	if got := summary.PendingSeatsByAdmin["admin-1"]["premium"]; got != 1 {
 		t.Fatalf("pending premium seats = %d, want 1", got)
