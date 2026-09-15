@@ -1150,7 +1150,13 @@ func (s *Store) UpdateAdminAccountPlanCheck(id string, result model.AccountPlanC
 	}
 	profile.TeamSubscriptionCheckedAt = &checkedAt
 	if result.OK {
+		// For an active subscription, the billing-cycle end shown by ChatGPT
+		// is renews_at. expires_at can be several hours later because it is the
+		// final entitlement/grace cutoff, which may move the displayed date.
 		value := strings.TrimSpace(result.ExpiresAt)
+		if result.HasActiveSubscription && strings.TrimSpace(result.RenewsAt) != "" {
+			value = strings.TrimSpace(result.RenewsAt)
+		}
 		if value == "" {
 			profile.TeamSubscriptionExpiresAt = nil
 		} else {

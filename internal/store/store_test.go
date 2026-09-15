@@ -382,11 +382,12 @@ func TestAdminAccountPlanCheckPersistsSubscriptionExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	expiresAt := "2026-10-06T19:26:54+00:00"
-	updated, err := dataStore.UpdateAdminAccountPlanCheck(profile.ID, model.AccountPlanCheckResult{OK: true, ExpiresAt: expiresAt})
+	renewsAt := "2026-10-06T13:26:54+00:00"
+	updated, err := dataStore.UpdateAdminAccountPlanCheck(profile.ID, model.AccountPlanCheckResult{OK: true, HasActiveSubscription: true, ExpiresAt: expiresAt, RenewsAt: renewsAt})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.TeamSubscriptionExpiresAt == nil || updated.TeamSubscriptionExpiresAt.Format(time.RFC3339) != "2026-10-06T19:26:54Z" {
+	if updated.TeamSubscriptionExpiresAt == nil || updated.TeamSubscriptionExpiresAt.Format(time.RFC3339) != "2026-10-06T13:26:54Z" {
 		t.Fatalf("unexpected expiry: %+v", updated.TeamSubscriptionExpiresAt)
 	}
 	reopened, _, _, err := dataStore.AdminAccountsPage(10, 0)
