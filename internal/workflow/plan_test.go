@@ -64,7 +64,7 @@ func TestCheckAccountPlanUsesConfiguredProxyHeadersAndRetries429(t *testing.T) {
 		if got := r.Header.Get("x-openai-target-path"); got != "/backend-api/accounts/check/v4-2023-04-27" {
 			t.Errorf("target header = %q", got)
 		}
-		if r.URL.Query().Get("timezone_offset_min") != "-" {
+		if r.URL.Query().Get("timezone_offset_min") != "-480" {
 			t.Errorf("timezone query = %q", r.URL.RawQuery)
 		}
 		if call == 1 {

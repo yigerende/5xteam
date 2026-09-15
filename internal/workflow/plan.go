@@ -27,7 +27,10 @@ func (c *Client) CheckAccountPlan(ctx context.Context, token string) model.Accou
 		return result
 	}
 	claims, _ := DecodeUserInfo(token)
-	requestPath := accountPlanCheckPath + "?timezone_offset_min=-"
+	// ChatGPT's account-check endpoint expects the browser's timezone offset
+	// in minutes. The application displays and calculates dates in Beijing
+	// time, so use UTC+8's west-of-UTC offset consistently.
+	requestPath := accountPlanCheckPath + "?timezone_offset_min=-480"
 	const maxAttempts = 2
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		result.AttemptCount = attempt
