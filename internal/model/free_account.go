@@ -56,39 +56,44 @@ type FreeAccountProfile struct {
 	PlanType          string     `json:"plan_type"`
 	// ImportMode identifies records received from an integration that must not
 	// be treated as queued Team-rotation work.
-	ImportMode                 string             `json:"import_mode,omitempty"`
-	AdminAccountID             string             `json:"admin_account_id,omitempty"`
-	AdminEmail                 string             `json:"admin_email,omitempty"`
-	TeamAccountID              string             `json:"team_account_id,omitempty"`
-	SeatType                   string             `json:"seat_type,omitempty"`
-	Status                     string             `json:"status"`
-	InviteStatus               string             `json:"invite_status"`
-	AcceptStatus               string             `json:"accept_status"`
-	OAuthStatus                string             `json:"oauth_status"`
-	PushStatus                 string             `json:"push_status"`
-	QuotaStatus                string             `json:"quota_status"`
-	RemoveStatus               string             `json:"remove_status"`
-	RemoveMethod               string             `json:"remove_method,omitempty"`
-	JoinMethod                 string             `json:"join_method,omitempty"`
-	Dead                       bool               `json:"dead,omitempty"`
-	DeadReason                 string             `json:"dead_reason,omitempty"`
-	DeadDetectedAt             *time.Time         `json:"dead_detected_at,omitempty"`
-	LastError                  string             `json:"last_error,omitempty"`
-	SourceTokenPresent         bool               `json:"source_token_present"`
-	OAuthAccessTokenPresent    bool               `json:"oauth_access_token_present"`
-	OAuthRefreshTokenPresent   bool               `json:"oauth_refresh_token_present"`
-	OAuthAccountID             string             `json:"oauth_account_id,omitempty"`
-	Sub2AccountID              int64              `json:"sub2_account_id,omitempty"`
-	Sub2AccountName            string             `json:"sub2_account_name,omitempty"`
-	CPAAuthFileName            string             `json:"cpa_auth_file_name,omitempty"`
-	PushProvider               string             `json:"push_provider,omitempty"`
-	Sub2GroupID                int64              `json:"sub2_group_id,omitempty"`
-	Sub2GroupName              string             `json:"sub2_group_name,omitempty"`
-	Sub2GroupIDs               []int64            `json:"sub2_group_ids,omitempty"`
-	Sub2GroupNames             []string           `json:"sub2_group_names,omitempty"`
-	ReloginCount               int                `json:"relogin_count"`
-	ReloginFailureCount        int                `json:"relogin_failure_count"`
-	ReloginLastFailedAt        *time.Time         `json:"relogin_last_failed_at,omitempty"`
+	ImportMode               string     `json:"import_mode,omitempty"`
+	AdminAccountID           string     `json:"admin_account_id,omitempty"`
+	AdminEmail               string     `json:"admin_email,omitempty"`
+	TeamAccountID            string     `json:"team_account_id,omitempty"`
+	SeatType                 string     `json:"seat_type,omitempty"`
+	Status                   string     `json:"status"`
+	InviteStatus             string     `json:"invite_status"`
+	AcceptStatus             string     `json:"accept_status"`
+	OAuthStatus              string     `json:"oauth_status"`
+	PushStatus               string     `json:"push_status"`
+	QuotaStatus              string     `json:"quota_status"`
+	RemoveStatus             string     `json:"remove_status"`
+	RemoveMethod             string     `json:"remove_method,omitempty"`
+	JoinMethod               string     `json:"join_method,omitempty"`
+	Dead                     bool       `json:"dead,omitempty"`
+	DeadReason               string     `json:"dead_reason,omitempty"`
+	DeadDetectedAt           *time.Time `json:"dead_detected_at,omitempty"`
+	LastError                string     `json:"last_error,omitempty"`
+	SourceTokenPresent       bool       `json:"source_token_present"`
+	OAuthAccessTokenPresent  bool       `json:"oauth_access_token_present"`
+	OAuthRefreshTokenPresent bool       `json:"oauth_refresh_token_present"`
+	OAuthAccountID           string     `json:"oauth_account_id,omitempty"`
+	Sub2AccountID            int64      `json:"sub2_account_id,omitempty"`
+	Sub2AccountName          string     `json:"sub2_account_name,omitempty"`
+	CPAAuthFileName          string     `json:"cpa_auth_file_name,omitempty"`
+	PushProvider             string     `json:"push_provider,omitempty"`
+	Sub2GroupID              int64      `json:"sub2_group_id,omitempty"`
+	Sub2GroupName            string     `json:"sub2_group_name,omitempty"`
+	Sub2GroupIDs             []int64    `json:"sub2_group_ids,omitempty"`
+	Sub2GroupNames           []string   `json:"sub2_group_names,omitempty"`
+	ReloginCount             int        `json:"relogin_count"`
+	ReloginFailureCount      int        `json:"relogin_failure_count"`
+	ReloginLastFailedAt      *time.Time `json:"relogin_last_failed_at,omitempty"`
+	// ReloginExhausted marks that consecutive 401 relogins hit the configured
+	// limit. The child's own AT is no longer usable at that point, so removal
+	// must go through the mother account even when the cycle selected
+	// child_leave. A successful relogin clears it.
+	ReloginExhausted           bool               `json:"relogin_exhausted,omitempty"`
 	Quota5H                    *FreeQuotaWindow   `json:"quota_5h,omitempty"`
 	Quota7D                    *FreeQuotaWindow   `json:"quota_7d,omitempty"`
 	TotalCostUSD               float64            `json:"total_cost_usd"`

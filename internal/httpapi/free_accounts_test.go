@@ -118,6 +118,24 @@ func TestRemovalMethodStaysPinnedToActiveCycle(t *testing.T) {
 	if got := removalMethodForCycle(model.FreeAccountProfile{}, settings); got != "child_leave" {
 		t.Fatalf("new cycle did not inherit configured method: %q", got)
 	}
+	// Exhausted 401 relogins leave the child AT unusable, so a child-side leave
+	// would fail with the same 401 that triggered the relogin.
+	if got := removalMethodForCycle(model.FreeAccountProfile{ReloginExhausted: true, RemoveMethod: "child_leave"}, settings); got != "mother_kick" {
+		t.Fatalf("exhausted relogin must force mother kick, got %q", got)
+	}
+}
+
+func TestSuccessfulReloginClearsForcedMotherKick(t *testing.T) {
+	settings := model.DefaultAutoRotationSettings()
+	settings.RemoveMethod = "child_leave"
+	profile := model.FreeAccountProfile{ReloginExhausted: true, RemoveMethod: "child_leave"}
+	clearReloginFailures(&profile)
+	if profile.ReloginExhausted {
+		t.Fatal("successful relogin must clear the forced mother-kick override")
+	}
+	if got := removalMethodForCycle(profile, settings); got != "child_leave" {
+		t.Fatalf("cycle method not restored after successful relogin: %q", got)
+	}
 }
 
 func TestDeadOAuthDetectionRequiresExplicitAccountSignal(t *testing.T) {
@@ -367,6 +385,9 @@ func TestConsecutive401ReloginFailuresRemoveAtConfiguredLimit(t *testing.T) {
 		item.AdminAccountID, item.TeamAccountID, item.UserID = admin.ID, "team-401", "user-401"
 		item.InviteStatus, item.AcceptStatus, item.PushStatus = "completed", "completed", "completed"
 		item.RemoveStatus, item.Status = "pending", "monitoring"
+		// The child AT is dead once relogins are exhausted, so removal must be
+		// forced through the mother even though this cycle chose child_leave.
+		item.RemoveMethod = "child_leave"
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -387,6 +408,11 @@ func TestConsecutive401ReloginFailuresRemoveAtConfiguredLimit(t *testing.T) {
 	stored, _, err := dataStore.FreeAccountCredential(account.ID)
 	if err != nil || stored.RemoveStatus != "completed" || stored.Status != "removed" || stored.ReloginFailureCount != 2 {
 		t.Fatalf("removed account state mismatch: profile=%+v err=%v", stored, err)
+	}
+	// The mother DELETE is the only route the upstream stub serves, so a
+	// non-zero kick count already proves child_leave was overridden.
+	if !stored.ReloginExhausted || stored.RemoveMethod != "mother_kick" {
+		t.Fatalf("forced mother kick not persisted: exhausted=%v method=%q", stored.ReloginExhausted, stored.RemoveMethod)
 	}
 	server.Close()
 	events := dataStore.AutoRotationEventsByAccount(account.ID)

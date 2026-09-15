@@ -1774,11 +1774,22 @@ func (s *Server) record401ReloginFailure(ctx context.Context, accountID, provide
 	if profile.ReloginFailureCount < limit {
 		return outcome, nil
 	}
+	// The child AT is what relogin was trying to renew, so an exhausted counter
+	// means it can no longer authenticate its own Team membership DELETE.
+	// Persist that fact before removing so every removal path (this one, a
+	// manual retry, or a restart-recovery) goes through the mother account.
+	if updated, markErr := s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
+		item.ReloginExhausted = true
+		item.RemoveMethod = "mother_kick"
+	}); markErr == nil {
+		profile = updated
+		outcome.Profile = updated
+	}
 	s.enqueueAuditEvent(model.AutoRotationEvent{
 		AccountID: accountID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
 		Type: "relogin_failure_remove_start", Source: "monitor_401", Provider: provider, Operation: "remove", Stage: "remove", Level: "error",
-		Message: "401 重登连续失败达到阈值，开始自动移出空间",
-		Details: map[string]any{"consecutive_failures": profile.ReloginFailureCount, "failure_limit": limit},
+		Message: "401 重登连续失败达到阈值，开始由母号强制移出空间",
+		Details: map[string]any{"consecutive_failures": profile.ReloginFailureCount, "failure_limit": limit, "remove_method": "mother_kick", "forced_mother_kick": true},
 	})
 	removed, removeErr := s.performFreeAccountRemove(ctx, accountID)
 	outcome.Profile = removed
@@ -2013,6 +2024,9 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 func clearReloginFailures(profile *model.FreeAccountProfile) {
 	profile.ReloginFailureCount = 0
 	profile.ReloginLastFailedAt = nil
+	// A successful relogin proves the child AT works again, so the forced
+	// mother-kick override no longer applies.
+	profile.ReloginExhausted = false
 }
 
 func (s *Server) removeFreeAccount(w http.ResponseWriter, r *http.Request) {
@@ -2127,6 +2141,11 @@ func removalMethodForCycle(profile model.FreeAccountProfile, settings model.Auto
 	// A dead child account can no longer authenticate with its own AT. Always
 	// remove it through the mother account, regardless of the cycle setting.
 	if profile.Dead {
+		return "mother_kick"
+	}
+	// Exhausted 401 relogins mean the child AT could not be renewed, so a
+	// child-side leave would fail with the same 401. Force the mother kick.
+	if profile.ReloginExhausted {
 		return "mother_kick"
 	}
 	if profile.RemoveMethod == "mother_kick" || profile.RemoveMethod == "child_leave" {
