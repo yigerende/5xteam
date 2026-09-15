@@ -72,6 +72,7 @@ function edit(proxy) {
 async function save() {
   const url = parseURL(false)
   if (!form.name.trim() || !url) return setMessage('代理名称和有效地址不能为空', 'error')
+  const updatingGlobal = Boolean(form.id) && props.proxies.some(proxy => proxy.id === form.id && proxy.url === props.selectedURL)
   busy.value = true
   try {
     const profile = await api(form.id ? `/api/proxies/${encodeURIComponent(form.id)}` : '/api/proxies', {
@@ -80,9 +81,9 @@ async function save() {
     })
     reset()
     emit('reload')
-    emit('select', profile.url)
+    if (updatingGlobal) emit('select', profile.url)
     await loadPage()
-    setMessage(`${profile.name} 已保存并设为全局代理`, 'success')
+    setMessage(`${profile.name} 已保存`, 'success')
   } catch (error) {
     setMessage(error.message, 'error')
   } finally {
