@@ -174,10 +174,7 @@ func TestDeadOAuthSynchronizesMailAndRemovesTeamMember(t *testing.T) {
 	if err := dataStore.SaveSettings(settings); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := dataStore.SaveAdminAccount(model.AdminAccountProfile{Label: "admin", Email: "admin@example.com", TeamAccountID: "team-1"}, "admin-token")
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := saveTestAdmin(t, dataStore, model.AdminAccountProfile{Label: "admin", Email: "admin@example.com", TeamAccountID: "team-1"}, "admin-token", upstream.URL)
 	if _, err := dataStore.SaveMailAccount(model.MailAccountProfile{Email: "dead@example.com", Label: "dead@example.com"}, model.MailAccountCredentials{Email: "dead@example.com", PickupURL: "https://mail.example/messages/token"}); err != nil {
 		t.Fatal(err)
 	}
@@ -250,10 +247,7 @@ func TestDeadOAuthKeepsDeadStateWhenAutomaticRemovalFails(t *testing.T) {
 	if err := dataStore.SaveSettings(settings); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := dataStore.SaveAdminAccount(model.AdminAccountProfile{Label: "admin-fail", TeamAccountID: "team-fail"}, "admin-token")
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := saveTestAdmin(t, dataStore, model.AdminAccountProfile{Label: "admin-fail", TeamAccountID: "team-fail"}, "admin-token", upstream.URL)
 	if _, err := dataStore.SaveMailAccount(model.MailAccountProfile{Email: "dead-fail@example.com"}, model.MailAccountCredentials{Email: "dead-fail@example.com", PickupURL: "https://mail.example/messages/token"}); err != nil {
 		t.Fatal(err)
 	}
@@ -364,10 +358,7 @@ func TestConsecutive401ReloginFailuresRemoveAtConfiguredLimit(t *testing.T) {
 	if _, err := dataStore.SaveSub2Settings(pushSettings, ""); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := dataStore.SaveAdminAccount(model.AdminAccountProfile{Label: "admin-401", TeamAccountID: "team-401"}, "admin-token")
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := saveTestAdmin(t, dataStore, model.AdminAccountProfile{Label: "admin-401", TeamAccountID: "team-401"}, "admin-token", upstream.URL)
 	account, _, err := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "fail401@example.com", UserID: "user-401"}, "source-token")
 	if err != nil {
 		t.Fatal(err)
@@ -498,10 +489,7 @@ func TestChildLeaveUsesMailManagementAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := dataStore.SaveAdminAccount(model.AdminAccountProfile{Label: "leave-admin", TeamAccountID: "leave-team"}, "admin-at")
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := saveTestAdmin(t, dataStore, model.AdminAccountProfile{Label: "leave-admin", TeamAccountID: "leave-team"}, "admin-at", "")
 	account, err = dataStore.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
 		item.AdminAccountID, item.TeamAccountID = admin.ID, "leave-team"
 		item.InviteStatus, item.AcceptStatus, item.RemoveStatus = "completed", "completed", "pending"
@@ -557,10 +545,7 @@ func TestConcurrentRemovalOnlyKicksTeamMemberOnce(t *testing.T) {
 	if err := dataStore.SaveSettings(settings); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := dataStore.SaveAdminAccount(model.AdminAccountProfile{Label: "admin-concurrent", TeamAccountID: "team-concurrent"}, "admin-token")
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := saveTestAdmin(t, dataStore, model.AdminAccountProfile{Label: "admin-concurrent", TeamAccountID: "team-concurrent"}, "admin-token", upstream.URL)
 	account, _, err := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "concurrent@example.com", UserID: "user-concurrent"}, "source-token")
 	if err != nil {
 		t.Fatal(err)
@@ -627,13 +612,10 @@ func TestConcurrentRemovalSerializesDifferentAccountsForSameTeam(t *testing.T) {
 	}
 	accounts := make([]model.FreeAccountProfile, 0, 2)
 	for index := range 2 {
-		admin, saveErr := dataStore.SaveAdminAccount(model.AdminAccountProfile{
+		admin := saveTestAdmin(t, dataStore, model.AdminAccountProfile{
 			Label:         fmt.Sprintf("admin-serial-%d", index),
 			TeamAccountID: "team-serial",
-		}, "admin-token")
-		if saveErr != nil {
-			t.Fatal(saveErr)
-		}
+		}, "admin-token", upstream.URL)
 		account, _, saveErr := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{
 			Email:  fmt.Sprintf("serial-%d@example.com", index),
 			UserID: fmt.Sprintf("serial-user-%d", index),
@@ -711,13 +693,10 @@ func TestConcurrentRemovalAllowsDifferentTeamsInParallel(t *testing.T) {
 	}
 	accounts := make([]model.FreeAccountProfile, 0, 2)
 	for index := range 2 {
-		admin, saveErr := dataStore.SaveAdminAccount(model.AdminAccountProfile{
+		admin := saveTestAdmin(t, dataStore, model.AdminAccountProfile{
 			Label:         fmt.Sprintf("admin-parallel-%d", index),
 			TeamAccountID: fmt.Sprintf("team-parallel-%d", index),
-		}, "admin-token")
-		if saveErr != nil {
-			t.Fatal(saveErr)
-		}
+		}, "admin-token", upstream.URL)
 		account, _, saveErr := dataStore.SaveImportedFreeAccount(model.FreeAccountProfile{
 			Email:  fmt.Sprintf("parallel-%d@example.com", index),
 			UserID: fmt.Sprintf("parallel-user-%d", index),

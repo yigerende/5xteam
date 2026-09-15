@@ -111,10 +111,7 @@ func TestAutoRotationStartsWithoutSpaceQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	admin, err := st.SaveAdminAccount(model.AdminAccountProfile{Email: "admin@example.com", TeamAccountID: "team-1"}, "fixture-token")
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := saveTestAdmin(t, st, model.AdminAccountProfile{Email: "admin@example.com", TeamAccountID: "team-1"}, "fixture-token", "")
 	if err = st.SaveAdminCapacitySnapshot(admin.ID, model.AdminSeatCapacity{Premium: model.AdminSeatBucket{Total: 19}}); err != nil {
 		t.Fatal(err)
 	}
@@ -157,10 +154,7 @@ func TestEmptyRotationImportsMailboxCandidatesWithinLimits(t *testing.T) {
 			}
 			defer st.Close()
 			// No Team ID: stop at the invitation precondition without any remote calls.
-			admin, err := st.SaveAdminAccount(model.AdminAccountProfile{Email: "admin@example.com"}, "fixture-token")
-			if err != nil {
-				t.Fatal(err)
-			}
+			admin := saveTestAdmin(t, st, model.AdminAccountProfile{Email: "admin@example.com"}, "fixture-token", "")
 			if err := st.SaveAdminCapacitySnapshot(admin.ID, model.AdminSeatCapacity{Premium: model.AdminSeatBucket{Total: tc.seats}}); err != nil {
 				t.Fatal(err)
 			}
@@ -359,10 +353,7 @@ func TestAutoRotationRetryExhaustionRemovesJoinedAccount(t *testing.T) {
 	if err := st.SaveSettings(settings); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := st.SaveAdminAccount(model.AdminAccountProfile{Label: "cleanup-admin", TeamAccountID: "team-cleanup"}, "admin-token")
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := saveTestAdmin(t, st, model.AdminAccountProfile{Label: "cleanup-admin", TeamAccountID: "team-cleanup"}, "admin-token", upstream.URL)
 	account, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "cleanup@example.com", UserID: "user-cleanup"}, "source-token")
 	if err != nil {
 		t.Fatal(err)
@@ -546,10 +537,7 @@ func TestAutoRotationFailureRecordsAutomaticRemovalFailure(t *testing.T) {
 	if err := st.SaveSettings(settings); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := st.SaveAdminAccount(model.AdminAccountProfile{Label: "failed-cleanup-admin", TeamAccountID: "team-failed-cleanup"}, "admin-token")
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := saveTestAdmin(t, st, model.AdminAccountProfile{Label: "failed-cleanup-admin", TeamAccountID: "team-failed-cleanup"}, "admin-token", upstream.URL)
 	account, _, err := st.SaveImportedFreeAccount(model.FreeAccountProfile{Email: "failed-cleanup@example.com", UserID: "failed-cleanup-user"}, "source-token")
 	if err != nil {
 		t.Fatal(err)
