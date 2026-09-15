@@ -1,6 +1,6 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Check, CheckCircle2, Copy, FileJson, FileKey2, Network, Pencil, RefreshCw, Save, Trash2, X } from 'lucide-vue-next'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { CalendarClock, Check, CheckCircle2, Copy, Ellipsis, FileJson, FileKey2, Network, Pencil, RefreshCw, Save, Trash2, X } from 'lucide-vue-next'
 import { api } from '../api'
 import { decodeJWTPayload, findAccessToken, findRefreshToken, formatTime, shortID } from '../utils'
 import IconButton from './IconButton.vue'
@@ -22,6 +22,11 @@ const fileInput = ref(null)
 const capacities = ref(new Map())
 const capacityBusy = ref(new Set())
 const capacityAllBusy = ref(false)
+const planBusy = ref(new Set())
+const planAllBusy = ref(false)
+const openActionMenu = ref('')
+const priceNow = ref(Date.now())
+let priceTimer
 const page = ref(1)
 const pageSize = ref(props.defaultPageSize)
 const rows = ref([])
@@ -107,7 +112,7 @@ function seatTitle(account, key) {
   if (capacity.snapshotOnly) return `数据库快照总计 ${bucket.total}；剩余和临停请点击刷新席位实时获取`
   return `实时剩余 ${bucket.remaining}，总计 ${bucket.total}`
 }
-function proxyName(proxyID) { return props.proxies.find(proxy => proxy.id === proxyID)?.name || '跟随全局代理' }
+function proxyName(proxyID) { return props.proxies.find(proxy => proxy.id === proxyID)?.name || '未绑定专属代理' }
 async function saveProxy(account, proxyID) {
   const nextBusy = new Set(proxySaving.value); nextBusy.add(account.id); proxySaving.value = nextBusy
   try {
@@ -119,6 +124,53 @@ async function saveProxy(account, proxyID) {
 }
 
 function setMessage(text = '', type = '') { Object.assign(message, { text, type }) }
+function toggleActionMenu(id) { openActionMenu.value = openActionMenu.value === id ? '' : id }
+
+function teamSeatPrice(account) {
+  const expiry = Date.parse(account.team_subscription_expires_at || '')
+  if (!Number.isFinite(expiry)) return '-'
+  const expiryDate = new Date(expiry)
+  const today = new Date(priceNow.value)
+  const expiryDay = Date.UTC(expiryDate.getFullYear(), expiryDate.getMonth(), expiryDate.getDate())
+  const todayDay = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+  const days = Math.max(0, Math.round((expiryDay - todayDay) / 86400000))
+  return `$${(125 / 30 * days).toFixed(2)}`
+}
+
+function formatSubscriptionTime(value) {
+  if (!value) return '-'
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    timeZone: 'Asia/Shanghai',
+  }).format(new Date(value))
+}
+
+async function refreshPlan(account, options = {}) {
+  const { reload = true, notify = true } = options
+  const nextBusy = new Set(planBusy.value); nextBusy.add(account.id); planBusy.value = nextBusy
+  try {
+    const result = await api(`/api/admin-accounts/${encodeURIComponent(account.id)}/check-plan`, { method: 'POST', body: {} })
+    const updated = result.profile || {}
+    rows.value = rows.value.map(item => item.id === account.id ? { ...item, ...updated } : item)
+    if (reload) emit('reload')
+    if (notify) setMessage(`${account.label} 套餐信息已更新`, 'success')
+    return true
+  } catch (error) { if (notify) setMessage(`${account.label} 套餐查询失败：${error.message}`, 'error'); return false }
+  finally { const next = new Set(planBusy.value); next.delete(account.id); planBusy.value = next }
+}
+
+async function refreshPlans() {
+  if (planAllBusy.value || !props.accounts.length) return
+  planAllBusy.value = true
+  try {
+    const results = []
+    for (const account of props.accounts) results.push(await refreshPlan(account, { reload: false, notify: false }))
+    const succeeded = results.filter(Boolean).length
+    const failed = results.length - succeeded
+    emit('reload')
+    setMessage(failed ? `套餐刷新完成：成功 ${succeeded}，失败 ${failed}` : `已刷新 ${succeeded} 个母号套餐到期时间`, failed ? 'error' : 'success')
+  } finally { planAllBusy.value = false }
+}
 
 function parseSession() {
   const raw = form.session.trim()
@@ -253,10 +305,21 @@ async function remove(account) {
     setMessage(`${account.label} 已删除`, 'success')
   } catch (error) { setMessage(error.message, 'error') }
 }
+function schedulePriceRefresh() {
+  const now = new Date()
+  const nextDay = new Date(now)
+  nextDay.setHours(24, 0, 0, 0)
+  priceTimer = window.setTimeout(() => {
+    priceNow.value = Date.now()
+    schedulePriceRefresh()
+  }, Math.max(1000, nextDay.getTime() - now.getTime()))
+}
 onMounted(async () => {
+  schedulePriceRefresh()
   try { await Promise.all([loadPage(), loadCapacitySnapshots()]) }
   catch (error) { setMessage(`母号席位快照读取失败：${error.message}`, 'error') }
 })
+onUnmounted(() => { if (priceTimer) window.clearTimeout(priceTimer) })
 </script>
 
 <template>
@@ -278,17 +341,17 @@ onMounted(async () => {
       </form>
 
       <section v-if="adminMenu === 'list'" class="panel list-panel">
-        <div class="panel-title"><div><span>ACCOUNTS</span><h2>已保存母号</h2></div><div class="heading-actions"><span class="muted-count">{{ total }} 条记录</span><button class="btn ghost" type="button" :disabled="capacityAllBusy || !accounts.length" @click="loadCapacities"><RefreshCw :class="{ spin: capacityAllBusy }" :size="15" />刷新全部席位</button></div></div>
-        <div class="table-shell"><table><thead><tr><th>名称 / 邮箱</th><th>计划</th><th>团队</th><th>专属代理</th><th>当前在空间</th><th>普通席位</th><th>高级席位 5x</th><th>临停席位</th><th>累计进入子号次数</th><th>子号累计消耗</th><th>续期</th><th>校验</th><th class="actions-column">操作</th></tr></thead><tbody>
-          <tr v-if="!accounts.length"><td colspan="13" class="empty-cell">暂无母号配置</td></tr>
-          <tr v-for="account in pagedAccounts" :key="account.id"><td class="account-cell"><strong>{{ account.label }}</strong><small>{{ account.email }}</small></td><td>{{ account.plan_type || '-' }}</td><td class="mono" :title="account.team_account_id">{{ shortID(account.team_account_id) }}</td><td><select class="proxy-select compact" :value="account.proxy_id || ''" :disabled="proxySaving.has(account.id)" @change="saveProxy(account, $event.target.value)"><option value="">跟随全局</option><option v-for="proxy in props.proxies" :key="proxy.id" :value="proxy.id">{{ proxy.name }}</option></select></td><td :title="account.current_space_count ? `当前在空间：\n${(account.current_space_emails || []).join('\n')}` : '当前没有子号在空间中'"><strong>{{ account.current_space_count || 0 }}</strong><small class="table-note">个子号</small></td><td class="seat-cell" :title="seatTitle(account, 'standard')"><strong>{{ seatText(account, 'standard') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td class="seat-cell" :title="seatTitle(account, 'premium')"><strong>{{ seatText(account, 'premium') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td class="seat-cell"><strong>{{ heldText(account) }}</strong><small>{{ seatError(account) ? '读取失败' : 'On hold' }}</small></td><td><strong>{{ account.team_rotation_child_count || 0 }}</strong><small class="table-note">次</small></td><td class="cost-cell"><strong>${{ Number(account.team_rotation_child_cost_usd || 0).toFixed(4) }}</strong><small class="table-note user-cost" title="累计用户消耗额度">{{ account.team_rotation_child_user_cost_usd == null ? '用户 --' : `用户 $${Number(account.team_rotation_child_user_cost_usd).toFixed(4)}` }}</small><small class="table-note">Sub2</small></td><td><StatusPill :tone="account.refresh_token_present ? 'success' : 'pending'">{{ account.refresh_token_present ? 'RT 已保存' : '无 RT' }}</StatusPill><small class="table-note">{{ account.access_token_expires_at ? `AT ${formatTime(account.access_token_expires_at)} 到期` : '未记录到期时间' }}</small></td><td><template v-if="tests.get(account.id)"><StatusPill :tone="tests.get(account.id).valid ? 'success' : 'danger'">{{ tests.get(account.id).valid ? '有效' : '无效' }}</StatusPill><small class="table-note">{{ tests.get(account.id).latency_ms }}ms</small></template><StatusPill v-else tone="pending">未校验</StatusPill></td><td><div class="row-actions"><IconButton label="查看 AT / RT" :disabled="busy" @click="openCredentialDialog(account)"><FileKey2 :size="15" /></IconButton><IconButton label="刷新席位" :disabled="capacityBusy.has(account.id)" @click="loadCapacity(account)"><RefreshCw :size="15" /></IconButton><IconButton label="校验凭据" :disabled="busy" @click="test(account)"><CheckCircle2 :size="15" /></IconButton><IconButton label="刷新 AT/RT" :disabled="busy" @click="refresh(account)"><RefreshCw :size="15" /></IconButton><IconButton label="编辑母号" @click="edit(account)"><Pencil :size="15" /></IconButton><IconButton label="删除母号" danger @click="remove(account)"><Trash2 :size="15" /></IconButton></div></td></tr>
+        <div class="panel-title"><div><span>ACCOUNTS</span><h2>已保存母号</h2></div><div class="heading-actions"><span class="muted-count">{{ total }} 条记录</span><button class="btn ghost" type="button" :disabled="capacityAllBusy || !accounts.length" @click="loadCapacities"><RefreshCw :class="{ spin: capacityAllBusy }" :size="15" />刷新全部席位</button><button class="btn ghost" type="button" :disabled="planAllBusy || !accounts.length" @click="refreshPlans"><CalendarClock :class="{ spin: planAllBusy }" :size="15" />批量刷新套餐</button></div></div>
+        <div class="table-shell"><table><thead><tr><th>名称 / 邮箱</th><th>计划</th><th>套餐到期</th><th>当前 5x 价格</th><th>团队</th><th>专属代理</th><th>当前在空间</th><th>普通席位</th><th>高级席位 5x</th><th>临停席位</th><th>累计进入子号次数</th><th>子号累计消耗</th><th>续期</th><th>校验</th><th class="actions-column">操作</th></tr></thead><tbody>
+          <tr v-if="!accounts.length"><td colspan="15" class="empty-cell">暂无母号配置</td></tr>
+          <tr v-for="account in pagedAccounts" :key="account.id"><td class="account-cell"><strong>{{ account.label }}</strong><small>{{ account.email }}</small></td><td>{{ account.plan_type || '-' }}</td><td class="date-cell"><strong>{{ account.team_subscription_expires_at ? formatSubscriptionTime(account.team_subscription_expires_at) : '-' }}</strong><small class="table-note">{{ account.team_subscription_checked_at ? `查询于 ${formatSubscriptionTime(account.team_subscription_checked_at)}` : '未查询' }}</small></td><td class="cost-cell"><strong>{{ teamSeatPrice(account) }}</strong><small class="table-note">125 / 30 × 剩余天数</small></td><td class="mono" :title="account.team_account_id">{{ shortID(account.team_account_id) }}</td><td><select class="proxy-select compact" :value="account.proxy_id || ''" :disabled="proxySaving.has(account.id)" @change="saveProxy(account, $event.target.value)"><option value="">未绑定专属代理</option><option v-for="proxy in props.proxies" :key="proxy.id" :value="proxy.id">{{ proxy.name }}</option></select></td><td :title="account.current_space_count ? `当前在空间：\n${(account.current_space_emails || []).join('\n')}` : '当前没有子号在空间中'"><strong>{{ account.current_space_count || 0 }}</strong><small class="table-note">个子号</small></td><td class="seat-cell" :title="seatTitle(account, 'standard')"><strong>{{ seatText(account, 'standard') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td class="seat-cell" :title="seatTitle(account, 'premium')"><strong>{{ seatText(account, 'premium') }}</strong><small>{{ seatError(account) ? '读取失败' : '剩余 / 总量' }}</small></td><td class="seat-cell"><strong>{{ heldText(account) }}</strong><small>{{ seatError(account) ? '读取失败' : 'On hold' }}</small></td><td><strong>{{ account.team_rotation_child_count || 0 }}</strong><small class="table-note">次</small></td><td class="cost-cell"><strong>${{ Number(account.team_rotation_child_cost_usd || 0).toFixed(4) }}</strong><small class="table-note user-cost" title="累计用户消耗额度">{{ account.team_rotation_child_user_cost_usd == null ? '用户 --' : `用户 $${Number(account.team_rotation_child_user_cost_usd).toFixed(4)}` }}</small><small class="table-note">Sub2</small></td><td><StatusPill :tone="account.refresh_token_present ? 'success' : 'pending'">{{ account.refresh_token_present ? 'RT 已保存' : '无 RT' }}</StatusPill><small class="table-note">{{ account.access_token_expires_at ? `AT ${formatTime(account.access_token_expires_at)} 到期` : '未记录到期时间' }}</small></td><td><template v-if="tests.get(account.id)"><StatusPill :tone="tests.get(account.id).valid ? 'success' : 'danger'">{{ tests.get(account.id).valid ? '有效' : '无效' }}</StatusPill><small class="table-note">{{ tests.get(account.id).latency_ms }}ms</small></template><StatusPill v-else tone="pending">未校验</StatusPill></td><td class="actions-cell"><div class="row-action-menu"><IconButton label="更多操作" :disabled="busy || planBusy.has(account.id)" @click.stop="toggleActionMenu(account.id)"><Ellipsis :size="17" /></IconButton><div v-if="openActionMenu === account.id" class="action-menu-popover" @click.stop><button type="button" @click="openActionMenu = ''; openCredentialDialog(account)"><FileKey2 :size="14" />查看 AT / RT</button><button type="button" :disabled="capacityBusy.has(account.id)" @click="openActionMenu = ''; loadCapacity(account)"><RefreshCw :size="14" />刷新席位</button><button type="button" :disabled="planBusy.has(account.id)" @click="openActionMenu = ''; refreshPlan(account)"><RefreshCw :size="14" />刷新套餐</button><button type="button" @click="openActionMenu = ''; test(account)"><CheckCircle2 :size="14" />校验凭据</button><button type="button" @click="openActionMenu = ''; refresh(account)"><RefreshCw :size="14" />刷新 AT/RT</button><button type="button" @click="openActionMenu = ''; edit(account)"><Pencil :size="14" />编辑母号</button><button type="button" class="danger" @click="openActionMenu = ''; remove(account)"><Trash2 :size="14" />删除母号</button></div></div></td></tr>
         </tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="total" @update:page="setPage" @update:page-size="setPageSize" />
       </section>
       <section v-if="adminMenu === 'proxy'" class="panel list-panel">
-        <div class="panel-title"><div><span>DEDICATED PROXY</span><h2>母号代理</h2><p class="panel-subtitle">母号访问 OpenAI / Team 接口时使用这里绑定的专属代理；留空则跟随全局代理。</p></div><span class="muted-count">{{ accounts.length }} 个母号 · {{ props.proxies.length }} 条代理</span></div>
+        <div class="panel-title"><div><span>DEDICATED PROXY</span><h2>母号代理</h2><p class="panel-subtitle">母号访问 OpenAI / Team 接口必须使用这里绑定的专属代理。</p></div><span class="muted-count">{{ accounts.length }} 个母号 · {{ props.proxies.length }} 条代理</span></div>
         <div class="table-shell"><table><thead><tr><th>母号</th><th>团队</th><th>专属代理</th><th>状态</th></tr></thead><tbody>
           <tr v-if="!accounts.length"><td colspan="4" class="empty-cell">暂无母号配置</td></tr>
-          <tr v-for="account in accounts" :key="account.id"><td class="account-cell"><strong>{{ account.label }}</strong><small>{{ account.email }}</small></td><td class="mono">{{ shortID(account.team_account_id) }}</td><td><select class="proxy-select" :value="account.proxy_id || ''" :disabled="proxySaving.has(account.id)" @change="saveProxy(account, $event.target.value)"><option value="">跟随全局代理</option><option v-for="proxy in props.proxies" :key="proxy.id" :value="proxy.id">{{ proxy.name }}</option></select></td><td><StatusPill :tone="proxySaving.has(account.id) ? 'running' : 'success'">{{ proxySaving.has(account.id) ? '保存中' : proxyName(account.proxy_id) }}</StatusPill></td></tr>
+          <tr v-for="account in accounts" :key="account.id"><td class="account-cell"><strong>{{ account.label }}</strong><small>{{ account.email }}</small></td><td class="mono">{{ shortID(account.team_account_id) }}</td><td><select class="proxy-select" :value="account.proxy_id || ''" :disabled="proxySaving.has(account.id)" @change="saveProxy(account, $event.target.value)"><option value="">未绑定专属代理</option><option v-for="proxy in props.proxies" :key="proxy.id" :value="proxy.id">{{ proxy.name }}</option></select></td><td><StatusPill :tone="proxySaving.has(account.id) ? 'running' : (account.proxy_id ? 'success' : 'danger')">{{ proxySaving.has(account.id) ? '保存中' : proxyName(account.proxy_id) }}</StatusPill></td></tr>
         </tbody></table></div>
       </section>
     </div>
@@ -306,7 +369,15 @@ onMounted(async () => {
 .proxy-select { min-width: 220px; max-width: 340px; }
 .proxy-select.compact { min-width: 128px; max-width: 170px; }
 .cost-cell { font-variant-numeric: tabular-nums; }
+.date-cell { min-width: 150px; font-variant-numeric: tabular-nums; }
 .cost-cell .user-cost { color: var(--text-2); font-size: 10px; }
+.actions-cell { position: relative; width: 1%; }
+.row-action-menu { position: relative; display: inline-flex; justify-content: flex-end; }
+.action-menu-popover { position: absolute; z-index: 30; top: calc(100% + 6px); right: 0; display: grid; min-width: 150px; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: var(--shadow); }
+.action-menu-popover button { display: flex; min-height: 30px; align-items: center; gap: 8px; padding: 0 9px; border: 0; border-radius: 4px; background: transparent; color: var(--text-2); font-size: 11px; text-align: left; cursor: pointer; }
+.action-menu-popover button:hover { background: var(--surface-2); color: var(--text); }
+.action-menu-popover button:disabled { opacity: .45; cursor: not-allowed; }
+.action-menu-popover button.danger { color: var(--red); }
 .credential-dialog-backdrop { z-index: 120; }
 .credential-dialog { width: min(680px, calc(100vw - 32px)); max-height: min(760px, calc(100vh - 32px)); overflow: auto; }
 .credential-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }

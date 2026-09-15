@@ -186,25 +186,27 @@ type ProxyOpenAIQualityResult struct {
 }
 
 type AdminAccountProfile struct {
-	ID                     string     `json:"id"`
-	Label                  string     `json:"label"`
-	Email                  string     `json:"email"`
-	Name                   string     `json:"name"`
-	UserID                 string     `json:"user_id"`
-	AccountID              string     `json:"account_id"`
-	TeamAccountID          string     `json:"team_account_id"`
-	ProxyID                string     `json:"proxy_id,omitempty"`
-	CurrentSpaceCount      int        `json:"current_space_count"`
-	CurrentSpaceEmails     []string   `json:"current_space_emails,omitempty"`
-	PlanType               string     `json:"plan_type"`
-	TokenPresent           bool       `json:"token_present"`
-	RefreshTokenPresent    bool       `json:"refresh_token_present"`
-	AccessTokenExpiresAt   *time.Time `json:"access_token_expires_at,omitempty"`
-	LastRefreshedAt        *time.Time `json:"last_refreshed_at,omitempty"`
-	TeamRotationChildCount int        `json:"team_rotation_child_count"`
-	TeamRotationChildCost  float64    `json:"team_rotation_child_cost_usd"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
+	ID                        string     `json:"id"`
+	Label                     string     `json:"label"`
+	Email                     string     `json:"email"`
+	Name                      string     `json:"name"`
+	UserID                    string     `json:"user_id"`
+	AccountID                 string     `json:"account_id"`
+	TeamAccountID             string     `json:"team_account_id"`
+	ProxyID                   string     `json:"proxy_id,omitempty"`
+	CurrentSpaceCount         int        `json:"current_space_count"`
+	CurrentSpaceEmails        []string   `json:"current_space_emails,omitempty"`
+	PlanType                  string     `json:"plan_type"`
+	TokenPresent              bool       `json:"token_present"`
+	RefreshTokenPresent       bool       `json:"refresh_token_present"`
+	AccessTokenExpiresAt      *time.Time `json:"access_token_expires_at,omitempty"`
+	TeamSubscriptionExpiresAt *time.Time `json:"team_subscription_expires_at,omitempty"`
+	TeamSubscriptionCheckedAt *time.Time `json:"team_subscription_checked_at,omitempty"`
+	LastRefreshedAt           *time.Time `json:"last_refreshed_at,omitempty"`
+	TeamRotationChildCount    int        `json:"team_rotation_child_count"`
+	TeamRotationChildCost     float64    `json:"team_rotation_child_cost_usd"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
 
 	TeamRotationChildUserCost *float64 `json:"team_rotation_child_user_cost_usd,omitempty"`
 }

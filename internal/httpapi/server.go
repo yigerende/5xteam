@@ -133,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/admin-accounts/{id}", s.deleteAdminAccount)
 	mux.HandleFunc("PUT /api/admin-accounts/{id}/proxy", s.updateAdminAccountProxy)
 	mux.HandleFunc("POST /api/admin-accounts/{id}/refresh", s.refreshAdminAccount)
+	mux.HandleFunc("POST /api/admin-accounts/{id}/check-plan", s.checkAdminAccountPlan)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/credentials", s.adminAccountCredentials)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/capacity", s.adminAccountCapacity)
 	mux.HandleFunc("GET /api/admin-capacity-snapshots", s.adminCapacitySnapshots)
@@ -914,8 +915,10 @@ func (s *Server) saveAdminAccount(id string, input adminAccountInput) (model.Adm
 	profile := model.AdminAccountProfile{
 		ID: id, Label: input.Label, Email: info.Email, Name: info.Name, UserID: info.UserID,
 		AccountID: info.AccountID, TeamAccountID: teamID, PlanType: info.PlanType, LastRefreshedAt: existing.LastRefreshedAt,
-		TeamRotationChildCount: existing.TeamRotationChildCount,
-		ProxyID:                input.ProxyID,
+		TeamRotationChildCount:    existing.TeamRotationChildCount,
+		TeamSubscriptionExpiresAt: existing.TeamSubscriptionExpiresAt,
+		TeamSubscriptionCheckedAt: existing.TeamSubscriptionCheckedAt,
+		ProxyID:                   input.ProxyID,
 	}
 	if expiresAt, ok := workflow.AccessTokenExpiry(token); ok {
 		profile.AccessTokenExpiresAt = &expiresAt
@@ -953,11 +956,11 @@ func (s *Server) updateAdminAccountProxy(w http.ResponseWriter, r *http.Request)
 }
 
 // settingsForAdmin applies a mother account's dedicated proxy to requests
-// made with that mother's credentials. Child-account and OAuth callers keep
-// using the original global settings.
+// made with that mother's credentials. Mother requests never fall back to the
+// global proxy; child-account and OAuth callers keep their own settings.
 func (s *Server) settingsForAdmin(settings model.Settings, admin model.AdminAccountProfile) (model.Settings, error) {
 	if strings.TrimSpace(admin.ProxyID) == "" {
-		return settings, nil
+		return settings, errors.New("母号必须绑定专属代理后才能调用 OpenAI 接口")
 	}
 	for _, proxy := range s.store.Proxies() {
 		if proxy.ID == admin.ProxyID {
@@ -987,6 +990,36 @@ func (s *Server) refreshAdminAccount(w http.ResponseWriter, r *http.Request) {
 		message = "刚刚已经刷新过，冷却期内未重复调用"
 	}
 	writeAPI(w, 200, map[string]any{"profile": profile, "refreshed": refreshed, "message": message}, "")
+}
+
+func (s *Server) checkAdminAccountPlan(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	profile, credentials, err := s.currentAdminCredential(r.Context(), id)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	settings, err := s.settingsForAdmin(s.store.Settings(), profile)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	client, err := workflow.NewClient(settings)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	result := client.CheckAccountPlan(r.Context(), credentials.AccessToken)
+	if !result.OK {
+		writeAPI(w, http.StatusBadGateway, nil, result.Error)
+		return
+	}
+	updated, err := s.store.UpdateAdminAccountPlanCheck(id, result)
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	writeAPI(w, http.StatusOK, map[string]any{"profile": updated, "result": result}, "")
 }
 
 // adminAccountCredentials returns the decrypted AT/RT for the explicit

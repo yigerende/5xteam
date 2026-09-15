@@ -1088,6 +1088,8 @@ func (s *Store) SaveAdminAccountCredentials(profile model.AdminAccountProfile, a
 		}
 		profile.CreatedAt, profile.UpdatedAt = existing.CreatedAt, now
 		profile.TeamRotationChildCount = existing.TeamRotationChildCount
+		profile.TeamSubscriptionExpiresAt = existing.TeamSubscriptionExpiresAt
+		profile.TeamSubscriptionCheckedAt = existing.TeamSubscriptionCheckedAt
 		if profile.ProxyID == "" {
 			profile.ProxyID = existing.ProxyID
 		}
@@ -1123,6 +1125,52 @@ func (s *Store) SaveAdminAccountCredentials(profile model.AdminAccountProfile, a
 		return model.AdminAccountProfile{}, err
 	}
 	return profile, nil
+}
+
+// UpdateAdminAccountPlanCheck stores the latest Team subscription expiry
+// returned by the accounts/check endpoint without touching credentials.
+func (s *Store) UpdateAdminAccountPlanCheck(id string, result model.AccountPlanCheckResult) (model.AdminAccountProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id = strings.TrimSpace(id)
+	var raw string
+	if err := s.db.QueryRow("SELECT profile FROM admin_accounts WHERE id=?", id).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.AdminAccountProfile{}, errors.New("母号配置不存在")
+		}
+		return model.AdminAccountProfile{}, err
+	}
+	var profile model.AdminAccountProfile
+	if err := json.Unmarshal([]byte(raw), &profile); err != nil {
+		return model.AdminAccountProfile{}, err
+	}
+	checkedAt := result.CheckedAt
+	if checkedAt.IsZero() {
+		checkedAt = time.Now()
+	}
+	profile.TeamSubscriptionCheckedAt = &checkedAt
+	if result.OK {
+		value := strings.TrimSpace(result.ExpiresAt)
+		if value == "" {
+			profile.TeamSubscriptionExpiresAt = nil
+		} else {
+			expiresAt, err := time.Parse(time.RFC3339Nano, value)
+			if err != nil {
+				expiresAt, err = time.Parse(time.RFC3339, value)
+			}
+			if err != nil {
+				return model.AdminAccountProfile{}, fmt.Errorf("套餐到期时间格式无效: %w", err)
+			}
+			profile.TeamSubscriptionExpiresAt = &expiresAt
+		}
+	}
+	profile.UpdatedAt = time.Now()
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		return model.AdminAccountProfile{}, err
+	}
+	_, err = s.db.Exec("UPDATE admin_accounts SET profile=?, updated_at=? WHERE id=?", string(encoded), formatTime(profile.UpdatedAt), id)
+	return profile, err
 }
 
 // UpdateAdminAccountProxy changes only the proxy binding and preserves the
