@@ -4,7 +4,7 @@ defineEmits(['click'])
 </script>
 
 <template>
-  <button class="icon-button" :class="{ danger }" type="button" :title="label" :aria-label="label" :disabled="disabled" @click="$emit('click')">
+  <button class="icon-button" :class="{ danger }" type="button" :title="label" :aria-label="label" :disabled="disabled" @click="$emit('click', $event)">
     <slot />
   </button>
 </template>

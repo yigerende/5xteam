@@ -370,6 +370,34 @@ func TestAdminTeamRotationChildCountPersistsAndIncrements(t *testing.T) {
 	}
 }
 
+func TestAdminAccountPlanCheckPersistsSubscriptionExpiry(t *testing.T) {
+	directory := t.TempDir()
+	dataStore, err := Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dataStore.Close() })
+	profile, err := dataStore.SaveAdminAccountCredentials(model.AdminAccountProfile{Label: "plan-admin", TeamAccountID: "team-plan"}, "access-token", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := "2026-10-06T19:26:54+00:00"
+	updated, err := dataStore.UpdateAdminAccountPlanCheck(profile.ID, model.AccountPlanCheckResult{OK: true, ExpiresAt: expiresAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.TeamSubscriptionExpiresAt == nil || updated.TeamSubscriptionExpiresAt.Format(time.RFC3339) != "2026-10-06T19:26:54Z" {
+		t.Fatalf("unexpected expiry: %+v", updated.TeamSubscriptionExpiresAt)
+	}
+	reopened, _, _, err := dataStore.AdminAccountsPage(10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reopened) != 1 || reopened[0].TeamSubscriptionExpiresAt == nil {
+		t.Fatalf("subscription expiry was not persisted: %+v", reopened)
+	}
+}
+
 func TestOpenAIAccountTokenIsEncryptedAndStatusPersists(t *testing.T) {
 	directory := t.TempDir()
 	dataStore, err := Open(directory)

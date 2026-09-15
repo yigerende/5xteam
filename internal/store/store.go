@@ -1169,7 +1169,7 @@ func (s *Store) UpdateAdminAccountPlanCheck(id string, result model.AccountPlanC
 	if err != nil {
 		return model.AdminAccountProfile{}, err
 	}
-	_, err = s.db.Exec("UPDATE admin_accounts SET profile=?, updated_at=? WHERE id=?", string(encoded), formatTime(profile.UpdatedAt), id)
+	_, err = s.db.Exec("UPDATE admin_accounts SET profile=? WHERE id=?", string(encoded), id)
 	return profile, err
 }
 
