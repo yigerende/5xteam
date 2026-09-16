@@ -29,6 +29,7 @@ const importForm = reactive({ tokens: '' })
 const sub2Form = reactive({ url: '', email: '', password: '', groupIDs: [], groupNames: [], models: '', pushPlanType: 'self_serve_business_prolite', accountConcurrency: 10, priority: 1, cpaWs: false, enable401Check: true, statusCheckIntervalSeconds: 120, reloginFailureLimit: 2, quotaEnabled: true, quotaCheckIntervalSeconds: 120, quotaRemainingThresholdPercent: 0, passwordPresent: false })
 const cpaForm = reactive({ url: '', key: '', keyPresent: false, websockets: false, enable401Check: true, statusCheckIntervalSeconds: 120, reloginFailureLimit: 2, quotaEnabled: true, quotaCheckIntervalSeconds: 120, quotaRemainingThresholdPercent: 0, groupIDs: [], groupNames: [] })
 const cpaGroups = ref([])
+let pushGroupsController
 const pushProvider = ref('sub2')
 const activeProviderLabel = computed(() => pushProvider.value === 'cpa' ? 'CPA' : 'Sub2')
 const activeReloginFailureLimit = computed(() => pushProvider.value === 'cpa' ? cpaForm.reloginFailureLimit : sub2Form.reloginFailureLimit)
@@ -549,9 +550,28 @@ async function loadSub2() {
       quotaRemainingThresholdPercent: Number(settings.quota_remaining_threshold_percent ?? 0),
       passwordPresent: !!settings.password_present,
     })
-    // Keep page loading local and fast. Connection tests remain explicit
-    // actions so a slow downstream API cannot block the rotation list.
+    // This loader only reads local settings; group requests run separately.
   } catch (error) { setMessage(error.message, 'error') }
+}
+async function loadActivePushGroups(settings) {
+  pushGroupsController?.abort()
+  const controller = new AbortController()
+  pushGroupsController = controller
+  groups.value = []
+  cpaGroups.value = []
+  const isCPA = settings.provider === 'cpa'
+  const connection = (isCPA ? settings.cpa : settings.sub2) || {}
+  if (!connection.url || (isCPA ? !connection.key_present : !connection.email || !connection.password_present)) return
+  try {
+    const result = isCPA
+      ? await api('/api/push-settings/cpa/groups', { signal: controller.signal })
+      : await api('/api/sub2-settings/test', { method: 'POST', body: {}, signal: controller.signal })
+    if (controller.signal.aborted) return
+    if (isCPA) cpaGroups.value = result || []
+    else groups.value = result.groups || []
+  } catch (error) {
+    if (!controller.signal.aborted) setMessage(error.message, 'error')
+  }
 }
 async function loadPushSettings() {
   try {
@@ -559,7 +579,7 @@ async function loadPushSettings() {
     pushProvider.value = result.provider === 'cpa' ? 'cpa' : 'sub2'
     const s = result.sub2 || {}; Object.assign(sub2Form, { url: s.url || '', email: s.email || '', groupIDs: s.group_ids || [], groupNames: s.group_names || [], models: (s.models || []).join('\n'), pushPlanType: s.push_plan_type || 'self_serve_business_prolite', accountConcurrency: s.account_concurrency || 10, priority: s.priority || 1, cpaWs: s.cpa_ws === true || Number(s.cpa_ws) === 1, enable401Check: s.enable_401_check !== false, statusCheckIntervalSeconds: s.status_check_interval_seconds || 120, reloginFailureLimit: s.relogin_failure_limit ?? 2, quotaEnabled: s.quota_enabled !== false, quotaCheckIntervalSeconds: s.quota_check_interval_seconds || 120, quotaRemainingThresholdPercent: Number(s.quota_remaining_threshold_percent ?? 0), passwordPresent: !!s.password_present })
     const c = result.cpa || {}; Object.assign(cpaForm, { url: c.url || '', keyPresent: !!c.key_present, websockets: !!c.websockets, enable401Check: c.enable_401_check !== false, statusCheckIntervalSeconds: c.status_check_interval_seconds || 120, reloginFailureLimit: c.relogin_failure_limit ?? 2, quotaEnabled: c.quota_enabled !== false, quotaCheckIntervalSeconds: c.quota_check_interval_seconds || 120, quotaRemainingThresholdPercent: Number(c.quota_remaining_threshold_percent ?? 0), groupIDs: c.group_ids || [], groupNames: c.group_names || [] })
-    if (cpaForm.url && cpaForm.keyPresent) await loadCPAGroups()
+    void loadActivePushGroups(result)
   } catch (error) { setMessage(error.message, 'error') }
 }
 async function savePushSettings() {
@@ -567,6 +587,7 @@ async function savePushSettings() {
   try {
     const payload = { provider: pushProvider.value, sub2: { url: sub2Form.url.trim(), email: sub2Form.email.trim(), password: sub2Form.password, group_ids: sub2Form.groupIDs.map(Number), group_names: selectedGroupNames(), models: selectedModels(), push_plan_type: sub2Form.pushPlanType, account_concurrency: Number(sub2Form.accountConcurrency) || 10, priority: Number(sub2Form.priority) || 1, cpa_ws: !!sub2Form.cpaWs, enable_401_check: !!sub2Form.enable401Check, status_check_interval_seconds: Number(sub2Form.statusCheckIntervalSeconds) || 120, relogin_failure_limit: Number(sub2Form.reloginFailureLimit ?? 2), quota_enabled: !!sub2Form.quotaEnabled, quota_check_interval_seconds: Number(sub2Form.quotaCheckIntervalSeconds) || 120, quota_remaining_threshold_percent: Number(sub2Form.quotaRemainingThresholdPercent) }, cpa: { url: cpaForm.url.trim(), key: cpaForm.key, websockets: !!cpaForm.websockets, enable_401_check: !!cpaForm.enable401Check, status_check_interval_seconds: Number(cpaForm.statusCheckIntervalSeconds) || 120, relogin_failure_limit: Number(cpaForm.reloginFailureLimit ?? 2), quota_enabled: !!cpaForm.quotaEnabled, quota_check_interval_seconds: Number(cpaForm.quotaCheckIntervalSeconds) || 120, quota_remaining_threshold_percent: Number(cpaForm.quotaRemainingThresholdPercent), group_ids: cpaForm.groupIDs.map(Number), group_names: selectedCPAGroupNames() } }
     const result = await api('/api/push-settings', { method: 'PUT', body: payload }); cpaForm.key = ''; cpaForm.keyPresent = !!result.cpa?.key_present; sub2Form.password = ''; sub2Form.passwordPresent = !!result.sub2?.password_present; setMessage(`推送设置已保存，当前使用${pushProvider.value === 'cpa' ? ' CPA' : ' Sub2'}`, 'success')
+    void loadActivePushGroups(result)
   } catch (error) { setMessage(error.message, 'error') } finally { busy.value = '' }
 }
 async function testCPA() { busy.value = 'cpa-test'; try { await api('/api/push-settings/cpa/test', { method: 'POST', body: {} }); await loadCPAGroups(); setMessage('CPA 已连接', 'success') } catch (error) { setMessage(error.message, 'error') } finally { busy.value = '' } }
@@ -875,6 +896,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => window.clearInterval(clockTimer))
 onBeforeUnmount(() => window.clearInterval(liveRefreshTimer))
+onBeforeUnmount(() => pushGroupsController?.abort())
 onBeforeUnmount(stopCapacityRefreshTimer)
 onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
 onBeforeUnmount(closeLifecycle)

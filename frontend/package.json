@@ -8,7 +8,8 @@
     "build": "vite build",
     "check": "vue-tsc --noEmit",
     "test:mail-import": "node scripts/check-mail-import.mjs",
-    "test:mail-export": "node scripts/check-mail-export.mjs"
+    "test:mail-export": "node scripts/check-mail-export.mjs",
+    "test:push-groups": "node scripts/check-push-groups.mjs"
   },
   "dependencies": {
     "lucide-vue-next": "^0.468.0",
