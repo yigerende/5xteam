@@ -24,7 +24,7 @@ import (
 
 var errDeadAccountHandled = errors.New("dead account detected and removal handled")
 
-const downstreamProlitePlanType = "self_serve_business_prolite"
+const downstreamProlitePlanType = model.Sub2DefaultPushPlanType
 
 func (s *Server) listFreeAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
@@ -1308,7 +1308,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 	accountName += "--" + beijingNow().Format("15:04")
 	createInput := sub2.CreateAccountInput{
 		Name:        accountName,
-		Credentials: buildSub2OAuthCredentials(profile, credentials),
+		Credentials: buildSub2OAuthCredentialsWithModels(profile, credentials, settings.Models, settings.PushPlanType),
 		GroupIDs:    settings.GroupIDs, Models: settings.Models, Concurrency: settings.AccountConcurrency,
 		Priority: settings.Priority, CpaWS: settings.CpaWS,
 	}
@@ -1317,7 +1317,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 	// account never reuses the old payload's key. If the API still reports an
 	// idempotency conflict (for example after a manual delete), retry once with
 	// a fresh key while keeping the same request body.
-	fingerprint := sha256.Sum256([]byte(profile.ID + "|" + accountName + "|" + credentials.OAuthAccessToken + "|" + credentials.OAuthRefreshToken + "|" + fmt.Sprint(settings.GroupIDs) + "|" + fmt.Sprint(settings.Models)))
+	fingerprint := sha256.Sum256([]byte(profile.ID + "|" + accountName + "|" + credentials.OAuthAccessToken + "|" + credentials.OAuthRefreshToken + "|" + fmt.Sprint(settings.GroupIDs) + "|" + fmt.Sprint(settings.Models) + "|" + settings.PushPlanType))
 	idempotencyKey := "free-pipeline-" + profile.ID + "-" + fmt.Sprintf("%x", fingerprint[:8])
 	created, err := s.sub2.CreateAccount(r.Context(), settings, password, createInput, idempotencyKey)
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "idempotency") {
@@ -1438,21 +1438,24 @@ func buildCPAAuthPayloadNamed(profile model.FreeAccountProfile, credentials stor
 }
 
 func buildSub2OAuthCredentials(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials) map[string]any {
-	return buildSub2OAuthCredentialsWithModels(profile, credentials, nil)
+	return buildSub2OAuthCredentialsWithModels(profile, credentials, nil, downstreamProlitePlanType)
 }
 
 // buildSub2OAuthCredentialsWithModels mirrors the credentials payload created
 // during the initial Sub2 push. The in-place OAuth endpoint replaces the
 // credentials object, so model_mapping must be sent again during relogin or
 // the account loses its configured model availability.
-func buildSub2OAuthCredentialsWithModels(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials, models []string) map[string]any {
+func buildSub2OAuthCredentialsWithModels(profile model.FreeAccountProfile, credentials store.FreeAccountCredentials, models []string, planType string) map[string]any {
+	if planType != "pro" {
+		planType = downstreamProlitePlanType
+	}
 	result := map[string]any{
 		"access_token":       credentials.OAuthAccessToken,
 		"refresh_token":      credentials.OAuthRefreshToken,
 		"chatgpt_account_id": profile.OAuthAccountID,
 		"email":              profile.Email,
-		"plan_type":          downstreamProlitePlanType,
-		"chatgpt_plan_type":  downstreamProlitePlanType,
+		"plan_type":          planType,
+		"chatgpt_plan_type":  planType,
 	}
 	mapping := make(map[string]string, len(models))
 	for _, modelName := range models {
@@ -1592,6 +1595,10 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 			})
 		}
 		if !cpaDownstream && allowRelogin && isSub2Unauthorized(err) && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
+			if s.reloginFailureLimit("sub2") == 0 {
+				removed, removeErr := s.removeFreeAccountWithoutRelogin(ctx, profile.ID, "sub2")
+				return removed, removed.RemoveStatus == "completed", removeErr
+			}
 			if reloginErr := s.reloginAndRepush(ctx, profile.ID); reloginErr == nil {
 				return s.performFreeAccountQuotaInternal(ctx, id, allowAutoRemove, false)
 			} else if errors.Is(reloginErr, errDeadAccountHandled) {
@@ -1720,11 +1727,7 @@ func (s *Server) saveSub2CostSnapshot(accountID, adminID string, downstreamID in
 }
 
 func isSub2Unauthorized(err error) bool {
-	if err == nil {
-		return false
-	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "http 401") || strings.Contains(text, "status 401") || strings.Contains(text, "code 401") || strings.Contains(text, "unauthorized")
+	return errors.Is(err, sub2.ErrAccountUnauthorized)
 }
 
 type reloginFailureOutcome struct {
@@ -1743,10 +1746,30 @@ func (s *Server) reloginFailureLimit(provider string) int {
 	} else if settings, _, err := s.store.Sub2Settings(); err == nil {
 		limit = settings.ReloginFailureLimit
 	}
-	if limit < 1 || limit > 20 {
+	if limit < 0 || limit > 20 {
 		return 2
 	}
 	return limit
+}
+
+func (s *Server) removeFreeAccountWithoutRelogin(ctx context.Context, accountID, provider string) (model.FreeAccountProfile, error) {
+	reason := "检测到账号 401，重登连续失败清退次数为 0，由母号直接踢出"
+	profile, err := s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
+		item.ReloginExhausted = true
+		item.RemoveMethod = "mother_kick"
+		item.RemovalReason = reason
+	})
+	if err != nil {
+		return profile, err
+	}
+	s.auditAccountEvent(ctx, accountID, "unauthorized_remove_start", "remove", "monitor_401", provider, reason, map[string]any{"failure_limit": 0, "forced_mother_kick": true})
+	removed, err := s.performFreeAccountRemove(ctx, accountID)
+	if err != nil {
+		s.auditAccountEvent(ctx, accountID, "unauthorized_remove_failed", "remove", "monitor_401", provider, "401 直接清退失败", map[string]any{"error": err.Error()})
+	} else {
+		s.auditAccountEvent(ctx, accountID, "unauthorized_remove_success", "remove", "monitor_401", provider, "401 账号已由母号踢出并清理下游", nil)
+	}
+	return removed, err
 }
 
 // record401ReloginFailure is called only after the active downstream has
@@ -1847,6 +1870,10 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 		// the upstream status separately and the branch below handles that.
 		cpaDownstream := strings.EqualFold(settings.Provider, "cpa")
 		if !cpaDownstream && isSub2Unauthorized(err) && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
+			if s.reloginFailureLimit("sub2") == 0 {
+				_, removeErr := s.removeFreeAccountWithoutRelogin(ctx, id, "sub2")
+				return true, removeErr
+			}
 			if reloginErr := s.reloginAndRepush(ctx, id); reloginErr != nil {
 				if errors.Is(reloginErr, errDeadAccountHandled) {
 					return true, nil
@@ -1865,6 +1892,11 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 		return false, err
 	}
 	if status == http.StatusUnauthorized && profile.AcceptStatus == "completed" && profile.RemoveStatus != "completed" {
+		provider := providerForSettings(settings)
+		if s.reloginFailureLimit(provider) == 0 {
+			_, removeErr := s.removeFreeAccountWithoutRelogin(ctx, id, provider)
+			return true, removeErr
+		}
 		if reloginErr := s.reloginAndRepush(ctx, id); reloginErr != nil {
 			if errors.Is(reloginErr, errDeadAccountHandled) {
 				return true, nil
@@ -1977,7 +2009,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	name += "--" + beijingNow().Format("15:04") + "-重登"
 	// Sub2 supports in-place OAuth reauthorization. Keep the original account
 	// ID and let Sub2 clear its error state/invalidate its token cache.
-	if _, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentialsWithModels(profile, credentials, settings.Models)); err != nil {
+	if _, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentialsWithModels(profile, credentials, settings.Models, settings.PushPlanType)); err != nil {
 		return err
 	}
 	if _, err := s.sub2.RestoreScheduling(ctx, settings, password, oldAccountID); err != nil {
@@ -2511,7 +2543,7 @@ type cpaSettingsInput struct {
 	Websockets                     *bool    `json:"websockets"`
 	Enable401Check                 *bool    `json:"enable_401_check"`
 	StatusCheckIntervalSeconds     int      `json:"status_check_interval_seconds"`
-	ReloginFailureLimit            int      `json:"relogin_failure_limit"`
+	ReloginFailureLimit            *int     `json:"relogin_failure_limit"`
 	QuotaEnabled                   *bool    `json:"quota_enabled"`
 	QuotaCheckIntervalSeconds      int      `json:"quota_check_interval_seconds"`
 	QuotaRemainingThresholdPercent *float64 `json:"quota_remaining_threshold_percent"`
@@ -2581,11 +2613,18 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.StatusCheckIntervalSeconds == 0 {
 			v.StatusCheckIntervalSeconds = sub.StatusCheckIntervalSeconds
 		}
-		if v.ReloginFailureLimit == 0 {
-			v.ReloginFailureLimit = sub.ReloginFailureLimit
+		if v.ReloginFailureLimit == nil {
+			v.ReloginFailureLimit = &sub.ReloginFailureLimit
 		}
-		if v.ReloginFailureLimit < 1 || v.ReloginFailureLimit > 20 {
-			writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 1 到 20 之间")
+		if *v.ReloginFailureLimit < 0 || *v.ReloginFailureLimit > 20 {
+			writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 0 到 20 之间")
+			return
+		}
+		if v.PushPlanType == "" {
+			v.PushPlanType = sub.PushPlanType
+		}
+		if v.PushPlanType != downstreamProlitePlanType && v.PushPlanType != "pro" {
+			writeAPI(w, http.StatusBadRequest, nil, "Sub2 推送套餐只能选择默认套餐或 Pro")
 			return
 		}
 		if v.QuotaCheckIntervalSeconds == 0 {
@@ -2607,7 +2646,7 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.CpaWS == nil {
 			v.CpaWS = &sub.CpaWS
 		}
-		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent}, v.Password)
+		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, PushPlanType: v.PushPlanType, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: *v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent}, v.Password)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -2639,11 +2678,11 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.StatusCheckIntervalSeconds == 0 {
 			v.StatusCheckIntervalSeconds = cpaSettings.StatusCheckIntervalSeconds
 		}
-		if v.ReloginFailureLimit == 0 {
-			v.ReloginFailureLimit = cpaSettings.ReloginFailureLimit
+		if v.ReloginFailureLimit == nil {
+			v.ReloginFailureLimit = &cpaSettings.ReloginFailureLimit
 		}
-		if v.ReloginFailureLimit < 1 || v.ReloginFailureLimit > 20 {
-			writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 1 到 20 之间")
+		if *v.ReloginFailureLimit < 0 || *v.ReloginFailureLimit > 20 {
+			writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 0 到 20 之间")
 			return
 		}
 		if v.QuotaCheckIntervalSeconds == 0 {
@@ -2659,7 +2698,7 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusBadRequest, nil, "自动移出剩余额度阈值必须在 0 到 100 之间")
 			return
 		}
-		cpaSettings, err = s.store.SaveCPASettings(model.CPASettings{URL: v.URL, Websockets: boolValue(v.Websockets), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent, GroupIDs: uniquePositiveInt64s(v.GroupIDs), GroupNames: uniqueNonEmptyStrings(v.GroupNames)}, v.Key)
+		cpaSettings, err = s.store.SaveCPASettings(model.CPASettings{URL: v.URL, Websockets: boolValue(v.Websockets), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: *v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent, GroupIDs: uniquePositiveInt64s(v.GroupIDs), GroupNames: uniqueNonEmptyStrings(v.GroupNames)}, v.Key)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -2731,6 +2770,7 @@ func (s *Server) getCPAGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type sub2SettingsInput struct {
+	PushPlanType                   string   `json:"push_plan_type"`
 	URL                            string   `json:"url"`
 	Email                          string   `json:"email"`
 	Password                       string   `json:"password"`
@@ -2744,7 +2784,7 @@ type sub2SettingsInput struct {
 	CpaWS                          *bool    `json:"cpa_ws"`
 	Enable401Check                 *bool    `json:"enable_401_check"`
 	StatusCheckIntervalSeconds     int      `json:"status_check_interval_seconds"`
-	ReloginFailureLimit            int      `json:"relogin_failure_limit"`
+	ReloginFailureLimit            *int     `json:"relogin_failure_limit"`
 	QuotaEnabled                   *bool    `json:"quota_enabled"`
 	QuotaCheckIntervalSeconds      int      `json:"quota_check_interval_seconds"`
 	QuotaRemainingThresholdPercent *float64 `json:"quota_remaining_threshold_percent"`
@@ -2794,11 +2834,18 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, "401 状态查询间隔必须在 10 到 86400 秒之间")
 		return
 	}
-	if input.ReloginFailureLimit == 0 {
-		input.ReloginFailureLimit = current.ReloginFailureLimit
+	if input.ReloginFailureLimit == nil {
+		input.ReloginFailureLimit = &current.ReloginFailureLimit
 	}
-	if input.ReloginFailureLimit < 1 || input.ReloginFailureLimit > 20 {
-		writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 1 到 20 之间")
+	if *input.ReloginFailureLimit < 0 || *input.ReloginFailureLimit > 20 {
+		writeAPI(w, http.StatusBadRequest, nil, "401 重登连续失败清退次数必须在 0 到 20 之间")
+		return
+	}
+	if input.PushPlanType == "" {
+		input.PushPlanType = current.PushPlanType
+	}
+	if input.PushPlanType != downstreamProlitePlanType && input.PushPlanType != "pro" {
+		writeAPI(w, http.StatusBadRequest, nil, "Sub2 推送套餐只能选择默认套餐或 Pro")
 		return
 	}
 	enable401Check := current.Enable401Check
@@ -2834,9 +2881,9 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Models = uniqueNonEmptyStrings(input.Models)
 	settings, err := s.store.SaveSub2Settings(model.Sub2Settings{
-		Provider: current.Provider, URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
+		Provider: current.Provider, PushPlanType: input.PushPlanType, URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
 		GroupIDs: input.GroupIDs, GroupNames: input.GroupNames, Models: input.Models, AccountConcurrency: input.AccountConcurrency, Priority: input.Priority,
-		CpaWS: cpaWS, Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, ReloginFailureLimit: input.ReloginFailureLimit, QuotaEnabled: quotaEnabled, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: quotaRemainingThresholdPercent,
+		CpaWS: cpaWS, Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, ReloginFailureLimit: *input.ReloginFailureLimit, QuotaEnabled: quotaEnabled, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: quotaRemainingThresholdPercent,
 	}, input.Password)
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())

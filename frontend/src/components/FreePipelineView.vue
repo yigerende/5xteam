@@ -26,7 +26,7 @@ const props = defineProps({
 const emit = defineEmits(['reload', 'auto-rotation'])
 
 const importForm = reactive({ tokens: '' })
-const sub2Form = reactive({ url: '', email: '', password: '', groupIDs: [], groupNames: [], models: '', accountConcurrency: 10, priority: 1, cpaWs: false, enable401Check: true, statusCheckIntervalSeconds: 120, reloginFailureLimit: 2, quotaEnabled: true, quotaCheckIntervalSeconds: 120, quotaRemainingThresholdPercent: 0, passwordPresent: false })
+const sub2Form = reactive({ url: '', email: '', password: '', groupIDs: [], groupNames: [], models: '', pushPlanType: 'self_serve_business_prolite', accountConcurrency: 10, priority: 1, cpaWs: false, enable401Check: true, statusCheckIntervalSeconds: 120, reloginFailureLimit: 2, quotaEnabled: true, quotaCheckIntervalSeconds: 120, quotaRemainingThresholdPercent: 0, passwordPresent: false })
 const cpaForm = reactive({ url: '', key: '', keyPresent: false, websockets: false, enable401Check: true, statusCheckIntervalSeconds: 120, reloginFailureLimit: 2, quotaEnabled: true, quotaCheckIntervalSeconds: 120, quotaRemainingThresholdPercent: 0, groupIDs: [], groupNames: [] })
 const cpaGroups = ref([])
 const pushProvider = ref('sub2')
@@ -476,11 +476,11 @@ async function loadSub2() {
     const groupNames = settings.group_names?.length ? settings.group_names : settings.group_name ? [settings.group_name] : []
     Object.assign(sub2Form, {
       url: settings.url || '', email: settings.email || '', password: '', groupIDs, groupNames,
-      models: (settings.models || []).join('\n'), accountConcurrency: settings.account_concurrency || 10, priority: settings.priority || 1,
+      models: (settings.models || []).join('\n'), pushPlanType: settings.push_plan_type || 'self_serve_business_prolite', accountConcurrency: settings.account_concurrency || 10, priority: settings.priority || 1,
       cpaWs: settings.cpa_ws === true || Number(settings.cpa_ws) === 1,
       enable401Check: settings.enable_401_check !== false,
       statusCheckIntervalSeconds: settings.status_check_interval_seconds || settings.quota_check_interval_seconds || 120,
-      reloginFailureLimit: settings.relogin_failure_limit || 2,
+      reloginFailureLimit: settings.relogin_failure_limit ?? 2,
       quotaEnabled: settings.quota_enabled !== false,
       quotaCheckIntervalSeconds: settings.quota_check_interval_seconds || 120,
       quotaRemainingThresholdPercent: Number(settings.quota_remaining_threshold_percent ?? 0),
@@ -494,15 +494,15 @@ async function loadPushSettings() {
   try {
     const result = await api('/api/push-settings')
     pushProvider.value = result.provider === 'cpa' ? 'cpa' : 'sub2'
-    const s = result.sub2 || {}; Object.assign(sub2Form, { url: s.url || '', email: s.email || '', groupIDs: s.group_ids || [], groupNames: s.group_names || [], models: (s.models || []).join('\n'), accountConcurrency: s.account_concurrency || 10, priority: s.priority || 1, cpaWs: s.cpa_ws === true || Number(s.cpa_ws) === 1, enable401Check: s.enable_401_check !== false, statusCheckIntervalSeconds: s.status_check_interval_seconds || 120, reloginFailureLimit: s.relogin_failure_limit || 2, quotaEnabled: s.quota_enabled !== false, quotaCheckIntervalSeconds: s.quota_check_interval_seconds || 120, quotaRemainingThresholdPercent: Number(s.quota_remaining_threshold_percent ?? 0), passwordPresent: !!s.password_present })
-    const c = result.cpa || {}; Object.assign(cpaForm, { url: c.url || '', keyPresent: !!c.key_present, websockets: !!c.websockets, enable401Check: c.enable_401_check !== false, statusCheckIntervalSeconds: c.status_check_interval_seconds || 120, reloginFailureLimit: c.relogin_failure_limit || 2, quotaEnabled: c.quota_enabled !== false, quotaCheckIntervalSeconds: c.quota_check_interval_seconds || 120, quotaRemainingThresholdPercent: Number(c.quota_remaining_threshold_percent ?? 0), groupIDs: c.group_ids || [], groupNames: c.group_names || [] })
+    const s = result.sub2 || {}; Object.assign(sub2Form, { url: s.url || '', email: s.email || '', groupIDs: s.group_ids || [], groupNames: s.group_names || [], models: (s.models || []).join('\n'), pushPlanType: s.push_plan_type || 'self_serve_business_prolite', accountConcurrency: s.account_concurrency || 10, priority: s.priority || 1, cpaWs: s.cpa_ws === true || Number(s.cpa_ws) === 1, enable401Check: s.enable_401_check !== false, statusCheckIntervalSeconds: s.status_check_interval_seconds || 120, reloginFailureLimit: s.relogin_failure_limit ?? 2, quotaEnabled: s.quota_enabled !== false, quotaCheckIntervalSeconds: s.quota_check_interval_seconds || 120, quotaRemainingThresholdPercent: Number(s.quota_remaining_threshold_percent ?? 0), passwordPresent: !!s.password_present })
+    const c = result.cpa || {}; Object.assign(cpaForm, { url: c.url || '', keyPresent: !!c.key_present, websockets: !!c.websockets, enable401Check: c.enable_401_check !== false, statusCheckIntervalSeconds: c.status_check_interval_seconds || 120, reloginFailureLimit: c.relogin_failure_limit ?? 2, quotaEnabled: c.quota_enabled !== false, quotaCheckIntervalSeconds: c.quota_check_interval_seconds || 120, quotaRemainingThresholdPercent: Number(c.quota_remaining_threshold_percent ?? 0), groupIDs: c.group_ids || [], groupNames: c.group_names || [] })
     if (cpaForm.url && cpaForm.keyPresent) await loadCPAGroups()
   } catch (error) { setMessage(error.message, 'error') }
 }
 async function savePushSettings() {
   busy.value = 'push-settings'
   try {
-    const payload = { provider: pushProvider.value, sub2: { url: sub2Form.url.trim(), email: sub2Form.email.trim(), password: sub2Form.password, group_ids: sub2Form.groupIDs.map(Number), group_names: selectedGroupNames(), models: selectedModels(), account_concurrency: Number(sub2Form.accountConcurrency) || 10, priority: Number(sub2Form.priority) || 1, cpa_ws: !!sub2Form.cpaWs, enable_401_check: !!sub2Form.enable401Check, status_check_interval_seconds: Number(sub2Form.statusCheckIntervalSeconds) || 120, relogin_failure_limit: Number(sub2Form.reloginFailureLimit) || 2, quota_enabled: !!sub2Form.quotaEnabled, quota_check_interval_seconds: Number(sub2Form.quotaCheckIntervalSeconds) || 120, quota_remaining_threshold_percent: Number(sub2Form.quotaRemainingThresholdPercent) }, cpa: { url: cpaForm.url.trim(), key: cpaForm.key, websockets: !!cpaForm.websockets, enable_401_check: !!cpaForm.enable401Check, status_check_interval_seconds: Number(cpaForm.statusCheckIntervalSeconds) || 120, relogin_failure_limit: Number(cpaForm.reloginFailureLimit) || 2, quota_enabled: !!cpaForm.quotaEnabled, quota_check_interval_seconds: Number(cpaForm.quotaCheckIntervalSeconds) || 120, quota_remaining_threshold_percent: Number(cpaForm.quotaRemainingThresholdPercent), group_ids: cpaForm.groupIDs.map(Number), group_names: selectedCPAGroupNames() } }
+    const payload = { provider: pushProvider.value, sub2: { url: sub2Form.url.trim(), email: sub2Form.email.trim(), password: sub2Form.password, group_ids: sub2Form.groupIDs.map(Number), group_names: selectedGroupNames(), models: selectedModels(), push_plan_type: sub2Form.pushPlanType, account_concurrency: Number(sub2Form.accountConcurrency) || 10, priority: Number(sub2Form.priority) || 1, cpa_ws: !!sub2Form.cpaWs, enable_401_check: !!sub2Form.enable401Check, status_check_interval_seconds: Number(sub2Form.statusCheckIntervalSeconds) || 120, relogin_failure_limit: Number(sub2Form.reloginFailureLimit ?? 2), quota_enabled: !!sub2Form.quotaEnabled, quota_check_interval_seconds: Number(sub2Form.quotaCheckIntervalSeconds) || 120, quota_remaining_threshold_percent: Number(sub2Form.quotaRemainingThresholdPercent) }, cpa: { url: cpaForm.url.trim(), key: cpaForm.key, websockets: !!cpaForm.websockets, enable_401_check: !!cpaForm.enable401Check, status_check_interval_seconds: Number(cpaForm.statusCheckIntervalSeconds) || 120, relogin_failure_limit: Number(cpaForm.reloginFailureLimit ?? 2), quota_enabled: !!cpaForm.quotaEnabled, quota_check_interval_seconds: Number(cpaForm.quotaCheckIntervalSeconds) || 120, quota_remaining_threshold_percent: Number(cpaForm.quotaRemainingThresholdPercent), group_ids: cpaForm.groupIDs.map(Number), group_names: selectedCPAGroupNames() } }
     const result = await api('/api/push-settings', { method: 'PUT', body: payload }); cpaForm.key = ''; cpaForm.keyPresent = !!result.cpa?.key_present; sub2Form.password = ''; sub2Form.passwordPresent = !!result.sub2?.password_present; setMessage(`推送设置已保存，当前使用${pushProvider.value === 'cpa' ? ' CPA' : ' Sub2'}`, 'success')
   } catch (error) { setMessage(error.message, 'error') } finally { busy.value = '' }
 }
@@ -521,12 +521,12 @@ async function saveSub2(showMessage = true) {
   const saved = await api('/api/sub2-settings', {
     method: 'PUT', body: {
       url: sub2Form.url.trim(), email: sub2Form.email.trim(), password: sub2Form.password,
-      group_ids: groupIDs, group_names: selectedGroupNames(), models: selectedModels(),
+      group_ids: groupIDs, group_names: selectedGroupNames(), models: selectedModels(), push_plan_type: sub2Form.pushPlanType,
       account_concurrency: Number(sub2Form.accountConcurrency) || 10, priority: Number(sub2Form.priority) || 1,
       cpa_ws: !!sub2Form.cpaWs,
       enable_401_check: !!sub2Form.enable401Check,
       status_check_interval_seconds: Number(sub2Form.statusCheckIntervalSeconds) || 120,
-      relogin_failure_limit: Number(sub2Form.reloginFailureLimit) || 2,
+      relogin_failure_limit: Number(sub2Form.reloginFailureLimit ?? 2),
       quota_enabled: !!sub2Form.quotaEnabled,
       quota_check_interval_seconds: Number(sub2Form.quotaCheckIntervalSeconds) || 120,
       quota_remaining_threshold_percent: Number(sub2Form.quotaRemainingThresholdPercent),
@@ -863,8 +863,9 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
         <label class="field"><span>优先级 <small>数值越小优先级越高</small></span><input v-model.number="sub2Form.priority" type="number" min="1" max="100" required /></label>
         <div class="field checkbox-field"><span>WS 推荐配置 <small>推送 Sub2 时启用 cpa_ws=1</small></span><label class="mini-toggle"><input v-model="sub2Form.cpaWs" type="checkbox" /><i></i><span>{{ sub2Form.cpaWs ? '已开启' : '已关闭' }}</span></label></div>
         <div class="field checkbox-field"><span>401 状态检测 <small>关闭后不自动查询 401，也不会触发重登</small></span><label class="mini-toggle"><input v-model="sub2Form.enable401Check" type="checkbox" /><i></i><span>{{ sub2Form.enable401Check ? '已开启' : '已关闭' }}</span></label></div>
-        <label class="field"><span>401 状态查询间隔（秒） <small>检测到 401 后自动重登并重新推送</small></span><input v-model.number="sub2Form.statusCheckIntervalSeconds" type="number" min="10" max="86400" required /></label>
-        <label class="field"><span>重登连续失败清退次数 <small>成功一次立即清零并重新计数</small></span><input v-model.number="sub2Form.reloginFailureLimit" type="number" min="1" max="20" required /></label>
+        <label class="field"><span>401 状态查询间隔（秒）</span><input v-model.number="sub2Form.statusCheckIntervalSeconds" type="number" min="10" max="86400" required /></label>
+        <label class="field"><span>Sub2 推送套餐</span><select v-model="sub2Form.pushPlanType"><option value="self_serve_business_prolite">默认（Business 5x）</option><option value="pro">Pro</option></select></label>
+        <label class="field"><span>重登连续失败清退次数（0：401 直接母号踢出）</span><input v-model.number="sub2Form.reloginFailureLimit" type="number" min="0" max="20" required /></label>
         <div class="field checkbox-field"><span>额度检测 / 自动移出 <small>关闭后停止后台额度检测和阈值自动移出</small></span><label class="mini-toggle"><input v-model="sub2Form.quotaEnabled" type="checkbox" /><i></i><span>{{ sub2Form.quotaEnabled ? '已开启' : '已关闭' }}</span></label></div>
         <label class="field"><span>额度检测 / 自动移出间隔（秒） <small>检查 5 小时/7 天额度并按策略移出</small></span><input v-model.number="sub2Form.quotaCheckIntervalSeconds" type="number" min="10" max="86400" :disabled="!sub2Form.quotaEnabled" required /></label>
         <label class="field"><span>剩余额度移出阈值（%） <small>剩余小于或等于该百分比时自动移出</small></span><input v-model.number="sub2Form.quotaRemainingThresholdPercent" type="number" min="0" max="100" step="0.1" :disabled="!sub2Form.quotaEnabled" required /></label>
@@ -880,7 +881,7 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
           <div class="field checkbox-field"><span>WS 推荐配置</span><label class="mini-toggle"><input v-model="cpaForm.websockets" type="checkbox" /><i></i><span>{{ cpaForm.websockets ? '已开启' : '已关闭' }}</span></label></div>
           <div class="field checkbox-field"><span>401 状态检测</span><label class="mini-toggle"><input v-model="cpaForm.enable401Check" type="checkbox" /><i></i><span>{{ cpaForm.enable401Check ? '已开启' : '已关闭' }}</span></label></div>
           <label class="field"><span>401 检测间隔（秒）</span><input v-model.number="cpaForm.statusCheckIntervalSeconds" type="number" min="10" max="86400" /></label>
-          <label class="field"><span>重登连续失败清退次数 <small>成功一次立即清零并重新计数</small></span><input v-model.number="cpaForm.reloginFailureLimit" type="number" min="1" max="20" /></label>
+          <label class="field"><span>重登连续失败清退次数（0：401 直接母号踢出）</span><input v-model.number="cpaForm.reloginFailureLimit" type="number" min="0" max="20" /></label>
           <div class="field checkbox-field"><span>额度检测 / 自动移出 <small>关闭后停止后台额度检测和阈值自动移出</small></span><label class="mini-toggle"><input v-model="cpaForm.quotaEnabled" type="checkbox" /><i></i><span>{{ cpaForm.quotaEnabled ? '已开启' : '已关闭' }}</span></label></div>
           <label class="field"><span>额度检测 / 自动移出间隔（秒）</span><input v-model.number="cpaForm.quotaCheckIntervalSeconds" type="number" min="10" max="86400" :disabled="!cpaForm.quotaEnabled" /></label>
           <label class="field"><span>剩余额度移出阈值（%） <small>剩余小于或等于该百分比时自动移出</small></span><input v-model.number="cpaForm.quotaRemainingThresholdPercent" type="number" min="0" max="100" step="0.1" :disabled="!cpaForm.quotaEnabled" /></label>

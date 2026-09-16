@@ -7,6 +7,7 @@ import "time"
 type Sub2Settings struct {
 	// Provider selects the active downstream: sub2 (default) or cpa.
 	Provider                       string   `json:"provider"`
+	PushPlanType                   string   `json:"push_plan_type"`
 	URL                            string   `json:"url"`
 	Email                          string   `json:"email"`
 	PasswordPresent                bool     `json:"password_present"`
@@ -26,8 +27,10 @@ type Sub2Settings struct {
 	QuotaRemainingThresholdPercent float64  `json:"quota_remaining_threshold_percent"`
 }
 
+const Sub2DefaultPushPlanType = "self_serve_business_prolite"
+
 func DefaultSub2Settings() Sub2Settings {
-	return Sub2Settings{Provider: "sub2", AccountConcurrency: 10, Priority: 1, Enable401Check: true, StatusCheckIntervalSeconds: 120, ReloginFailureLimit: 2, QuotaEnabled: true, QuotaCheckIntervalSeconds: 120}
+	return Sub2Settings{Provider: "sub2", PushPlanType: Sub2DefaultPushPlanType, AccountConcurrency: 10, Priority: 1, Enable401Check: true, StatusCheckIntervalSeconds: 120, ReloginFailureLimit: 2, QuotaEnabled: true, QuotaCheckIntervalSeconds: 120}
 }
 
 type FreeQuotaWindow struct {

@@ -26,7 +26,7 @@ func (s *Store) CPASettings() (model.CPASettings, string, error) {
 	if settings.StatusCheckIntervalSeconds < 10 {
 		settings.StatusCheckIntervalSeconds = 120
 	}
-	if settings.ReloginFailureLimit < 1 || settings.ReloginFailureLimit > 20 {
+	if settings.ReloginFailureLimit < 0 || settings.ReloginFailureLimit > 20 {
 		settings.ReloginFailureLimit = 2
 	}
 	if settings.QuotaCheckIntervalSeconds < 10 {
@@ -44,7 +44,7 @@ func (s *Store) SaveCPASettings(settings model.CPASettings, key string) (model.C
 	if settings.StatusCheckIntervalSeconds < 10 {
 		settings.StatusCheckIntervalSeconds = 120
 	}
-	if settings.ReloginFailureLimit < 1 || settings.ReloginFailureLimit > 20 {
+	if settings.ReloginFailureLimit < 0 || settings.ReloginFailureLimit > 20 {
 		settings.ReloginFailureLimit = 2
 	}
 	if settings.QuotaCheckIntervalSeconds < 10 {

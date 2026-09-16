@@ -82,6 +82,9 @@ type apiEnvelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+// ErrAccountUnauthorized identifies an OpenAI account 401, not an admin API login failure.
+var ErrAccountUnauthorized = errors.New("Sub2 账号状态 HTTP 401")
+
 type Client struct {
 	http      *http.Client
 	mu        sync.Mutex
@@ -353,7 +356,7 @@ func (c *Client) QueryQuota(ctx context.Context, settings model.Sub2Settings, pa
 		return QuotaUsage{}, err
 	}
 	if findHTTPStatus(data) == 401 {
-		return QuotaUsage{}, errors.New("Sub2 账号状态 HTTP 401")
+		return QuotaUsage{}, ErrAccountUnauthorized
 	}
 	var quota QuotaUsage
 	if err := json.Unmarshal(data, &quota); err != nil {
@@ -443,6 +446,11 @@ func (c *Client) doJSON(ctx context.Context, settings model.Sub2Settings, passwo
 		}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		var envelope apiEnvelope
+		if response.StatusCode == http.StatusUnauthorized && strings.HasSuffix(path, "/quota") &&
+			json.Unmarshal(data, &envelope) == nil && envelope.Reason == "OPENAI_QUOTA_UPSTREAM_ERROR" {
+			return nil, fmt.Errorf("%w: %s", ErrAccountUnauthorized, envelope.Message)
+		}
 		return nil, fmt.Errorf("Sub2 %s HTTP %d: %s", path, response.StatusCode, compact(data))
 	}
 	var envelope apiEnvelope

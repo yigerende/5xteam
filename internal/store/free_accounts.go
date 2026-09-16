@@ -407,6 +407,9 @@ func (s *Store) decryptOptional(value string) (string, error) {
 }
 
 func normalizeSub2Settings(settings *model.Sub2Settings) {
+	if settings.PushPlanType != "pro" {
+		settings.PushPlanType = model.Sub2DefaultPushPlanType
+	}
 	if settings.QuotaCheckIntervalSeconds < 10 {
 		settings.QuotaCheckIntervalSeconds = 120
 	}
@@ -422,7 +425,7 @@ func normalizeSub2Settings(settings *model.Sub2Settings) {
 	if settings.StatusCheckIntervalSeconds < 10 {
 		settings.StatusCheckIntervalSeconds = settings.QuotaCheckIntervalSeconds
 	}
-	if settings.ReloginFailureLimit < 1 || settings.ReloginFailureLimit > 20 {
+	if settings.ReloginFailureLimit < 0 || settings.ReloginFailureLimit > 20 {
 		settings.ReloginFailureLimit = 2
 	}
 	if settings.Priority < 1 {

@@ -36,7 +36,7 @@ func TestCPAAccountNameAndPayload(t *testing.T) {
 		encoded, _ := json.Marshal(sub2Credentials)
 		t.Fatalf("Sub2 credentials plan type mismatch: %s", encoded)
 	}
-	withModels := buildSub2OAuthCredentialsWithModels(profile, store.FreeAccountCredentials{OAuthAccessToken: "at", OAuthRefreshToken: "rt"}, []string{"gpt-5", " gpt-5", "o4-mini"})
+	withModels := buildSub2OAuthCredentialsWithModels(profile, store.FreeAccountCredentials{OAuthAccessToken: "at", OAuthRefreshToken: "rt"}, []string{"gpt-5", " gpt-5", "o4-mini"}, downstreamProlitePlanType)
 	mapping, ok := withModels["model_mapping"].(map[string]string)
 	if !ok || len(mapping) != 2 || mapping["gpt-5"] != "gpt-5" || mapping["o4-mini"] != "o4-mini" {
 		encoded, _ := json.Marshal(withModels)
