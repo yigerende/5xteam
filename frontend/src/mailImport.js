@@ -38,10 +38,9 @@ function parseSessionJSON(value, lineNumber) {
 }
 
 function splitAccountLine(line) {
-  // Keep commas inside trailing Session JSON untouched.
-  if (line.includes('----')) return line.split('----').map((item) => item.trim())
-  if (line.includes('\t')) return line.split('\t').map((item) => item.trim())
-  return line.split(',').map((item) => item.trim())
+  // Detect the separator after the email, before inspecting credentials or JSON.
+  const separator = line.match(/----|---|\t|,/)?.[0] || ','
+  return { parts: line.split(separator), separator }
 }
 
 export function parseMailAccountText(rawValue) {
@@ -52,7 +51,8 @@ export function parseMailAccountText(rawValue) {
     return (Array.isArray(parsed) ? parsed : parsed.accounts || [parsed]).filter((item) => item?.email)
   }
   return raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => {
-    const parts = splitAccountLine(line)
+    const { parts: rawParts, separator } = splitAccountLine(line)
+    const parts = rawParts.map((item) => item.trim())
     const email = parts[0]
     const domain = emailDomain(email)
     if (!domain) throw new Error(`第 ${index + 1} 行邮箱无效`)
@@ -60,7 +60,7 @@ export function parseMailAccountText(rawValue) {
     // Link-based mailboxes may optionally put a password/query code before the URL.
     const urlIndex = parts.findIndex((item, partIndex) => partIndex > 0 && isHTTPURL(item))
     if (urlIndex > 0) {
-      const sessionText = parts.slice(urlIndex + 1).join('----').trim()
+      const sessionText = rawParts.slice(urlIndex + 1).join(separator).trim()
       const session = sessionText ? parseSessionJSON(sessionText, index + 1) : null
       if (session?.sessionEmail && session.sessionEmail !== email.toLowerCase()) {
         throw new Error(`第 ${index + 1} 行 Session 邮箱与账号邮箱不一致`)
@@ -77,9 +77,9 @@ export function parseMailAccountText(rawValue) {
       // from the mailbox domain; the UUID fallback keeps Microsoft-hosted
       // custom domains compatible with earlier imports.
       if (isMicrosoftMailboxDomain(domain) || isOAuthClientID(parts[2])) {
-        return { email, mail_password: parts[1], client_id: parts[2], mail_refresh_token: parts.slice(3).join('----') }
+        return { email, mail_password: parts[1], client_id: parts[2], mail_refresh_token: rawParts.slice(3).join(separator).trim() }
       }
-      return { email, gpt_password: parts[1], totp_secret: parts[2], access_token: parts.slice(3).join('----') }
+      return { email, gpt_password: parts[1], totp_secret: parts[2], access_token: rawParts.slice(3).join(separator).trim() }
     }
     if (parts.length === 3) return { email, gpt_password: parts[1], totp_secret: parts[2] }
     return { email, mail_password: parts[1] || '' }

@@ -74,4 +74,58 @@ assert.deepEqual(
   }],
 )
 
+const email = 'format@example.com'
+const password = 'sample-password$$'
+const totp = 'JBSWY3DPEHPK3PXP'
+const pickup = 'https://mail.example/messages/token/format@example.com'
+const clientID = '00000000-0000-4000-8000-000000000000'
+const accessToken = 'token---segment----other-segment'
+const refreshToken = 'refresh---segment----other-segment'
+const sessionWithSeparators = JSON.stringify({
+  user: { email, name: 'Example--- User---- Name, With Comma' },
+  accessToken,
+  sessionToken: 'must-not-be-forwarded',
+})
+const formats = [
+  { fields: [email, password], expected: { email, mail_password: password } },
+  { fields: [email, pickup], expected: { email, pickup_url: pickup } },
+  { fields: [email, password, pickup], expected: { email, mail_password: password, pickup_url: pickup } },
+  { fields: [email, pickup, sessionWithSeparators], expected: { email, pickup_url: pickup, access_token: accessToken } },
+  { fields: [email, password, pickup, sessionWithSeparators], expected: { email, mail_password: password, pickup_url: pickup, access_token: accessToken } },
+  { fields: [email, password, totp], expected: { email, gpt_password: password, totp_secret: totp } },
+  { fields: [email, password, totp, accessToken], expected: { email, gpt_password: password, totp_secret: totp, access_token: accessToken } },
+  { fields: ['format@outlook.com', password, 'vendor-client', refreshToken], expected: { email: 'format@outlook.com', mail_password: password, client_id: 'vendor-client', mail_refresh_token: refreshToken } },
+  { fields: [email, password, clientID, refreshToken], expected: { email, mail_password: password, client_id: clientID, mail_refresh_token: refreshToken } },
+]
+for (const separator of ['---', '----', '\t', ',']) {
+  for (const { fields, expected } of formats) {
+    assert.deepEqual(parseMailAccountText(fields.join(separator)), [expected])
+  }
+  assert.throws(
+    () => parseMailAccountText([email, pickup, JSON.stringify({ user: { email } })].join(separator)),
+    /缺少 accessToken/,
+  )
+  assert.throws(
+    () => parseMailAccountText([email, pickup, JSON.stringify({ user: { email: 'other@example.com' }, accessToken })].join(separator)),
+    /邮箱与账号邮箱不一致/,
+  )
+}
+
+assert.deepEqual(
+  parseMailAccountText('\uFEFF  triple@example.com---sample-password$$---' + totp + '\r\n\r\n  quad@example.com----sample-password$$----' + totp + '  '),
+  [
+    { email: 'triple@example.com', gpt_password: password, totp_secret: totp },
+    { email: 'quad@example.com', gpt_password: password, totp_secret: totp },
+  ],
+)
+assert.deepEqual(
+  parseMailAccountText([email, 'password---with-three-dashes', totp].join('----')),
+  [{ email, gpt_password: 'password---with-three-dashes', totp_secret: totp }],
+)
+const jsonAccount = { email, gpt_password: 'password---and----dashes', totp_secret: totp }
+for (const input of [jsonAccount, [jsonAccount], { accounts: [jsonAccount] }]) {
+  assert.deepEqual(parseMailAccountText(JSON.stringify(input)), [jsonAccount])
+}
+
+
 console.log('mail import parser: ok')
