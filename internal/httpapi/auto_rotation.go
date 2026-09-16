@@ -363,13 +363,16 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 		return mailCandidates[i].CreatedAt.Before(mailCandidates[j].CreatedAt)
 	})
 	rotationIndex, mailIndex := 0, 0
-	nextCandidate := func() (model.FreeAccountProfile, bool) {
+	// Imported rows consume this run's selection budget even if preparation fails.
+	// Task creation alone cannot bound how many mailboxes enter the waiting list.
+	budgetUsed, mailImported := 0, 0
+	nextCandidate := func() (account model.FreeAccountProfile, imported, ok bool) {
 		if rotationIndex < len(selected) {
 			a := selected[rotationIndex]
 			rotationIndex++
-			return a, true
+			return a, false, true
 		}
-		for mailIndex < len(mailCandidates) {
+		for mailIndex < len(mailCandidates) && budgetUsed < need && ctx.Err() == nil {
 			mail := mailCandidates[mailIndex]
 			mailIndex++
 			if !eligibleAutoRotationMail(mail) {
@@ -388,20 +391,22 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 				}
 			}
 			if pureCandidate != nil {
-				return *pureCandidate, true
+				return *pureCandidate, false, true
 			}
 			if found {
 				continue
 			}
 			profile, err := s.importMailAccountToTeam(ctx, mail.Email)
 			if err == nil {
+				budgetUsed++
+				mailImported++
 				// Re-importing an old email can restore a durable removed cycle.
 				if profile.VisitedTeamCount == 0 || (settings.AllowMultiMotherReuse && reusableAccount(profile)) {
-					return profile, true
+					return profile, true, true
 				}
 			}
 		}
-		return model.FreeAccountProfile{}, false
+		return model.FreeAccountProfile{}, false, false
 	}
 	if need == 0 {
 		run.Status, run.Reason = "completed", "没有符合条件的候选账号"
@@ -425,8 +430,8 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	actualTasks := 0
-	for actualTasks < need {
-		account, ok := nextCandidate()
+	for budgetUsed < need && ctx.Err() == nil {
+		account, imported, ok := nextCandidate()
 		if !ok {
 			break
 		}
@@ -443,6 +448,9 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 			_ = s.store.ReleaseAutoRotationClaim(account.ID)
 			s.auditAccountEvent(ctx, account.ID, "candidate_skipped", "prepare", "auto_rotation", "", err.Error(), nil)
 			continue
+		}
+		if !imported {
+			budgetUsed++
 		}
 		if account.RemoveStatus == "completed" {
 			unlock := s.lockFreeAccount(account.ID)
@@ -509,7 +517,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 		run.Status = "completed"
 	}
 	_ = s.store.UpdateAutoRotationRun(run)
-	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "final", Source: "auto_rotation", Operation: "run", Stage: "complete", Message: "自动轮转批次完成", Details: map[string]any{"status": run.Status, "planned": run.Planned, "succeeded": run.Succeeded, "failed": run.Failed, "candidate_rotation": run.CandidateRotationCount, "candidate_mail": run.CandidateMailCount}})
+	s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "final", Source: "auto_rotation", Operation: "run", Stage: "complete", Message: "自动轮转批次完成", Details: map[string]any{"status": run.Status, "planned": run.Planned, "succeeded": run.Succeeded, "failed": run.Failed, "candidate_rotation": run.CandidateRotationCount, "candidate_mail": run.CandidateMailCount, "selection_budget": need, "budget_used": budgetUsed, "mail_imported": mailImported}})
 }
 
 func eligibleAutoRotationAccount(account model.FreeAccountProfile) bool {
