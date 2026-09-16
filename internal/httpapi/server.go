@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"chatgpt-space-merge/internal/cpa"
@@ -23,6 +24,13 @@ import (
 )
 
 type Server struct {
+	mailInfoMu        sync.Mutex
+	mailInfoWG        sync.WaitGroup
+	mailInfoJobs      map[string]*mailInfoJob
+	mailInfoActive    map[string]*mailInfoTask
+	mailInfoSlots     chan struct{}
+	mailInfoClosed    bool
+	mailInfoRefresh   func(context.Context, model.Settings, string) model.MailGPTInfoResult
 	store             *store.Store
 	jobs              *workflow.Manager
 	static            fs.FS
@@ -59,6 +67,14 @@ type Server struct {
 	auditWG           sync.WaitGroup
 	auditStop         chan struct{}
 	auditCloseOnce    sync.Once
+	auditFlush        chan chan error
+	auditDone         chan struct{}
+	auditStartedAt    time.Time
+	auditDropped      atomic.Uint64
+	auditWriteErrors  atomic.Uint64
+	auditErrorMu      sync.Mutex
+	auditLastError    string
+	auditShutdownErr  error
 }
 
 const (
@@ -89,6 +105,9 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 	_ = dataStore.PurgeAutoRotationHistory(time.Now().Add(-48 * time.Hour))
 	server := &Server{store: dataStore, jobs: jobs, static: static, sub2: sub2.New(), cpa: cpa.New(), mail: mailbridge.New(), sessions: make(map[string]time.Time), registrationJobs: make(map[string]map[string]any), mailFetchJobs: make(map[string]map[string]any), oauthJobs: make(map[string]map[string]any), oauthProxyActive: make(map[string]int), auditQueue: make(chan model.AutoRotationEvent, 2048), auditStop: make(chan struct{})}
 	server.auditWG.Add(1)
+	server.auditFlush = make(chan chan error)
+	server.auditDone = make(chan struct{})
+	server.auditStartedAt = time.Now()
 	for _, account := range dataStore.FreeAccounts() {
 		server.accountCycles.Store(account.ID, account.CycleID)
 	}
@@ -104,6 +123,7 @@ func (s *Server) Close() {
 	}
 	s.auditCloseOnce.Do(func() {
 		close(s.auditStop)
+		s.stopMailInfoJobs()
 		s.auditWG.Wait()
 	})
 }
@@ -211,6 +231,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/pro-settings/cpa/groups", s.getProCPAGroups)
 	mux.HandleFunc("POST /api/mail/accounts/import", s.importMailAccounts)
 	mux.HandleFunc("POST /api/mail/accounts/check-at", s.checkMailAccountsAT)
+	mux.HandleFunc("POST /api/mail/accounts/refresh-info", s.startMailGPTInfo)
+	mux.HandleFunc("POST /api/mail/accounts/{email}/refresh-info", s.startMailGPTInfo)
+	mux.HandleFunc("GET /api/mail/accounts/refresh-info/status", s.mailGPTInfoStatus)
 	mux.HandleFunc("POST /api/mail/accounts/{email}/check-at", s.checkMailAccountAT)
 	mux.HandleFunc("DELETE /api/mail/accounts/{email}", s.deleteMailAccount)
 	mux.HandleFunc("PUT /api/mail/accounts/{email}/management-scope", s.updateMailAccountManagementScope)

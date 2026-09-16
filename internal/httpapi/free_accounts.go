@@ -98,17 +98,40 @@ func monitorNextDeadline(now time.Time, oldest string, unchecked int, interval t
 
 func (s *Server) listFreeAccountEvents(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			writeAPI(w, http.StatusBadRequest, nil, "日志条数必须在 1 到 100 之间")
+			return
+		}
+		limit = parsed
+	}
 	profile, _, err := s.store.FreeAccountCredential(id)
 	if err != nil {
 		writeAPI(w, http.StatusNotFound, nil, err.Error())
 		return
 	}
-	task, taskErr := s.store.EnsureFreeAccountLifecycleTask(profile)
-	if taskErr != nil {
-		writeAPI(w, http.StatusInternalServerError, nil, taskErr.Error())
+	cursor := r.URL.Query().Get("cursor")
+	page, err := s.store.AccountEventsPage(id, cursor, limit)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrInvalidEventCursor) {
+			status = http.StatusBadRequest
+		}
+		writeAPI(w, status, nil, err.Error())
 		return
 	}
-	writeAPI(w, http.StatusOK, map[string]any{"account": profile, "lifecycle_task": task, "events": redactExecutionEvents(s.store.AutoRotationEventsByAccount(id))}, "")
+	payload := map[string]any{"events": redactExecutionEvents(page.Events), "has_more": page.HasMore, "next_cursor": page.NextCursor}
+	if cursor == "" {
+		task, err := s.store.EnsureFreeAccountLifecycleTask(profile)
+		if err != nil {
+			writeAPI(w, http.StatusInternalServerError, nil, err.Error())
+			return
+		}
+		payload["account"], payload["lifecycle_task"] = profile, task
+	}
+	writeAPI(w, http.StatusOK, payload, "")
 }
 
 func (s *Server) exportFreeAccountEvents(w http.ResponseWriter, r *http.Request) {
@@ -123,10 +146,13 @@ func (s *Server) exportFreeAccountEvents(w http.ResponseWriter, r *http.Request)
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
 		return
 	}
-	writeExecutionLogExport(w, "account-"+profile.Email+"-logs-"+beijingNow().Format("20060102-150405"), executionLogExport{
-		ExportedAt: time.Now(), Retention: "48h", Account: &profile, LifecycleTask: &task,
-		Events: redactExecutionEvents(s.store.AutoRotationEventsByAccount(id)),
-	})
+	payload, err := s.executionLogSnapshot(r.Context(), id, "", "")
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, "读取执行日志失败: "+err.Error())
+		return
+	}
+	payload.Account, payload.LifecycleTask = &profile, &task
+	writeExecutionLogExport(w, "account-"+profile.Email+"-logs-"+beijingNow().Format("20060102-150405"), payload)
 }
 
 type freeAccountImportInput struct {
@@ -616,18 +642,14 @@ func (s *Server) startFreeAccountOAuth(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusConflict, nil, "该账号的 Codex OAuth 正在处理中")
 		return
 	}
-	jobID := randomRegistrationID()
-	job := map[string]any{"cycle_id": profile.CycleID, "job_id": jobID, "account_id": id, "email": profile.Email, "trigger": "oauth", "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
-	s.oauthMu.Lock()
-	s.oauthJobs[jobID] = job
-	s.oauthMu.Unlock()
+	job := s.newAccountOAuthJob(r.Context(), profile, "oauth")
+	jobID := job["job_id"].(string)
 	_, _ = s.store.UpdateFreeAccount(id, func(item *model.FreeAccountProfile) {
 		item.OAuthStatus = "running"
 		item.Status = "oauthing"
 		item.LastError = ""
 	})
 	go s.runFreeAccountOAuth(jobID, id, profile.Email)
-	s.auditAccountEvent(r.Context(), id, "oauth", "oauth", "manual_single", "", "OAuth 任务已创建", map[string]any{"job_id": jobID})
 	writeAPI(w, http.StatusAccepted, map[string]any{"job": cloneRegistrationJob(job)}, "")
 }
 
@@ -650,6 +672,10 @@ func (s *Server) updateOAuthJob(id, status, message string) {
 	defer s.oauthMu.Unlock()
 	if j := s.oauthJobs[id]; j != nil {
 		j["status"], j["state"] = status, status
+		j["updated_at"] = time.Now()
+		if status == "running" && j["started_at"] == nil {
+			j["started_at"] = time.Now()
+		}
 		logs, _ := j["logs"].([]any)
 		logs = append(logs, map[string]any{"time": time.Now().UTC().Format(time.RFC3339), "level": "info", "step": "oauth", "message": message})
 		j["logs"] = logs
@@ -664,8 +690,10 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 		s.oauthMu.Lock()
 		if job := s.oauthJobs[jobID]; job != nil {
 			job["status"], job["state"], job["error"] = "failed", "failed", store.ErrStaleCycle.Error()
+			job["completed_at"] = time.Now()
 		}
 		s.oauthMu.Unlock()
+		s.auditAccountEvent(s.oauthJobContext(jobID), accountID, "oauth", "job_finished", s.oauthJobTrigger(jobID), "", "OAuth 结果因账号轮次已变化或账号不可用而忽略", map[string]any{"job_id": jobID, "job_status": "failed", "error": store.ErrStaleCycle.Error()})
 		return
 	}
 	status, message := "success", ""
@@ -705,6 +733,7 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 			trigger = value
 		}
 		j["status"], j["state"], j["error"], j["result"] = status, status, message, result
+		j["completed_at"] = time.Now()
 	}
 	s.oauthMu.Unlock()
 	if status != "success" {
@@ -713,14 +742,14 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 			s.handleDeadFreeAccount(accountID, result, message, trigger)
 		}
 	}
-	details := map[string]any{"job_id": jobID, "status": status}
+	details := map[string]any{"job_id": jobID, "job_status": status, "status": status}
 	if result != nil {
 		for _, key := range oauthLoginDetailKeys {
 			if value, ok := result[key]; ok {
 				details[key] = value
 			}
 		}
-		for _, key := range []string{"status", "error_code", "stage", "http_status", "dead"} {
+		for _, key := range []string{"status", "error_code", "stage", "http_status", "dead", "retryable"} {
 			if value, ok := result[key]; ok {
 				details[key] = value
 			}
@@ -740,7 +769,7 @@ func (s *Server) finishOAuthJob(jobID, accountID string, result map[string]any, 
 			response[key] = value
 		}
 	}
-	s.auditAccountEventWithIO(context.Background(), accountID, "oauth", "oauth", trigger, provider, "OAuth "+map[bool]string{true: "成功", false: "失败"}[status == "success"], details, request, response)
+	s.auditAccountEventWithIO(s.oauthJobContext(jobID), accountID, "oauth", "job_finished", trigger, provider, "OAuth "+map[bool]string{true: "成功", false: "失败"}[status == "success"], details, request, response)
 }
 
 func isDeadOAuthResult(result map[string]any, message string) bool {
@@ -877,6 +906,7 @@ type protocolOAuthDiagnostic struct {
 	Message       string         `json:"message"`
 	HTTPStatus    int            `json:"http_status"`
 	Attempt       int            `json:"attempt"`
+	DurationMS    int64          `json:"duration_ms"`
 	Level         string         `json:"level"`
 	Request       map[string]any `json:"request"`
 	Response      map[string]any `json:"response"`
@@ -910,6 +940,13 @@ func (s *Server) oauthJobTrigger(jobID string) string {
 }
 
 func (s *Server) auditOAuthProtocolDiagnostic(accountID, jobID, trigger string, diagnostic protocolOAuthDiagnostic) {
+	trace, _ := s.oauthJobContext(jobID).Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
+	s.oauthMu.Lock()
+	if job := s.oauthJobs[jobID]; job != nil {
+		job["last_event_at"], job["last_stage"] = time.Now(), diagnostic.Stage
+		job["round"], job["quality_attempt"] = diagnostic.Details["round"], diagnostic.Details["quality_attempt"]
+	}
+	s.oauthMu.Unlock()
 	details := make(map[string]any, len(diagnostic.Details)+3)
 	for key, value := range diagnostic.Details {
 		details[key] = value
@@ -917,6 +954,9 @@ func (s *Server) auditOAuthProtocolDiagnostic(accountID, jobID, trigger string, 
 	details["job_id"] = jobID
 	details["protocol_event"] = diagnostic.Event
 	details["schema_version"] = diagnostic.SchemaVersion
+	if trace.Attempt > 0 {
+		details["outer_attempt"], details["outer_max_attempts"] = trace.Attempt, trace.MaxAttempts
+	}
 	level := strings.ToLower(strings.TrimSpace(diagnostic.Level))
 	if level != "warning" && level != "error" {
 		level = "info"
@@ -926,6 +966,7 @@ func (s *Server) auditOAuthProtocolDiagnostic(accountID, jobID, trigger string, 
 		message = diagnostic.Event
 	}
 	s.enqueueAuditEvent(model.AutoRotationEvent{
+		CycleID: trace.CycleID, RunID: trace.RunID, TaskID: trace.TaskID, DurationMS: diagnostic.DurationMS,
 		AccountID: accountID, Type: "oauth_protocol", Source: trigger,
 		Operation: "oauth", Stage: diagnostic.Stage, Message: message,
 		HTTPStatus: diagnostic.HTTPStatus, Attempt: diagnostic.Attempt, Level: level,
@@ -953,6 +994,8 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 	login := selectOAuthLogin(s.store.AutoRotationSettings().OAuthLoginMode, credentials)
 	loginDetails := login.details()
 	loginDetails["login_method"], loginDetails["login_method_label"], loginDetails["login_auth_status"] = "not_started", "尚未执行登录", "not_started"
+	started := time.Now()
+	currentRound, currentQuality := 0, 0
 	emit := diagnostic
 	diagnostic = func(event protocolOAuthDiagnostic) {
 		for _, key := range oauthLoginDetailKeys {
@@ -966,6 +1009,8 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 		for key, value := range loginDetails {
 			event.Details[key] = value
 		}
+		event.Details["round"], event.Details["round_max_attempts"] = currentRound, oauthRoundAttempts
+		event.Details["quality_attempt"], event.Details["quality_max_attempts"] = currentQuality, oauthQualityAttempts
 		if emit != nil {
 			emit(event)
 		}
@@ -991,18 +1036,15 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 		diagnostic(protocolOAuthDiagnostic{SchemaVersion: 1, Stage: "oauth", Event: "login_result",
 			Message: "OAuth " + map[bool]string{true: "成功", false: "失败"}[ok],
 			Level:   map[bool]string{true: "info", false: "error"}[ok],
-			Details: map[string]any{"oauth_success": ok},
+			Details: oauthResultDetails(result, runErr), DurationMS: time.Since(started).Milliseconds(),
 		})
 	}()
-	const (
-		qualityAttempts = 4
-		roundAttempts   = 3
-	)
 	var lastErr error
 	var lastResult map[string]any
 	excluded := make(map[string]struct{})
-	for round := 1; round <= roundAttempts; round++ {
-		for quality := 1; quality <= qualityAttempts; quality++ {
+	for round := 1; round <= oauthRoundAttempts; round++ {
+		for quality := 1; quality <= oauthQualityAttempts; quality++ {
+			currentRound, currentQuality = round, quality
 			lease, err := s.acquireOAuthProxyExcluding(excluded)
 			if err != nil {
 				return nil, err
@@ -1013,7 +1055,7 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 				proxyURL = rotateOAuthProxySession(baseURL, round, quality)
 			}
 			if progress != nil {
-				progress(fmt.Sprintf("OAuth 代理质检（第 %d/%d 轮，第 %d/%d 个出口）", round, roundAttempts, quality, qualityAttempts))
+				progress(fmt.Sprintf("OAuth 代理质检（第 %d/%d 轮，第 %d/%d 个出口）", round, oauthRoundAttempts, quality, oauthQualityAttempts))
 			}
 			probeCtx, cancelProbe := context.WithTimeout(context.Background(), 45*time.Second)
 			probe, probeErr := s.probeOAuthProxy(probeCtx, proxyURL)
@@ -1049,25 +1091,21 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 			if runErr == nil && result != nil && result["success"] == true {
 				return result, nil
 			}
+			decision := oauthRoundDecision(round, result, runErr)
+			diagnostic(decision)
 			if !isRetryableOAuthNetworkResult(result, runErr) {
 				return result, runErr
 			}
 			excluded[baseURL] = struct{}{}
-			if diagnostic != nil {
-				diagnostic(protocolOAuthDiagnostic{
-					SchemaVersion: 1, Stage: "oauth", Event: "round_retry",
-					Message: "OAuth 代理/网络瞬时错误，释放出口并重新开始完整 OAuth",
-					Attempt: round, Level: "warning",
-					Response: map[string]any{"error": oauthErrorText(result, runErr), "proxy_name": lease.label, "proxy_endpoint": oauthProxyEndpoint(proxyURL)},
-					Details:  map[string]any{"round": round, "quality_attempt": quality, "proxy_name": lease.label, "proxy_endpoint": oauthProxyEndpoint(proxyURL)},
-				})
-			}
 			if progress != nil {
-				progress(fmt.Sprintf("OAuth 网络/代理瞬时失败，释放当前出口并重试完整流程（第 %d/%d 轮）", round, roundAttempts))
+				progress(decision.Message)
 			}
 			break
 		}
 	}
+	diagnostic(protocolOAuthDiagnostic{SchemaVersion: 1, Stage: "oauth", Event: "attempts_exhausted",
+		Message: "OAuth 本次任务的尝试次数已用尽", Level: "error",
+		Details: map[string]any{"will_retry": false, "retry_scope": "oauth_job", "stop_reason": "attempt_limit_reached", "error": oauthErrorText(lastResult, lastErr)}})
 	if lastResult != nil {
 		return lastResult, lastErr
 	}
@@ -1927,11 +1965,8 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	if profile.Dead {
 		return errDeadAccountHandled
 	}
-	jobID := randomRegistrationID()
-	job := map[string]any{"cycle_id": profile.CycleID, "job_id": jobID, "account_id": accountID, "email": profile.Email, "trigger": "relogin", "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
-	s.oauthMu.Lock()
-	s.oauthJobs[jobID] = job
-	s.oauthMu.Unlock()
+	job := s.newAccountOAuthJob(ctx, profile, "relogin")
+	jobID := job["job_id"].(string)
 	_, _ = s.store.UpdateFreeAccount(accountID, func(item *model.FreeAccountProfile) {
 		item.OAuthStatus, item.Status, item.LastError = "running", "oauthing", "下游返回 401，正在重新获取 Codex OAuth"
 	})

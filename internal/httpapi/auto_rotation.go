@@ -20,9 +20,11 @@ import (
 
 type autoRotationTraceContextKey struct{}
 type autoRotationTraceContext struct {
-	CycleID string
-	RunID   string
-	TaskID  string
+	CycleID     string
+	RunID       string
+	TaskID      string
+	Attempt     int
+	MaxAttempts int
 }
 
 func (s *Server) getAutoRotationSettings(w http.ResponseWriter, _ *http.Request) {
@@ -81,6 +83,10 @@ func (s *Server) listAutoRotationEvents(w http.ResponseWriter, r *http.Request) 
 }
 
 type executionLogExport struct {
+	SchemaVersion int                       `json:"schema_version"`
+	Coverage      executionLogCoverage      `json:"coverage"`
+	AuditHealth   executionLogHealth        `json:"audit_health"`
+	OAuthJobs     []map[string]any          `json:"oauth_jobs_current_process"`
 	ExportedAt    time.Time                 `json:"exported_at"`
 	Retention     string                    `json:"retention"`
 	Account       *model.FreeAccountProfile `json:"account,omitempty"`
@@ -105,6 +111,7 @@ func writeExecutionLogExport(w http.ResponseWriter, filename string, payload exe
 func redactExecutionEvents(events []model.AutoRotationEvent) []model.AutoRotationEvent {
 	result := make([]model.AutoRotationEvent, len(events))
 	for i, event := range events {
+		event.Message = redactSensitiveText(event.Message)
 		event.Request = redactMap(event.Request)
 		event.Response = redactMap(event.Response)
 		event.Details = redactMap(event.Details)
@@ -114,10 +121,12 @@ func redactExecutionEvents(events []model.AutoRotationEvent) []model.AutoRotatio
 }
 
 func (s *Server) exportAutoRotationEvents(w http.ResponseWriter, r *http.Request) {
-	events := redactExecutionEvents(s.store.AutoRotationEvents(r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id")))
-	writeExecutionLogExport(w, "team-execution-logs-"+beijingNow().Format("20060102-150405"), executionLogExport{
-		ExportedAt: time.Now(), Retention: "48h", Events: events,
-	})
+	payload, err := s.executionLogSnapshot(r.Context(), r.URL.Query().Get("account_id"), r.URL.Query().Get("run_id"), r.URL.Query().Get("task_id"))
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, nil, "读取执行日志失败: "+err.Error())
+		return
+	}
+	writeExecutionLogExport(w, "team-execution-logs-"+beijingNow().Format("20060102-150405"), payload)
 }
 func (s *Server) triggerAutoRotation(w http.ResponseWriter, r *http.Request) {
 	run, started, err := s.startAutoRotation(r.Context(), "manual")
@@ -686,6 +695,11 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 	if subSettings, _, settingsErr := s.store.Sub2Settings(); settingsErr == nil {
 		provider = providerForSettings(subSettings)
 	}
+	s.auditAccountEvent(taskCtx, task.AccountID, "auto_rotation", "task_started", "auto_rotation", provider, "自动轮转任务开始", map[string]any{
+		"retry_count": settings.RetryCount, "outer_max_attempts": settings.RetryCount + 1,
+		"oauth_login_mode": settings.OAuthLoginMode, "join_method": settings.JoinMethod,
+		"remove_method": settings.RemoveMethod, "concurrency": settings.Concurrency,
+	})
 	defer s.store.ReleaseAutoRotationClaim(task.AccountID)
 	step := func(key string, status string, msg string) {
 		now := time.Now()
@@ -709,6 +723,10 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 	attemptStep := func(fn func() error) error {
 		var err error
 		for attempt := 0; attempt <= settings.RetryCount; attempt++ {
+			taskCtx = context.WithValue(ctx, autoRotationTraceContextKey{}, autoRotationTraceContext{
+				RunID: task.RunID, TaskID: task.ID, CycleID: task.CycleID,
+				Attempt: attempt + 1, MaxAttempts: settings.RetryCount + 1,
+			})
 			if p, _, e := s.store.FreeAccountCredential(task.AccountID); e != nil || (task.CycleID != "" && p.CycleID != task.CycleID) {
 				return store.ErrStaleCycle
 			}
@@ -719,7 +737,10 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 				if task.CurrentStep == "oauth" {
 					message = "OAuth 失败，重新创建全新 CodexAuthRT 会话并从登录开始执行"
 				}
-				s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "retry", Operation: task.CurrentStep, Source: "auto_rotation", Provider: provider, Stage: task.CurrentStep, Attempt: attempt, Message: message, Details: map[string]any{"fresh_oauth_session": task.CurrentStep == "oauth"}})
+				s.enqueueAuditEvent(model.AutoRotationEvent{CycleID: task.CycleID, RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "retry", Operation: task.CurrentStep, Source: "auto_rotation", Provider: provider, Stage: task.CurrentStep, Attempt: attempt, Message: message, Details: map[string]any{
+					"fresh_oauth_session": task.CurrentStep == "oauth", "previous_error": err.Error(),
+					"outer_attempt": attempt + 1, "outer_max_attempts": settings.RetryCount + 1, "backoff_seconds": attempt,
+				}})
 				time.Sleep(time.Duration(attempt) * time.Second)
 			}
 			started := time.Now()
@@ -728,7 +749,11 @@ func (s *Server) executeAutoTask(ctx context.Context, task model.AutoRotationTas
 			if err != nil {
 				message = err.Error()
 			}
-			s.enqueueAuditEvent(model.AutoRotationEvent{RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "request", Operation: task.CurrentStep, Source: "auto_rotation", Provider: provider, Stage: task.CurrentStep, Attempt: attempt + 1, DurationMS: time.Since(started).Milliseconds(), Message: message})
+			willRetry := err != nil && attempt < settings.RetryCount && !errors.Is(err, errDeadAccountHandled)
+			s.enqueueAuditEvent(model.AutoRotationEvent{CycleID: task.CycleID, RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID, Type: "request", Operation: task.CurrentStep, Source: "auto_rotation", Provider: provider, Stage: task.CurrentStep, Attempt: attempt + 1, DurationMS: time.Since(started).Milliseconds(), Message: message, Details: map[string]any{
+				"outer_attempt": attempt + 1, "outer_max_attempts": settings.RetryCount + 1,
+				"succeeded": err == nil, "will_retry": willRetry, "retry_scope": "auto_rotation_step",
+			}})
 			if err == nil {
 				return nil
 			}
@@ -966,8 +991,10 @@ func (s *Server) autoOAuth(ctx context.Context, id string) error {
 	for {
 		select {
 		case <-ctx.Done():
+			s.auditAccountEvent(ctx, id, "oauth", "wait_stopped", "auto_rotation", "", "自动轮转停止等待 OAuth 任务", map[string]any{"job_id": jobID, "error": ctx.Err().Error(), "job_cancelled": false})
 			return ctx.Err()
 		case <-deadline.C:
+			s.auditAccountEvent(ctx, id, "oauth", "wait_timeout", "auto_rotation", "", "自动轮转等待 OAuth 超时", map[string]any{"job_id": jobID, "timeout_seconds": 1200, "job_cancelled": false})
 			return errors.New("OAuth 超时")
 		case <-ticker.C:
 			s.oauthMu.RLock()

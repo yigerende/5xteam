@@ -256,7 +256,7 @@ func (s *Store) AddAutoRotationEvents(events []model.AutoRotationEvent) error {
 		}
 		b, marshalErr := json.Marshal(event)
 		if marshalErr != nil {
-			continue
+			return marshalErr
 		}
 		if _, err := stmt.Exec(event.ID, event.RunID, event.TaskID, event.AccountID, string(b), formatTime(event.CreatedAt)); err != nil {
 			return err
@@ -375,6 +375,39 @@ func (s *Store) AutoRotationEventsByAccount(accountID string) []model.AutoRotati
 		}
 	}
 	return result
+}
+
+// ExecutionLogEvents exports every retained event and propagates read errors.
+// Interactive list endpoints retain their existing bounded queries.
+func (s *Store) ExecutionLogEvents(accountID, runID, taskID string) ([]model.AutoRotationEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	query := "SELECT payload FROM auto_rotation_events WHERE 1=1"
+	args := []any{}
+	for _, filter := range []struct{ column, value string }{{"account_id", accountID}, {"run_id", runID}, {"task_id", taskID}} {
+		if filter.value != "" {
+			query += " AND " + filter.column + "=?"
+			args = append(args, filter.value)
+		}
+	}
+	rows, err := s.db.Query(query+" ORDER BY created_at DESC, id DESC", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]model.AutoRotationEvent, 0)
+	for rows.Next() {
+		var raw string
+		var event model.AutoRotationEvent
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &event); err != nil {
+			return nil, err
+		}
+		result = append(result, event)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) AutoRotationEvents(runID, taskID string) []model.AutoRotationEvent {

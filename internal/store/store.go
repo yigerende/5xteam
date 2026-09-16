@@ -188,6 +188,7 @@ func (s *Store) initSchema() error {
 			id TEXT PRIMARY KEY, run_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '', payload TEXT NOT NULL, created_at TEXT NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS auto_rotation_events_created_at_idx ON auto_rotation_events(created_at DESC);
+		CREATE INDEX IF NOT EXISTS auto_rotation_events_account_cursor_idx ON auto_rotation_events(account_id, created_at DESC, id DESC);
 		CREATE TABLE IF NOT EXISTS admin_capacity_snapshots (
 			admin_account_id TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL
 		);
@@ -455,6 +456,8 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 }
 
 func preserveMailPlanCheck(profile *model.MailAccountProfile, old model.MailAccountProfile) {
+	profile.CreatedAtOpenAI = old.CreatedAtOpenAI
+	profile.GPTInfoCheck = old.GPTInfoCheck
 	profile.CurrentPlanType = old.CurrentPlanType
 	profile.SubscriptionPlan = old.SubscriptionPlan
 	profile.HasActiveSubscription = old.HasActiveSubscription

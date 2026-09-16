@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -25,44 +26,101 @@ var (
 // batches here and therefore cannot add network latency to Team rotation.
 func (s *Server) auditWriter() {
 	defer s.auditWG.Done()
+	defer close(s.auditDone)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	batch := make([]model.AutoRotationEvent, 0, 64)
-	flush := func() {
+	flush := func() error {
 		if len(batch) == 0 {
-			return
+			return nil
 		}
-		_ = s.store.AddAutoRotationEvents(batch)
+		if err := s.store.AddAutoRotationEvents(batch); err != nil {
+			s.recordAuditWriteError(err)
+			return err
+		}
 		batch = batch[:0]
+		return nil
 	}
-	for {
-		select {
-		case event := <-s.auditQueue:
-			batch = append(batch, event)
+	// Drain only the captured queue length; ongoing jobs must not delay export
+	// indefinitely. Failed batches stay in memory for the next flush attempt.
+	drain := func() error {
+		if err := flush(); err != nil {
+			return err
+		}
+		for remaining := len(s.auditQueue); remaining > 0; remaining-- {
+			batch = append(batch, <-s.auditQueue)
 			if len(batch) >= 64 {
-				flush()
-			}
-		case <-s.auditStop:
-			// Drain the queue once so shutdown does not lose events already
-			// accepted by enqueueAuditEvent, then commit the final batch.
-			for {
-				select {
-				case event := <-s.auditQueue:
-					batch = append(batch, event)
-				default:
-					flush()
-					return
+				if err := flush(); err != nil {
+					return err
 				}
 			}
+		}
+		return flush()
+	}
+	for {
+		queue := s.auditQueue
+		if len(batch) >= 64 {
+			queue = nil // Bound memory while SQLite is unavailable.
+		}
+		select {
+		case event := <-queue:
+			batch = append(batch, event)
+			if len(batch) >= 64 {
+				_ = flush()
+			}
+		case reply := <-s.auditFlush:
+			reply <- drain()
+		case <-s.auditStop:
+			if err := drain(); err != nil {
+				s.auditErrorMu.Lock()
+				s.auditShutdownErr = err
+				s.auditErrorMu.Unlock()
+				slog.Error("audit shutdown left unwritten events", "pending", len(batch)+len(s.auditQueue))
+			}
+			return
 		case <-ticker.C:
-			flush()
+			_ = flush()
 		}
 	}
 }
 
-// enqueueAuditEvent never waits for the database. If the diagnostic queue is
-// temporarily full, preserve high-value events by replacing their payload
-// with a compact summary and retrying once; normal business flow still wins.
+func (s *Server) recordAuditWriteError(err error) {
+	s.auditWriteErrors.Add(1)
+	s.auditErrorMu.Lock()
+	defer s.auditErrorMu.Unlock()
+	message := redactSensitiveText(err.Error())
+	if s.auditLastError != message {
+		slog.Error("audit persistence failed; pending batch will be retried", "error", message)
+	}
+	s.auditLastError = message
+}
+
+func (s *Server) flushAuditEvents(ctx context.Context) error {
+	if s.auditFlush == nil {
+		return fmt.Errorf("audit writer is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	reply := make(chan error, 1)
+	select {
+	case s.auditFlush <- reply:
+	case <-s.auditDone:
+		s.auditErrorMu.Lock()
+		defer s.auditErrorMu.Unlock()
+		return s.auditShutdownErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Ordinary logging stays nonblocking. Export reports any queue overflow so
+// a partial timeline cannot be mistaken for an uneventful execution.
 func (s *Server) enqueueAuditEvent(event model.AutoRotationEvent) {
 	if event.CycleID == "" && event.AccountID != "" {
 		if cycle, ok := s.accountCycles.Load(event.AccountID); ok {
@@ -78,24 +136,27 @@ func (s *Server) enqueueAuditEvent(event model.AutoRotationEvent) {
 	event.Request = redactMap(event.Request)
 	event.Response = redactMap(event.Response)
 	event.Details = redactMap(event.Details)
+	if event.Details == nil {
+		event.Details = map[string]any{}
+	}
+	event.Details["diagnostics_version"] = 2
+	event.Message = redactSensitiveText(event.Message)
 	// Dead-account handling is an exceptional terminal path. Persist its
 	// markers immediately so an operator (or a subsequent recovery request)
 	// can observe the decision before the removal call returns. All ordinary
 	// business events remain fully asynchronous below.
 	if strings.HasPrefix(event.Type, "dead_") {
-		_ = s.store.AddAutoRotationEvent(event)
-		return
+		if err := s.store.AddAutoRotationEvent(event); err == nil {
+			return
+		} else {
+			s.recordAuditWriteError(err)
+		}
 	}
 	select {
 	case s.auditQueue <- event:
 	default:
-		if event.Level == "error" || event.Type == "retry" || event.Type == "dead_detected" || event.Type == "final" {
-			event.Request = nil
-			event.Response = nil
-			select {
-			case s.auditQueue <- event:
-			default:
-			}
+		if s.auditDropped.Add(1) == 1 {
+			slog.Error("audit queue full; export will report dropped events")
 		}
 	}
 }
@@ -106,6 +167,14 @@ func (s *Server) auditAccountEvent(ctx context.Context, accountID, operation, st
 
 func (s *Server) auditAccountEventWithIO(ctx context.Context, accountID, operation, stage, source, provider, message string, details, request, response map[string]any) {
 	trace, _ := ctx.Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
+	if trace.Attempt > 0 {
+		copyDetails := make(map[string]any, len(details)+2)
+		for key, value := range details {
+			copyDetails[key] = value
+		}
+		copyDetails["outer_attempt"], copyDetails["outer_max_attempts"] = trace.Attempt, trace.MaxAttempts
+		details = copyDetails
+	}
 	s.enqueueAuditEvent(model.AutoRotationEvent{
 		CycleID: trace.CycleID,
 		RunID:   trace.RunID, TaskID: trace.TaskID, AccountID: accountID,
@@ -150,7 +219,7 @@ func redactMap(input map[string]any) map[string]any {
 // Preserve typed diagnostics, never Cookie values or arbitrary credential fields.
 func redactOAuthMetadata(key string, value any) (any, bool) {
 	switch key {
-	case "auth_session_cookie_present", "access_token_present", "refresh_token_present", "id_token_present":
+	case "auth_session_cookie_present", "login_session_cookie_present", "access_token_present", "refresh_token_present", "id_token_present":
 		present, ok := value.(bool)
 		return present, ok
 	case "cookie_jar":

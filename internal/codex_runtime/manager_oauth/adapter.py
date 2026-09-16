@@ -22,7 +22,21 @@ def response_shape(response, flow):
     page = data.get("page") if isinstance(data.get("page"), dict) else {}
     error = data.get("error") if isinstance(data.get("error"), dict) else {}
     cookies = cookie_snapshot(flow)
+    headers = {key.lower(): bridge.redact(value)[:300] for key, value in response.headers.items()
+               if key.lower() in {"content-type", "server", "cf-ray", "cf-mitigated", "x-request-id",
+                                  "x-openai-request-id", "retry-after"}}
+    body = response.text or ""
+    lowered = body[:32768].lower()
+    try:
+        json.loads(body)
+        body_kind = "json"
+    except (ValueError, TypeError):
+        body_kind = "html" if "<html" in lowered or "<!doctype html" in lowered else "text"
+    markers = [marker for marker in ("cf-chl-", "challenge-platform", "just a moment", "access denied")
+               if marker in lowered]
     return {"http_status": response.status, "url": bridge.safe_url(response.url),
+            "headers": headers, "body_kind": body_kind, "body_bytes": len(body.encode("utf-8")),
+            "body_markers": markers,
             "location": bridge.safe_url(response.location()), "response_keys": sorted(data),
             "page_type": str(page.get("type") or data.get("page_type") or ""),
             "continue_url": bridge.safe_url(flow.extract_continue_url(data)),
@@ -45,6 +59,7 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
             )
         self.last_stage = "oauth_init"
         self.last_status = 0
+        self.first_failed_request = None
         self.rate_limit_error = None
         self.login_details = {
             "configured_login_mode": payload.get("configured_login_mode", "email_otp"),
@@ -390,9 +405,11 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
             raise self.rate_limit_error
         stage = urlsplit(url).path.strip("/").replace("/", "_") or "authorize"
         self.last_stage, self.last_status = stage, 0
+        started = time.monotonic()
+        request_id = uuid.uuid4().hex
         headers = kwargs.get("headers") or {}
         payload = kwargs.get("json_data") or kwargs.get("form_data") or {}
-        request = {"method": kwargs.get("method", "GET"), "url": bridge.safe_url(url),
+        request = {"request_id": request_id, "method": kwargs.get("method", "GET"), "url": bridge.safe_url(url),
                    "referer": bridge.safe_url(headers.get("Referer")),
                    "payload_fields": sorted(payload), "header_names": sorted(headers),
                    "sentinel_attached": bool(headers.get("openai-sentinel-token")),
@@ -407,12 +424,23 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
                 kwargs.pop("allow_redirects", None)
                 response = super().request(url, **kwargs)
         except Exception as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            if self.first_failed_request is None:
+                self.first_failed_request = {"request_id": request_id, "stage": stage, "http_status": 0,
+                                             "error": bridge.redact(exc)[:500]}
             bridge.emit(stage, "request_error", "OAuth 请求异常", request=request,
-                        details={"error": bridge.redact(exc)[:500], "error_type": type(exc).__name__}, level="error")
+                        duration_ms=duration_ms,
+                        details={"request_id": request_id, "error": bridge.redact(exc)[:500], "error_type": type(exc).__name__}, level="error")
             raise
         self.last_status = response.status
+        shape = response_shape(response, self)
+        if response.status >= 400 and self.first_failed_request is None:
+            self.first_failed_request = {"request_id": request_id, "stage": stage,
+                                         **{key: shape[key] for key in ("http_status", "url", "error_code",
+                                            "error_message", "headers", "body_kind", "body_markers")}}
         bridge.emit(stage, "request_complete", "OAuth 请求已返回", http_status=response.status,
-                    request=request, response=response_shape(response, self),
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    request=request, response=shape, details={"request_id": request_id},
                     level="warning" if response.status >= 400 else "info")
         code = bridge.dead_code(response.text) if response.status >= 400 else ""
         if code:
@@ -606,9 +634,11 @@ def _run_once(payload, rpc=None):
         message = "本次临时 AT 登录尝试失败" if credential_mode == "chatgpt_at" else "Codex OAuth 失败"
         bridge.emit(stage, "exception", message, http_status=status,
                     details={"error": bridge.redact(exc)[:800], "error_type": type(exc).__name__,
+                             "first_failed_request": flow.first_failed_request if flow else None,
                              "retryable": retryable, "cookie_jar": cookie_snapshot(flow) if flow else []}, level="error")
         return {"success": False, "error": bridge.redact(exc), "retryable": retryable,
                 "error_code": exc.code if typed else "login_failed", "stage": stage, "http_status": status,
+                "first_failed_request": flow.first_failed_request if flow else None,
                 "retry_after_seconds": getattr(exc, "retry_after_seconds", 0),
                 "hint": bridge.redact(exc.hint) if typed else "", **(flow.login_details if flow else {})}
     finally:

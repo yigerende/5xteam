@@ -62,9 +62,9 @@ def safe_url(value):
     return parsed.path
 
 
-def emit(stage, event, message, *, http_status=0, request=None, response=None, details=None, level="info"):
+def emit(stage, event, message, *, http_status=0, request=None, response=None, details=None, level="info", duration_ms=0):
     item = {"schema_version": 1, "stage": stage, "event": event, "message": redact(message),
-            "http_status": http_status, "level": level, "request": request or {},
+            "http_status": http_status, "duration_ms": duration_ms, "level": level, "request": request or {},
             "response": response or {}, "details": {**_login_details, **(details or {})}}
     print("[protocol-event] " + json.dumps(item, ensure_ascii=False, separators=(",", ":")), file=sys.stderr, flush=True)
 

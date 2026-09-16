@@ -77,6 +77,8 @@ type MailAccountProfile struct {
 	ChatGPTStatusMessage  string           `json:"chatgpt_status_message,omitempty"`
 	ChatGPTStatusAt       *time.Time       `json:"chatgpt_status_at,omitempty"`
 	CurrentPlanType       string           `json:"current_plan_type,omitempty"`
+	CreatedAtOpenAI       *time.Time       `json:"created_at_openai,omitempty"`
+	GPTInfoCheck          *GPTInfoCheck    `json:"gpt_info_check,omitempty"`
 	SubscriptionPlan      string           `json:"subscription_plan,omitempty"`
 	HasActiveSubscription bool             `json:"has_active_subscription"`
 	PlusTrialEligible     bool             `json:"plus_trial_eligible"`

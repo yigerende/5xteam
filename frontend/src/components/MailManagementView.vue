@@ -47,6 +47,10 @@ import MessageBar from "./MessageBar.vue";
 import StatusPill from "./StatusPill.vue";
 import Pagination from "./Pagination.vue";
 import TeamVisitCount from "./TeamVisitCount.vue";
+import MailGPTInfoProgress from "./MailGPTInfoProgress.vue";
+import { gptPlanLabel, gptCreatedTime, gptInfoTitle } from "../mailGPTInfo";
+
+const gptInfoProgress = ref(null);
 
 const emit = defineEmits(["open-team", "pro-changed"]);
 const props = defineProps({ defaultPageSize: { type: Number, default: 10 } });
@@ -1449,6 +1453,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
     </div>
 
     <MessageBar :message="message" />
+    <MailGPTInfoProgress ref="gptInfoProgress" :mask="maskSensitive" :default-page-size="props.defaultPageSize" @updated="loadAccounts" />
 
     <template v-if="activeTab === 'accounts'">
       <section class="panel list-panel mail-accounts-panel">
@@ -1473,6 +1478,9 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
               @click="checkAT(selectedAccounts.map((item) => item.email))"
             >
               <BadgeCheck :size="15" />检测 AT<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span>
+            </button>
+            <button class="btn ghost" type="button" :disabled="!!busy || (!gptInfoProgress?.running && !selectedAccounts.length)" @click="gptInfoProgress?.running ? gptInfoProgress.show() : gptInfoProgress.start([...selectedEmails])">
+              <RefreshCw :size="15" />{{ gptInfoProgress?.running ? 'GPT 信息进度' : '批量刷新 GPT 信息' }}
             </button>
             <button class="btn ghost" type="button" @click="sensitiveMasked = !sensitiveMasked">
               <EyeOff v-if="!sensitiveMasked" :size="15" /><Eye v-else :size="15" />{{ sensitiveMasked ? '一键显示' : '一键脱敏' }}
@@ -1637,6 +1645,11 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                     :title="account.refresh_last_error"
                     >{{ account.refresh_last_error }}</small
                   >
+                  <div class="gpt-info-fields" :title="gptInfoTitle(account)">
+                    <small>套餐：{{ gptPlanLabel(account.current_plan_type) }}<span v-if="account.gpt_info_check?.plan_source === 'jwt'">（缓存）</span></small>
+                    <small>GPT 创建：<time v-if="account.created_at_openai">{{ gptCreatedTime(account.created_at_openai).split(' ')[0] }}<br />{{ gptCreatedTime(account.created_at_openai).split(' ')[1] }}</time><span v-else>未获取</span></small>
+                    <small v-if="account.gpt_info_check?.status === 'partial' || account.gpt_info_check?.status === 'failed'" class="danger-text">{{ account.gpt_info_check.status === 'partial' ? '本次部分更新' : '本次刷新失败' }}</small>
+                  </div>
                 </td>
                 <td class="pipeline-status-cell"><StatusPill :tone="pipelineSpaceTone(account)">{{ displaySpace(account) }}</StatusPill></td>
                 <td class="pipeline-status-cell">
@@ -1695,6 +1708,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                       >
                         <button class="action-menu-item" type="button" :disabled="!!busy" @click="closeActionMenu(); startFetch([account.email])"><Inbox :size="14" />收取该邮箱</button>
                         <button class="action-menu-item" type="button" :disabled="!!busy" @click="closeActionMenu(); openCredentialDialog(account)"><FileKey2 :size="14" />查看、复制和导出 AT / RT</button>
+                        <button class="action-menu-item" type="button" :disabled="!!busy || !account.access_token_present" @click="closeActionMenu(); gptInfoProgress.start([account.email])"><RefreshCw :size="14" />刷新 GPT 信息</button>
                         <button
                           class="action-menu-item"
                           type="button"
@@ -2635,6 +2649,8 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 .mail-account-table td:nth-child(6) {
   width: 125px;
 }
+.gpt-info-fields { margin-top: 5px; }
+.gpt-info-fields small, .gpt-info-fields time { display: block; white-space: normal; overflow-wrap: anywhere; font-size: 10px; line-height: 1.5; }
 .mail-account-table th:nth-child(7),
 .mail-account-table td:nth-child(7) {
   width: 280px;

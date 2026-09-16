@@ -76,10 +76,11 @@ func (c *Client) CheckAccountPlan(ctx context.Context, token string) model.Accou
 	return result
 }
 
-func (c *Client) requestAccountPlan(ctx context.Context, path, token, deviceID string) (int, []byte, time.Duration, error) {
+// newAccountPlanRequest is shared by Pro plan checks and mail GPT info refresh.
+func (c *Client) newAccountPlanRequest(ctx context.Context, path, token, deviceID string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
-		return 0, nil, 0, err
+		return nil, err
 	}
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
@@ -93,6 +94,18 @@ func (c *Client) requestAccountPlan(ctx context.Context, path, token, deviceID s
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
 	setOpenAITargetHeaders(req, path)
+	if path == "/me" {
+		req.Header.Set("x-openai-target-path", "/backend-api/me")
+		req.Header.Set("x-openai-target-route", "/backend-api/me")
+	}
+	return req, nil
+}
+
+func (c *Client) requestAccountPlan(ctx context.Context, path, token, deviceID string) (int, []byte, time.Duration, error) {
+	req, err := c.newAccountPlanRequest(ctx, path, token, deviceID)
+	if err != nil {
+		return 0, nil, 0, err
+	}
 	var status int
 	var data []byte
 	if c.python != "" && strings.HasPrefix(c.baseURL, "https://") && strings.TrimSpace(c.settings.ProxyURL) != "" {

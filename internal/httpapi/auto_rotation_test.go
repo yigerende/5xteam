@@ -403,6 +403,22 @@ func TestAutoRotationRetryExhaustionRemovesJoinedAccount(t *testing.T) {
 	if !removeCompleted || run.Failed != 1 || run.Succeeded != 0 {
 		t.Fatalf("remove cleanup step/run counts incorrect: steps=%+v run=%+v", stored.Steps, run)
 	}
+	payload, err := server.executionLogSnapshot(t.Context(), account.ID, task.RunID, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retryRecorded, exhaustionRecorded bool
+	for _, event := range payload.Events {
+		if event.Type == "retry" {
+			retryRecorded = event.Details["outer_attempt"] == float64(2) && event.Details["outer_max_attempts"] == float64(2) && event.Details["backoff_seconds"] == float64(1) && event.Details["previous_error"] != ""
+		}
+		if event.Type == "request" && event.Attempt == 2 {
+			exhaustionRecorded = event.Details["will_retry"] == false && event.Details["succeeded"] == false
+		}
+	}
+	if !retryRecorded || !exhaustionRecorded {
+		t.Fatalf("retry decisions missing: retry=%v exhausted=%v", retryRecorded, exhaustionRecorded)
+	}
 }
 
 func TestAccountExecutionLogExportIsDownloadableAndRedacted(t *testing.T) {
@@ -445,7 +461,7 @@ func TestAccountExecutionLogExportIsDownloadableAndRedacted(t *testing.T) {
 	}
 }
 
-func TestAccountLifecycleEventsIgnorePaginationAndReturnAllEvents(t *testing.T) {
+func TestAccountLifecyclePagesStayBoundedAndExportRemainsComplete(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -455,8 +471,8 @@ func TestAccountLifecycleEventsIgnorePaginationAndReturnAllEvents(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := make([]model.AutoRotationEvent, 0, 12)
-	for index := 0; index < 12; index++ {
+	events := make([]model.AutoRotationEvent, 0, 75)
+	for index := 0; index < 75; index++ {
 		events = append(events, model.AutoRotationEvent{ID: fmt.Sprintf("timeline-%02d", index), AccountID: account.ID, Type: "step", CreatedAt: time.Now().Add(time.Duration(index) * time.Second)})
 	}
 	if err := st.AddAutoRotationEvents(events); err != nil {
@@ -467,7 +483,7 @@ func TestAccountLifecycleEventsIgnorePaginationAndReturnAllEvents(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer server.Close()
-	req := httptest.NewRequest(http.MethodGet, "/api/free-accounts/"+account.ID+"/events?page=1&page_size=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/free-accounts/"+account.ID+"/events?limit=10", nil)
 	req.SetPathValue("id", account.ID)
 	rec := httptest.NewRecorder()
 	server.listFreeAccountEvents(rec, req)
@@ -477,14 +493,38 @@ func TestAccountLifecycleEventsIgnorePaginationAndReturnAllEvents(t *testing.T) 
 	var payload struct {
 		OK   bool `json:"ok"`
 		Data struct {
-			Events []model.AutoRotationEvent `json:"events"`
+			Events     []model.AutoRotationEvent `json:"events"`
+			HasMore    bool                      `json:"has_more"`
+			NextCursor string                    `json:"next_cursor"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !payload.OK || len(payload.Data.Events) != len(events) {
-		t.Fatalf("account lifecycle returned %d events, want %d", len(payload.Data.Events), len(events))
+	if !payload.OK || len(payload.Data.Events) != 10 || !payload.Data.HasMore || payload.Data.NextCursor == "" {
+		t.Fatalf("unexpected account log page: %+v", payload)
+	}
+	defaultReq := httptest.NewRequest(http.MethodGet, "/api/free-accounts/"+account.ID+"/events", nil)
+	defaultReq.SetPathValue("id", account.ID)
+	defaultRec := httptest.NewRecorder()
+	server.listFreeAccountEvents(defaultRec, defaultReq)
+	if err := json.Unmarshal(defaultRec.Body.Bytes(), &payload); err != nil || len(payload.Data.Events) != 50 {
+		t.Fatalf("default page is not bounded: count=%d err=%v", len(payload.Data.Events), err)
+	}
+	for _, query := range []string{"limit=101", "limit=-1", "limit=abc", "cursor=invalid"} {
+		badReq := httptest.NewRequest(http.MethodGet, "/api/free-accounts/"+account.ID+"/events?"+query, nil)
+		badReq.SetPathValue("id", account.ID)
+		badRec := httptest.NewRecorder()
+		server.listFreeAccountEvents(badRec, badReq)
+		if badRec.Code != http.StatusBadRequest {
+			t.Fatalf("invalid query %s returned %d", query, badRec.Code)
+		}
+	}
+	exportRec := httptest.NewRecorder()
+	server.exportFreeAccountEvents(exportRec, req)
+	var exported executionLogExport
+	if err := json.Unmarshal(exportRec.Body.Bytes(), &exported); err != nil || len(exported.Events) != len(events) {
+		t.Fatalf("export incorrectly paginated: count=%d err=%v", len(exported.Events), err)
 	}
 }
 

@@ -1,9 +1,9 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   BadgeCheck, Cable, DoorOpen, Download, FileJson, FolderOpen, Gauge, KeyRound, Link2,
   History, LoaderCircle, MoreHorizontal, RefreshCw, Save, Send, Trash2, Unplug, Upload,
-  Waypoints,
+  Waypoints, X,
 } from 'lucide-vue-next'
 import { api, downloadFile } from '../api'
 import { extractAccessTokens, extractTokensFromFiles, formatTime, shortID } from '../utils'
@@ -95,8 +95,25 @@ const accountTotal = ref(0)
 const accountSummary = reactive({ all: 0, outside: 0, inside: 0, removed: 0, oauth_ready: 0, invite_pending: 0, monitoring: 0, inside_premium: 0, quota_7d_remaining_total: 0, quota_7d_count: 0, oldest_status_checked_at: '', oldest_quota_checked_at: '', status_unchecked: 0, quota_unchecked: 0, server_now: '', next_status_check_at: '', next_quota_check_at: '', pending_seats_by_admin: {} })
 const teamSpaceFilter = ref('')
 const selectedAccountIDs = ref(new Set())
-const lifecycleView = reactive({ account: null, events: [], task: null, loading: false, error: '' })
-const lifecycleLoginSummary = computed(() => latestOAuthLoginSummary(lifecycleView.events))
+const lifecycleView = reactive({ account: null, events: [], task: null, loading: false, loadingMore: false, hasMore: false, cursor: '', error: '' })
+const lifecycleScrollRoot = ref(null)
+const lifecycleSentinel = ref(null)
+const expandedLifecycleEvents = ref(new Set())
+const lifecycleLoginSummary = computed(() => {
+  const summary = latestOAuthLoginSummary(lifecycleView.events)
+  return summary === '暂无 OAuth 登录记录' && lifecycleView.hasMore ? '暂未加载到 OAuth 记录' : summary
+})
+let lifecycleGeneration = 0
+let lifecycleRequest
+let lifecycleObserver
+watch([lifecycleScrollRoot, lifecycleSentinel], ([root, sentinel]) => {
+  lifecycleObserver?.disconnect()
+  if (!root || !sentinel) return
+  lifecycleObserver = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting) && !lifecycleView.error) loadMoreLifecycle()
+  }, { root, rootMargin: '0px 0px 240px 0px' })
+  lifecycleObserver.observe(sentinel)
+}, { flush: 'post' })
 
 function teamSpaceStatus(account) {
   if (account?.dead) return 'dead'
@@ -390,21 +407,67 @@ function setAccountPage(value) { page.value = value; selectedAccountIDs.value = 
 function setAccountPageSize(value) { pageSize.value = value; page.value = 1; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
 function setTeamSpaceFilter(value) { teamSpaceFilter.value = teamSpaceFilter.value === value ? '' : value; page.value = 1; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
 async function openLifecycle(account) {
-  lifecycleView.account = account
-  lifecycleView.events = []
-  lifecycleView.task = null
+  closeLifecycle()
+  Object.assign(lifecycleView, { account, events: [], task: null, loading: true, loadingMore: false, hasMore: false, cursor: '', error: '' })
+  const generation = lifecycleGeneration
+  await nextTick()
+  if (generation !== lifecycleGeneration) return
+  lifecycleScrollRoot.value?.focus()
+  return loadLifecyclePage(true)
+}
+function closeLifecycle() {
+  lifecycleGeneration++
+  lifecycleRequest?.abort()
+  lifecycleRequest = null
+  lifecycleObserver?.disconnect()
+  lifecycleView.account = null
+  expandedLifecycleEvents.value = new Set()
+}
+async function loadLifecyclePage(initial = false) {
+  const account = lifecycleView.account
+  if (!account) return
+  const generation = lifecycleGeneration
+  const controller = new AbortController()
+  lifecycleRequest = controller
   lifecycleView.error = ''
-  lifecycleView.loading = true
+  lifecycleView.loading = initial
+  lifecycleView.loadingMore = !initial
   try {
-    const result = await api(`/api/free-accounts/${encodeURIComponent(account.id)}/events`)
-    lifecycleView.account = result.account || account
-    lifecycleView.task = result.lifecycle_task || null
-    lifecycleView.events = result.events || []
+    const params = new URLSearchParams({ limit: '50' })
+    if (!initial && lifecycleView.cursor) params.set('cursor', lifecycleView.cursor)
+    const result = await api(`/api/free-accounts/${encodeURIComponent(account.id)}/events?${params}`, { signal: controller.signal })
+    if (generation !== lifecycleGeneration) return
+    if (initial) {
+      lifecycleView.account = result.account || account
+      lifecycleView.task = result.lifecycle_task || null
+      lifecycleView.events = result.events || []
+    } else {
+      lifecycleView.events.push(...(result.events || []))
+    }
+    lifecycleView.cursor = result.next_cursor || ''
+    lifecycleView.hasMore = !!result.has_more && !!lifecycleView.cursor
   } catch (error) {
-    lifecycleView.error = error.message
+    if (generation === lifecycleGeneration && !controller.signal.aborted) lifecycleView.error = error.message
   } finally {
-    lifecycleView.loading = false
+    if (generation === lifecycleGeneration) {
+      lifecycleView.loading = false
+      lifecycleView.loadingMore = false
+      lifecycleRequest = null
+    }
   }
+}
+function loadMoreLifecycle() {
+  if (lifecycleView.loading || lifecycleView.loadingMore || !lifecycleView.hasMore) return
+  return loadLifecyclePage()
+}
+function retryLifecycle() {
+  return lifecycleView.events.length ? loadMoreLifecycle() : loadLifecyclePage(true)
+}
+function toggleLifecycleEvent(id, open) {
+  const expanded = new Set(expandedLifecycleEvents.value)
+  if (open) expanded.add(id)
+  else expanded.delete(id)
+  expandedLifecycleEvents.value = expanded
 }
 async function exportAccountLogs(account = lifecycleView.account) {
   if (!account?.id) return
@@ -814,6 +877,7 @@ onBeforeUnmount(() => window.clearInterval(clockTimer))
 onBeforeUnmount(() => window.clearInterval(liveRefreshTimer))
 onBeforeUnmount(stopCapacityRefreshTimer)
 onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
+onBeforeUnmount(closeLifecycle)
 </script>
 
 <template>
@@ -945,23 +1009,28 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
 
     <div v-if="manualPushForm.account" class="modal-backdrop" @click.self="manualPushForm.account = null"><form class="modal" @submit.prevent="saveManualPushStage"><span class="overline">LINK SUB2 ACCOUNT</span><h2>标记推送成功</h2><p>{{ manualPushForm.account?.email }}</p><label class="field"><span>Sub2 账号 ID</span><input v-model="manualPushForm.sub2AccountID" type="number" min="1" step="1" required placeholder="例如 1024" /></label><div class="panel-actions"><button class="btn ghost" type="button" @click="manualPushForm.account = null">取消</button><button class="btn primary" type="submit"><Link2 :size="15" />关联并标记成功</button></div></form></div>
 
-    <div v-if="lifecycleView.account" class="modal-backdrop" @click.self="lifecycleView.account = null">
-      <section class="modal lifecycle-modal">
-        <div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>从进入 Team 轮转到最终移出的完整流程</p></div><div class="heading-actions"><button class="btn ghost" type="button" @click="exportAccountLogs()"><Download :size="15" />导出账号日志</button><button class="icon-button" type="button" title="关闭" @click="lifecycleView.account = null">×</button></div></div>
+    <div v-if="lifecycleView.account" class="modal-backdrop" @click.self="closeLifecycle" @keydown.esc="closeLifecycle">
+      <section ref="lifecycleScrollRoot" class="modal lifecycle-modal" role="dialog" aria-modal="true" aria-label="账号执行日志" tabindex="-1">
+        <div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>{{ lifecycleView.hasMore ? '已加载' : '共' }} {{ lifecycleView.events.length }} 条记录</p></div><div class="heading-actions"><IconButton label="刷新账号日志" :disabled="lifecycleView.loading || lifecycleView.loadingMore" @click="openLifecycle(lifecycleView.account)"><RefreshCw :size="15" /></IconButton><button class="btn ghost" type="button" @click="exportAccountLogs()"><Download :size="15" />导出账号日志</button><IconButton label="关闭" @click="closeLifecycle"><X :size="16" /></IconButton></div></div>
         <div v-if="lifecycleView.loading" class="lifecycle-loading">正在加载执行记录…</div>
-        <div v-else-if="lifecycleView.error" class="danger-text">{{ lifecycleView.error }}</div>
         <template v-else>
           <div class="lifecycle-summary"><span>进入时间：{{ formatTime(lifecycleView.account.imported_at) }}</span><span>当前状态：{{ lifecycleView.account.status || '-' }}</span><span>当前线路：{{ lifecycleView.account.push_provider || activeProviderLabel }}</span><span>重登成功：{{ lifecycleView.account.relogin_count || 0 }} 次</span><span>连续失败：{{ lifecycleView.account.relogin_failure_count || 0 }} / {{ activeReloginFailureLimit }}</span><span>最近 OAuth 登录：{{ lifecycleLoginSummary }}</span></div>
           <div class="lifecycle-timeline">
-            <div v-if="!lifecycleView.events.length" class="empty-cell">暂无详细事件</div>
+            <div v-if="!lifecycleView.events.length && !lifecycleView.error" class="empty-cell">暂无详细事件</div>
             <article v-for="event in lifecycleView.events" :key="event.id" class="lifecycle-event"><i></i><div>
               <time>{{ formatTime(event.created_at) }}</time><strong>{{ event.stage || event.operation || event.type || '系统事件' }}</strong><span>{{ event.message || '-' }}</span>
               <small v-if="event.cycle_id">轮次：{{ event.cycle_id }}</small>
               <small v-if="oauthLoginSummary(event.details)">{{ oauthLoginSummary(event.details) }}</small>
               <small v-if="event.details?.proxy?.name || event.details?.proxy_name">代理：{{ event.details?.proxy?.name || event.details?.proxy_name }}</small>
               <small v-if="event.attempt || event.duration_ms">{{ event.attempt ? `第 ${event.attempt} 次` : '' }} {{ event.duration_ms ? `· ${event.duration_ms} ms` : '' }}</small>
-              <details v-if="event.request || event.response || event.details"><summary>查看请求/返回参数</summary><pre v-if="event.request">请求：{{ JSON.stringify(event.request, null, 2) }}</pre><pre v-if="event.response">返回：{{ JSON.stringify(event.response, null, 2) }}</pre><pre v-if="event.details">详情：{{ JSON.stringify(event.details, null, 2) }}</pre></details>
+              <details v-if="event.request || event.response || event.details" @toggle="toggleLifecycleEvent(event.id, $event.target.open)"><summary>查看请求/返回参数</summary><template v-if="expandedLifecycleEvents.has(event.id)"><pre v-if="event.request">请求：{{ JSON.stringify(event.request, null, 2) }}</pre><pre v-if="event.response">返回：{{ JSON.stringify(event.response, null, 2) }}</pre><pre v-if="event.details">详情：{{ JSON.stringify(event.details, null, 2) }}</pre></template></details>
             </div></article>
+          </div>
+          <div ref="lifecycleSentinel" class="lifecycle-load-more" role="status" aria-live="polite">
+            <template v-if="lifecycleView.error"><span class="danger-text">{{ lifecycleView.error }}</span><button class="btn ghost" type="button" @click="retryLifecycle"><RefreshCw :size="14" />重试</button></template>
+            <template v-else-if="lifecycleView.loadingMore"><LoaderCircle class="spin" :size="16" />正在加载…</template>
+            <button v-else-if="lifecycleView.hasMore" class="btn ghost" type="button" @click="loadMoreLifecycle">加载更多</button>
+            <span v-else-if="lifecycleView.events.length">已加载全部记录</span>
           </div>
         </template>
       </section>
@@ -985,9 +1054,15 @@ onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
 .push-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .push-settings-grid .sub2-config-panel, .push-settings-grid .cpa-config-panel { max-width: none; }
 .lifecycle-modal { width: min(900px, calc(100vw - 32px)); max-height: min(820px, calc(100vh - 32px)); overflow: auto; }
+.lifecycle-modal .modal-heading { flex-wrap: wrap; gap: 12px; }
+.lifecycle-modal .modal-heading > div { min-width: 0; }
+.lifecycle-modal h2 { overflow-wrap: anywhere; }
+.lifecycle-modal .heading-actions { flex-wrap: wrap; }
+.lifecycle-load-more { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; min-height: 42px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .lifecycle-summary { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 10px; margin: 10px 0 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
 .lifecycle-timeline { display: grid; gap: 0; margin-left: 9px; border-left: 1px solid var(--line); }
 .lifecycle-event { position: relative; display: grid; grid-template-columns: 1fr; gap: 3px; padding: 0 0 15px 18px; }
+.lifecycle-event > div { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
 .lifecycle-event > i { position: absolute; left: -5px; top: 3px; width: 9px; height: 9px; border: 2px solid var(--surface); border-radius: 50%; background: var(--green); box-shadow: 0 0 0 1px var(--green); }
 .lifecycle-event time, .lifecycle-event small { color: var(--muted); font-size: 10px; }.lifecycle-event strong { font-size: 12px; color: var(--text-2); }.lifecycle-event span { font-size: 11px; color: var(--text); }.lifecycle-event details { margin-top: 4px; }.lifecycle-event summary { color: var(--blue); cursor: pointer; font-size: 10px; }.lifecycle-event pre { max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--line); background: var(--surface-2); white-space: pre-wrap; word-break: break-word; font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .lifecycle-loading { padding: 30px; text-align: center; color: var(--muted); }

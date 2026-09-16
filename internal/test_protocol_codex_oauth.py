@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent / "codex_runtime"))
 from manager_oauth import upstream as core, bridge
-from manager_oauth.adapter import ProjectProtocolLogin, run
+from manager_oauth.adapter import ProjectProtocolLogin, response_shape, run
 
 
 def encoded(data):
@@ -535,6 +535,39 @@ class ProtocolFlowTests(unittest.TestCase):
             self.assertNotIn(value, text)
         self.assertIn('"http_status":403', text)
         self.assertIn("login_session", text)
+
+    def test_request_diagnostics_keep_ids_duration_and_first_failure(self):
+        scenario = Scenario(both_blocked=True)
+        result = scenario.run()
+        self.assertFalse(result["success"])
+        events = [json.loads(line.removeprefix("[protocol-event] "))
+                  for line in scenario.logs.getvalue().splitlines() if line.startswith("[protocol-event] ")]
+        starts = {event["request"]["request_id"]: event for event in events if event["event"] == "request_start"}
+        completed = [event for event in events if event["event"] == "request_complete"]
+        self.assertTrue(completed)
+        for event in completed:
+            self.assertIn(event["request"]["request_id"], starts)
+            self.assertGreaterEqual(event["duration_ms"], 0)
+        first = next(event for event in completed if event["http_status"] == 403)
+        self.assertEqual(result["first_failed_request"]["request_id"], first["request"]["request_id"])
+        self.assertEqual(first["response"]["body_kind"], "html")
+        self.assertIn("access denied", first["response"]["body_markers"])
+
+    def test_response_diagnostics_allowlist_headers_without_html_or_secrets(self):
+        bridge.configure({"password": "private-password"})
+        flow = ProjectProtocolLogin("fixture", {"proxy": "http://proxy.example:8080"})
+        response = core.ProtocolResponse(403, "https://auth.openai.com/oauth/authorize?code=private-code", {
+            "Content-Type": "text/html", "CF-Ray": "test-ray", "CF-Mitigated": "challenge",
+            "X-Request-ID": "test-request", "Set-Cookie": "login_session=private-cookie",
+            "Authorization": "Bearer private-at", "X-Private": "private-password",
+        }, "<html><title>Just a moment</title>private-password private-cookie</html>")
+        shape = response_shape(response, flow)
+        self.assertEqual(shape["headers"]["cf-ray"], "test-ray")
+        self.assertEqual(shape["headers"]["cf-mitigated"], "challenge")
+        self.assertIn("just a moment", shape["body_markers"])
+        self.assertFalse(shape["login_session_cookie_present"])
+        for secret in ("private-code", "private-cookie", "private-password", "private-at"):
+            self.assertNotIn(secret, json.dumps(shape))
 
     def test_account_cookie_pkce_and_proxy_isolation(self):
         a = ProjectProtocolLogin("a", {"proxy": "http://a.example:8080"})

@@ -1,12 +1,59 @@
 package store
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"chatgpt-space-merge/internal/model"
 )
+
+func TestExecutionLogExportIsUnboundedAndReportsReadFailures(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	events := make([]model.AutoRotationEvent, 5001)
+	for i := range events {
+		events[i] = model.AutoRotationEvent{ID: fmt.Sprintf("event-%d", i), AccountID: "account", RunID: "run", TaskID: "task", CreatedAt: time.Now()}
+	}
+	if err := s.AddAutoRotationEvents(events); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := s.ExecutionLogEvents("account", "run", "task")
+	if err != nil || len(exported) != len(events) {
+		t.Fatalf("export truncated: count=%d err=%v", len(exported), err)
+	}
+	if other, err := s.ExecutionLogEvents("other", "run", "task"); err != nil || len(other) != 0 {
+		t.Fatalf("account filter ignored: count=%d err=%v", len(other), err)
+	}
+	if _, err := s.db.Exec("UPDATE auto_rotation_events SET payload='invalid-json' WHERE id='event-0'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ExecutionLogEvents("account", "", ""); err == nil {
+		t.Fatal("corrupt log entry silently omitted")
+	}
+}
+
+func TestAuditBatchSerializationFailureRollsBack(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	err = s.AddAutoRotationEvents([]model.AutoRotationEvent{
+		{ID: "valid"}, {ID: "invalid", Details: map[string]any{"unsupported": make(chan int)}},
+	})
+	if err == nil {
+		t.Fatal("serialization failure was ignored")
+	}
+	events, err := s.ExecutionLogEvents("", "", "")
+	if err != nil || len(events) != 0 {
+		t.Fatalf("partially committed failed batch: count=%d err=%v", len(events), err)
+	}
+}
 
 func TestOAuthLoginModeDefaultsValidationAndPersistence(t *testing.T) {
 	dir := t.TempDir()
