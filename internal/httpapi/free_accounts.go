@@ -2114,21 +2114,29 @@ func clearReloginFailures(profile *model.FreeAccountProfile) {
 
 func (s *Server) removeFreeAccount(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
-	s.auditAccountEvent(r.Context(), id, "remove", "remove", "manual_single", "", "开始移出空间", nil)
+	s.auditAccountEvent(r.Context(), id, "remove", "remove", "manual_single", "", "手动移出：强制由母号踢出子号", map[string]any{"remove_method": "mother_kick", "forced_mother_kick": true})
 	// Removal must remain available when an earlier invite/accept request is
 	// stuck in its network call. The manual stage editor can mark that account
 	// as entered, after which this operation is allowed to clean up the remote
 	// Team membership without waiting on the stale workflow mutex.
-	profile, err := s.performFreeAccountRemove(r.Context(), id)
+	profile, err := s.performFreeAccountRemoval(r.Context(), id, true)
 	if err != nil {
+		s.auditAccountEvent(r.Context(), id, "remove", "remove", "manual_single", "", "手动母号踢出处理失败", map[string]any{"forced_mother_kick": true, "error": err.Error()})
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
 		return
 	}
-	s.auditAccountEvent(r.Context(), id, "remove", "remove", "manual_single", "", "移出空间成功", nil)
+	s.auditAccountEvent(r.Context(), id, "remove", "remove", "manual_single", "", "手动移出处理完成", map[string]any{"remove_method": profile.RemoveMethod, "forced_mother_kick": true})
 	writeAPI(w, http.StatusOK, profile, "")
 }
 
 func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model.FreeAccountProfile, error) {
+	return s.performFreeAccountRemoval(ctx, id, false)
+}
+
+// Manual single/batch removal always uses the mother's credentials, just as
+// dead-account removal does. Keep the override local to this operation: failed
+// manual requests must not change the cycle policy or mark healthy accounts dead.
+func (s *Server) performFreeAccountRemoval(ctx context.Context, id string, forceMotherKick bool) (model.FreeAccountProfile, error) {
 	unlock := s.lockFreeAccountRemove(id)
 	defer unlock()
 	profile, _, err := s.store.FreeAccountCredential(id)
@@ -2151,6 +2159,9 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 	defer unlockTeam()
 	profile = s.refreshSub2CostBeforeRemoval(ctx, profile)
 	removeMethod := removalMethodForCycle(profile, s.store.AutoRotationSettings())
+	if forceMotherKick {
+		removeMethod = "mother_kick"
+	}
 	if removeMethod == "child_leave" {
 		return s.performFreeAccountChildLeave(ctx, profile)
 	}
@@ -2176,7 +2187,7 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 		AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
 		Type: "remove_trace", Source: "remove", Operation: "remove", Stage: "remove_request_start",
 		Message: "Team 移出诊断", Request: map[string]any{"team_account_id": profile.TeamAccountID, "user_id": profile.UserID, "proxy": removeProxy},
-		Details: map[string]any{"team_account_id": profile.TeamAccountID, "user_id": profile.UserID, "proxy": removeProxy},
+		Details: map[string]any{"team_account_id": profile.TeamAccountID, "user_id": profile.UserID, "proxy": removeProxy, "remove_method": "mother_kick", "forced_mother_kick": forceMotherKick || profile.Dead || profile.ReloginExhausted},
 	})
 	var removeResponse workflow.Response
 	if removeResponse, err = retryTeamRequest(ctx, s.store.Settings(), func() (workflow.Response, error) {

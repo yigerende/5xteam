@@ -43,7 +43,7 @@ function fixture() {
   const context = vm.createContext({ ref: value => ({ value }), reactive: value => value, computed: fn => ({ get value() { return fn() } }),
     defineEmits: () => (...args) => events.push(args), defineExpose() {}, onBeforeUnmount(fn) { unmount = fn }, AbortController,
     runMailAccountTask: async (task, mode, update, options) => new Promise((resolve, reject) => calls.push({ task, mode, update, options, resolve, reject })) })
-  vm.runInContext(code + ';this.view={start,confirm,close,open,phase,tasks,counts}', context)
+  vm.runInContext(code + ';this.view={start,confirm,close,open,phase,tasks,counts,title}', context)
   return { ...context.view, calls, events, unmount }
 }
 {
@@ -83,3 +83,28 @@ function fixture() {
   assert.equal(f.events.filter(e => e[0] === 'finished').length, 0, 'No late completion after unmount')
 }
 console.log('Temporary AT: shared Mail/Pro endpoints, OAuth regression, terminal errors, no POST retry, abort, confirmation, selected-only parallelism, deduplication, progress, failure isolation and teardown passed')
+{
+  const f = fixture()
+  f.start([{ email: 'pro@example.com' }], false, 'oauth')
+  assert.equal(f.title.value, '登录获取 RT / AT')
+  assert.equal(f.calls.length, 0, 'OAuth must wait for confirmation')
+  const pending = f.confirm()
+  assert.equal(f.calls[0].mode, 'oauth', 'Pro OAuth must use Codex login, not temporary AT')
+  f.start([{ email: 'other@example.com' }], false, 'login')
+  await f.confirm()
+  assert.equal(f.calls.length, 1, 'Running OAuth must not be replaced or duplicated')
+  f.calls[0].update({ status: 'running', logs: [{ message: '密码 + TOTP 验证' }, { message: 'OAuth 回调获取令牌' }] })
+  assert.equal(f.tasks.value[0].logs.length, 2)
+  f.calls[0].resolve({ status: 'success' })
+  await pending
+  assert.equal(f.events.find(event => event[0] === 'finished')[1].mode, 'oauth')
+  f.close()
+  f.start([{ email: 'pro@example.com' }])
+  assert.equal(f.title.value, '获取临时 AT', 'Temporary AT mode must reset after OAuth')
+  const temporary = f.confirm()
+  assert.equal(f.calls[1].mode, 'login')
+  f.calls[1].resolve({ status: 'success' })
+  await temporary
+  assert.equal(f.events.filter(event => event[0] === 'finished').at(-1)[1].mode, 'login')
+}
+console.log('Pro OAuth progress: correct mode/title, existing login pipeline, live steps, duplicate guard and temporary AT reset passed')

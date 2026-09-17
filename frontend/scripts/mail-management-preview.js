@@ -28,6 +28,11 @@ fixture.mergeFailStage = ''
 fixture.mergeCalls = []
 const savedCredentials = new Map()
 const loginJobs = new Map()
+const oauthJobs = new Map()
+fixture.oauthFail = false
+fixture.oauthMissingJob = false
+fixture.oauthStatusMissing = false
+fixture.oauthStageDelay = 1500
 fixture.loginFailEmails = []
 fixture.loginDelay = 2200
 fixture.loginMissingJob = false
@@ -41,6 +46,27 @@ window.fetch = async (path, options = {}) => {
   const url = new URL(path, location.origin)
   const body = options.body ? JSON.parse(options.body) : {}
   fixture.requests.push({ path: url.pathname, body })
+  if (url.pathname.startsWith('/api/mail/accounts/') && url.pathname.endsWith('/oauth')) {
+    const email = decodeURIComponent(url.pathname.split('/')[4])
+    const jobID = 'codex-oauth-' + (oauthJobs.size + 1)
+    oauthJobs.set(jobID, { email, started: Date.now() })
+    return json({ job: fixture.oauthMissingJob ? {} : { job_id: jobID, status: 'queued', logs: [] } })
+  }
+  if (url.pathname.startsWith('/api/mail/oauth/')) {
+    const job = oauthJobs.get(decodeURIComponent(url.pathname.split('/')[4]))
+    if (!job || fixture.oauthStatusMissing) return new Response(JSON.stringify({ ok: false, error: 'Codex OAuth 任务不存在' }), { status: 404 })
+    const steps = ['OAuth 登录方式：邮箱验证码', '邮箱验证码已提交，继续验证 2FA', 'OAuth 回调换取 RT / AT']
+    const step = Math.min(steps.length, Math.floor((Date.now() - job.started) / fixture.oauthStageDelay))
+    const done = step === steps.length
+    if (done && !fixture.oauthFail) {
+      const item = items.find(item => item.email === job.email)
+      const stored = savedCredentials.get(job.email) || { email: job.email }
+      Object.assign(stored, { revision: 'oauth-done', access_token: 'fixture-codex-at', refresh_token: 'fixture-codex-rt' })
+      savedCredentials.set(job.email, stored)
+      Object.assign(item, { access_token_present: true, refresh_token_present: true, oauth_status: 'completed' })
+    }
+    return json({ job: { status: done ? (fixture.oauthFail ? 'failed' : 'success') : 'running', error: done && fixture.oauthFail ? '模拟 OAuth 验证失败' : '', logs: steps.slice(0, step).map(message => ({ time: new Date().toISOString(), message })), result: done && !fixture.oauthFail ? { access_token: 'fixture-codex-at', refresh_token: 'fixture-codex-rt' } : null } })
+  }
   if (url.pathname.startsWith('/api/mail/accounts/') && url.pathname.endsWith('/login')) {
     const email = decodeURIComponent(url.pathname.split('/')[4])
     const jobID = 'temporary-at-' + (loginJobs.size + 1)

@@ -187,6 +187,7 @@ function countdownText(value, disabled = false) {
 
 const stageLabels = { invite: '邀请', accept: '进入', oauth: '授权', push: '推送', quota: '额度', remove: '移出' }
 function stageLabel(key, account) {
+  if (key === 'remove' && activities[account?.id]?.action === 'remove') return '移出'
   if (account?.join_method === 'child_request') {
     if (key === 'invite') return '申请'
     if (key === 'accept') return '同意'
@@ -367,6 +368,7 @@ function toggleAllDisplayed() {
 function elapsedSeconds(activity) { return Math.max(0, Math.floor((clock.value - activity.startedAt) / 1000)) }
 function activityText(activity) {
   if (activity.detail) return activity.detail
+  if (activity.action === 'remove') return '正在由母号踢出子号'
   const activityAccount = liveAccounts.value.find((item) => String(item?.id) === String(activity?.id)) || null
   if (activity.action === 'join' && activity.stage === 'accept') return activityAccount?.join_method === 'child_request' ? '正在由母号同意申请' : '正在接受团队邀请'
   if (activity.action === 'join') return activityAccount?.join_method === 'child_request' ? '正在申请加入空间' : '正在发送团队邀请'
@@ -769,7 +771,7 @@ async function runSelectedPipelineTask(action) {
   const eligible = selected.filter(requirements[action])
   const skipped = selected.length - eligible.length
   if (!eligible.length) return setMessage(`没有符合条件的账号（已跳过 ${skipped} 个）`, 'error')
-  if (action === 'remove' && !window.confirm(`确认将已勾选的 ${eligible.length} 个账号移出空间？同一母号下的账号将依次执行。`)) return
+  if (action === 'remove' && !window.confirm(`确认由母号踢出已勾选的 ${eligible.length} 个账号？本次强制采用母号踢出，同一母号下的账号将按配置间隔依次执行。`)) return
   selectedAccountIDs.value = new Set()
   busy.value = `batch:${action}`
   const labels = { oauth: '授权', relogin: '重登', push: `推送${activeProviderLabel.value}`, quota: '查额度', remove: '移出空间' }
@@ -1026,7 +1028,7 @@ onBeforeUnmount(closeLifecycle)
         <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('oauth')"><KeyRound :size="14" />获取 Codex AT / RT</button>
         <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || !hasDownstream(pipelineMenu.account) || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('relogin')"><RefreshCw :size="14" />重登并重新推送</button>
         <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.oauth_status !== 'completed' || hasDownstream(pipelineMenu.account)" @click="runPipelineMenuAction('push')"><Send :size="14" />推送到{{ activeProviderLabel }}</button>
-        <button type="button" class="danger-action" :disabled="isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('remove')"><Unplug :size="14" />立即移出空间</button>
+        <button type="button" class="danger-action" title="强制由母号踢出子号，使用母号专属代理" :disabled="isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('remove')"><Unplug :size="14" />立即移出空间</button>
       </div>
     </Teleport>
 

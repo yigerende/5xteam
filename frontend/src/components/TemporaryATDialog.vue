@@ -8,19 +8,23 @@ const emit = defineEmits(['busy', 'finished'])
 const open = ref(false)
 const phase = ref('confirm')
 const batch = ref(false)
+const mode = ref('login')
 const tasks = ref([])
 const counts = reactive({ done: 0, ok: 0, fail: 0 })
-const title = computed(() => batch.value ? '批量获取临时 AT' : '获取临时 AT')
+const title = computed(() => mode.value === 'oauth'
+  ? (batch.value ? '批量登录获取 RT / AT' : '登录获取 RT / AT')
+  : (batch.value ? '批量获取临时 AT' : '获取临时 AT'))
 let disposed = false
 let controller
 
-function start(accounts, isBatch = false) {
+function start(accounts, isBatch = false, taskMode = 'login') {
   if (phase.value === 'running' || disposed) return
   const unique = new Map(accounts.map(account => [account.email.toLowerCase(), account]))
   if (!unique.size) return
   tasks.value = [...unique.values()].map(account => ({ email: account.email, status: 'queued', state: 'queued', logs: [], error: '', expanded: unique.size <= 5 }))
   Object.assign(counts, { done: 0, ok: 0, fail: 0 })
   batch.value = isBatch
+  mode.value = taskMode === 'oauth' ? 'oauth' : 'login'
   phase.value = 'confirm'
   open.value = true
 }
@@ -36,7 +40,7 @@ async function confirm() {
   await Promise.all(tasks.value.map(async task => {
     task.status = 'running'
     try {
-      await runMailAccountTask(task, 'login', job => {
+      await runMailAccountTask(task, mode.value, job => {
         if (disposed) return
         // Show progress only; never copy tokens/session from job.result into UI logs.
         Object.assign(task, { status: job.status || job.state || 'running', state: job.state || job.status, logs: Array.isArray(job.logs) ? job.logs : task.logs, error: job.error || job.error_hint || '' })
@@ -49,7 +53,7 @@ async function confirm() {
   if (disposed) return
   phase.value = 'done'
   emit('busy', false)
-  emit('finished', { ...counts })
+  emit('finished', { ...counts, mode: mode.value })
 }
 onBeforeUnmount(() => { disposed = true; controller?.abort() })
 defineExpose({ start })
@@ -59,21 +63,22 @@ defineExpose({ start })
   <Teleport to="body">
     <div v-if="open" class="modal-backdrop temporary-at-backdrop" @click.self="close" @keydown.esc="close">
       <section class="modal temporary-at-dialog" role="dialog" aria-modal="true" aria-labelledby="temporary-at-title">
-        <header><h2 id="temporary-at-title">{{ title }}</h2><button class="icon-button" title="关闭临时 AT 进度" :disabled="phase === 'running'" @click="close"><X :size="16" /></button></header>
+        <header><h2 id="temporary-at-title">{{ title }}</h2><button class="icon-button" :title="mode === 'oauth' ? '关闭 OAuth 进度' : '关闭临时 AT 进度'" :disabled="phase === 'running'" @click="close"><X :size="16" /></button></header>
         <template v-if="phase === 'confirm'">
-          <p>为 {{ tasks.length }} 个账号使用与邮件管理相同的登录方式获取临时 AT，成功后保存 AT、Session 并更新 AT 状态，不会获取或替换 RT。</p>
+          <p v-if="mode === 'oauth'">为 {{ tasks.length }} 个账号执行与 Team 轮转第三步相同的 Codex OAuth 登录，按全局配置选择邮箱验证码或密码 + 2FA，成功后保存新的 RT / AT。无需加入 Team 轮转，不会自动推送或执行空间合并。</p>
+          <p v-else>为 {{ tasks.length }} 个账号使用与邮件管理相同的登录方式获取临时 AT，成功后保存 AT、Session 并更新 AT 状态，不会获取或替换 RT。</p>
           <p>需要账号具备可用的登录凭据及相应验证方式；仅通过 Google 授权添加的账号不一定能直接登录。</p>
           <ul class="target-list"><li v-for="task in tasks" :key="task.email">{{ task.email }}</li></ul>
           <footer><button class="btn ghost" @click="close">取消</button><button class="btn primary" @click="confirm">确认获取</button></footer>
         </template>
         <template v-else>
           <div class="summary" aria-live="polite"><span><LoaderCircle v-if="phase === 'running'" class="spin" :size="14" />{{ phase === 'running' ? '执行中' : '已完成' }} {{ counts.done }} / {{ tasks.length }}</span><span>成功 {{ counts.ok }}</span><span>失败 {{ counts.fail }}</span></div>
-          <progress :value="counts.done" :max="tasks.length" aria-label="临时 AT 获取进度" />
+          <progress :value="counts.done" :max="tasks.length" :aria-label="mode === 'oauth' ? 'OAuth RT / AT 获取进度' : '临时 AT 获取进度'" />
           <div class="task-list">
             <article v-for="task in tasks" :key="task.email" class="at-task" :data-email="task.email">
               <button class="task-heading" :aria-expanded="task.expanded" @click="task.expanded = !task.expanded"><strong>{{ task.email }}</strong><span :class="{ 'danger-text': task.status === 'failed' }">{{ taskText(task) }}</span></button>
               <p v-if="task.error" class="danger-text">{{ task.error }}</p>
-              <small v-else-if="task.status === 'success'">AT 与 Session 已保存</small>
+              <small v-else-if="task.status === 'success'">{{ mode === 'oauth' ? 'RT / AT 已保存' : 'AT 与 Session 已保存' }}</small>
               <small v-else>{{ task.logs.at(-1)?.message || '正在创建登录任务' }}</small>
               <ol v-if="task.expanded" class="task-logs"><li v-for="(log, index) in task.logs" :key="index"><time>{{ formatTime(log.time) }}</time><span>{{ log.message }}</span></li></ol>
             </article>
