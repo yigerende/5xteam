@@ -184,16 +184,30 @@ func (s *Store) RecoverProWorkflows() error {
 			continue
 		}
 		var p model.MailAccountProfile
-		if json.Unmarshal([]byte(raw), &p) != nil || normalizeMailManagementScope(p.ManagementScope) != "pro" || !p.ProWorkflowRunning {
+		if json.Unmarshal([]byte(raw), &p) != nil || normalizeMailManagementScope(p.ManagementScope) != "pro" {
 			continue
+		}
+		legacyCancelled := p.TransferStatus == "failed" && (strings.Contains(p.ProLastError, "context canceled") || strings.Contains(p.ProLastError, "context deadline exceeded"))
+		if !p.ProWorkflowRunning && !legacyCancelled {
+			continue
+		}
+		if legacyCancelled {
+			p.TransferStatus = "unknown"
 		}
 		p.ProWorkflowRunning = false
 		for _, status := range []*string{&p.InviteStatus, &p.AcceptStatus, &p.TransferStatus, &p.RemoveStatus} {
 			if *status == "running" {
-				*status = "pending"
+				if status == &p.TransferStatus {
+					*status = "unknown"
+				} else {
+					*status = "pending"
+				}
 			}
 		}
 		p.ProLastError = "服务重启，流程将在下次检测或手动执行时续跑"
+		if p.TransferStatus == "unknown" {
+			p.ProLastError = "服务在合并途中重启，远端结果待确认；请核实合并结果后手动修正状态再续跑"
+		}
 		p.UpdatedAt = time.Now()
 		updates = append(updates, item{email: email, profile: p})
 	}

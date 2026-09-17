@@ -30,10 +30,10 @@ function fixture() {
   reactive:value=>value,ref:value=>({value}),computed:fn=>({get value(){return fn()}}),
   watch(){},onMounted(){},onBeforeUnmount(fn){unmount=fn},
   window:{setTimeout(fn,delay){const id=++timerID;timers.set(id,{fn,delay});return id},clearTimeout(id){timers.delete(id)},clearInterval(){}},
-  api:async path=>new Promise(resolve=>requests.push({path,resolve})),
+  api:async path=>new Promise((resolve,reject)=>requests.push({path,resolve,reject})),
   URLSearchParams,document,
  })
- vm.runInContext(code+';this.view={loadPage,schedulePoll,mergeStages,mergeActivity,rows,busy,page,activeTab}',context)
+ vm.runInContext(code+';this.view={loadPage,schedulePoll,mergeStages,mergeActivity,runOne,message,rows,busy,page,activeTab}',context)
  const tick=async()=>{const [id,task]=[...timers][0];timers.delete(id);await task.fn()}
  return {...context.view,requests,timers,document,tick,unmount}
 }
@@ -92,4 +92,44 @@ function fixture() {
  assert.equal(f.rows.value.length,0,'Unmount must discard late page results')
 }
 assert.ok(!source.includes('account.remove_status'),'Completed-action check must use pro_remove_status')
+{
+ const f=fixture()
+ const account={email:'background@example.com',refresh_token_present:true}
+ f.rows.value=[account]
+ const running=f.runOne(account,'merge')
+ assert.equal(f.busy.value,'merge:'+account.email)
+ f.requests[0].resolve({...account,pro_workflow_running:true})
+ await new Promise(resolve=>setImmediate(resolve))
+ f.requests[1].resolve({items:[{...account,pro_workflow_running:true,pro_transfer_status:'running'}],total:1})
+ await running
+ assert.equal(f.busy.value,'','Accepted job must release page controls')
+ assert.ok(f.message.text.includes('已提交后台'),'Receipt must not claim completion')
+ assert.equal(f.rows.value[0].pro_workflow_running,true)
+ const completed=f.loadPage()
+ f.requests[2].resolve({items:[{...account,pro_workflow_running:false,pro_remove_status:'completed'}],total:1})
+ await completed
+ assert.ok(f.message.text.includes('四步流程完成'),'Polling must report actual completion')
+}
+{
+ const f=fixture()
+ const account={email:'uncertain@example.com',pro_workflow_running:true}
+ f.rows.value=[account]
+ const polling=f.loadPage()
+ f.requests[0].resolve({items:[{...account,pro_workflow_running:false,pro_transfer_status:'unknown',pro_last_error:'合并结果待确认'}],total:1})
+ await polling
+ assert.equal(f.mergeStages(f.rows.value[0])[2].text,'待确认')
+ assert.ok(f.message.text.includes('待确认'))
+ assert.equal(f.message.type,'error')
+}
+{
+ const f=fixture()
+ const account={email:'receipt-lost@example.com'}
+ f.rows.value=[account]
+ const running=f.runOne(account,'merge')
+ f.requests[0].reject(new Error('HTTP 502'))
+ await new Promise(resolve=>setImmediate(resolve))
+ f.requests[1].resolve({items:[{...account,pro_workflow_running:true}],total:1})
+ await running
+ assert.ok(f.message.text.includes('正在后台执行'),'Lost receipt must not overwrite persisted progress')
+}
 console.log('Pro stage mapping, immediate feedback, stale-response isolation, nonoverlapping polling, inactive tab and teardown passed')

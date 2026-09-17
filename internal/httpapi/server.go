@@ -53,6 +53,11 @@ type Server struct {
 	planCheckMu       sync.Mutex
 	planCheckNext     time.Time
 	proLocks          sync.Map
+	proMergeMu        sync.Mutex
+	proMergeWG        sync.WaitGroup
+	proMergeJobs      map[string]context.CancelFunc
+	proMergeClosed    bool
+	proMergeRunning   int
 	proMonitorMu      sync.Mutex
 	proMonitorRunning bool
 	mail              *mailbridge.Client // retained for API compatibility; local mail flows never call it
@@ -122,6 +127,7 @@ func (s *Server) Close() {
 		return
 	}
 	s.auditCloseOnce.Do(func() {
+		s.stopProMergeJobs()
 		close(s.auditStop)
 		s.stopMailInfoJobs()
 		s.auditWG.Wait()

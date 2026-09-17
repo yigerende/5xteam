@@ -193,18 +193,36 @@ func (s *Server) runProMergeStep(ctx context.Context, p model.MailAccountProfile
 		return err
 	}
 	attempt := 0
+	dispatched := false
 	err := retryProStep(ctx, settings.RetryCount, settings.RetryIntervalSeconds, func() error {
 		attempt++
 		s.auditProEvent(p, stage, "running", settings.Provider, fmt.Sprintf("%s：第 %d/%d 次执行", proStageLabel(stage), attempt, settings.RetryCount+1), map[string]any{"execution_id": executionID, "attempt": attempt, "max_attempts": settings.RetryCount + 1, "proxy": proxy})
-		_, err := operation(s.proRequestContext(ctx, p, executionID, stage, attempt, proxy))
+		err := ctx.Err()
+		if err == nil {
+			dispatched = true
+			response, callErr := operation(s.proRequestContext(ctx, p, executionID, stage, attempt, proxy))
+			err = callErr
+			if err != nil && stage == "transfer" && (response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300) || response.StatusCode == 408 || response.StatusCode >= 500) {
+				err = fmt.Errorf("%w（原始错误：%v）", errProTransferUncertain, err)
+			}
+		}
 		if err != nil {
-			s.auditProEvent(p, stage, "failed", settings.Provider, proStageLabel(stage)+"本次失败", map[string]any{"execution_id": executionID, "attempt": attempt, "error": err.Error(), "will_retry": attempt <= settings.RetryCount && ctx.Err() == nil, "retry_interval_seconds": settings.RetryIntervalSeconds})
+			status, message := "failed", proStageLabel(stage)+"本次失败"
+			if errors.Is(err, errProTransferUncertain) {
+				status, message = "unknown", "合并响应未确认，停止自动重试，需核实远端结果"
+			}
+			s.auditProEvent(p, stage, status, settings.Provider, message, map[string]any{"execution_id": executionID, "attempt": attempt, "error": err.Error(), "will_retry": attempt <= settings.RetryCount && ctx.Err() == nil && !errors.Is(err, errProTransferUncertain), "retry_interval_seconds": settings.RetryIntervalSeconds})
 		}
 		return err
 	})
 	status := "completed"
 	if err != nil {
 		status = "failed"
+		if errors.Is(err, errProTransferUncertain) {
+			status = "unknown"
+		} else if !dispatched && ctx.Err() != nil {
+			status = "pending"
+		}
 	}
 	_, saveErr := s.store.UpdateProAccount(p.Email, func(p *model.MailAccountProfile) {
 		setProStage(p, stage, status)

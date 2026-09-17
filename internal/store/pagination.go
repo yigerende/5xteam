@@ -18,25 +18,33 @@ type MailAccountsPageResult struct {
 }
 
 type FreeAccountsPageSummary struct {
-	All                   int                       `json:"all"`
-	Outside               int                       `json:"outside"`
-	Inside                int                       `json:"inside"`
-	Removed               int                       `json:"removed"`
-	Dead                  int                       `json:"dead"`
-	OAuthReady            int                       `json:"oauth_ready"`
-	Monitoring            int                       `json:"monitoring"`
-	InsidePremium         int                       `json:"inside_premium"`
-	Quota7DRemainingTotal float64                   `json:"quota_7d_remaining_total"`
-	Quota7DCount          int                       `json:"quota_7d_count"`
-	OldestStatusCheckedAt string                    `json:"oldest_status_checked_at,omitempty"`
-	OldestQuotaCheckedAt  string                    `json:"oldest_quota_checked_at,omitempty"`
-	StatusUnchecked       int                       `json:"status_unchecked"`
-	QuotaUnchecked        int                       `json:"quota_unchecked"`
-	ServerNow             string                    `json:"server_now,omitempty"`
-	NextStatusCheckAt     string                    `json:"next_status_check_at,omitempty"`
-	NextQuotaCheckAt      string                    `json:"next_quota_check_at,omitempty"`
-	PendingSeatsByAdmin   map[string]map[string]int `json:"pending_seats_by_admin"`
-	InvitePending         int                       `json:"invite_pending"`
+	All                   int                             `json:"all"`
+	Outside               int                             `json:"outside"`
+	Inside                int                             `json:"inside"`
+	Removed               int                             `json:"removed"`
+	Dead                  int                             `json:"dead"`
+	OAuthReady            int                             `json:"oauth_ready"`
+	Monitoring            int                             `json:"monitoring"`
+	InsidePremium         int                             `json:"inside_premium"`
+	Quota7DRemainingTotal float64                         `json:"quota_7d_remaining_total"`
+	Quota7DCount          int                             `json:"quota_7d_count"`
+	OldestStatusCheckedAt string                          `json:"oldest_status_checked_at,omitempty"`
+	OldestQuotaCheckedAt  string                          `json:"oldest_quota_checked_at,omitempty"`
+	StatusUnchecked       int                             `json:"status_unchecked"`
+	QuotaUnchecked        int                             `json:"quota_unchecked"`
+	ServerNow             string                          `json:"server_now,omitempty"`
+	NextStatusCheckAt     string                          `json:"next_status_check_at,omitempty"`
+	NextQuotaCheckAt      string                          `json:"next_quota_check_at,omitempty"`
+	PendingSeatsByAdmin   map[string]map[string]int       `json:"pending_seats_by_admin"`
+	InvitePending         int                             `json:"invite_pending"`
+	SeatUsageByAdmin      map[string]FreeAccountSeatUsage `json:"seat_usage_by_admin"`
+}
+
+type FreeAccountSeatUsage struct {
+	Inside         int     `json:"inside"`
+	InsidePremium  int     `json:"inside_premium"`
+	QuotaCount     int     `json:"quota_count"`
+	QuotaRemaining float64 `json:"quota_remaining"`
 }
 
 type ProAccountsPageSummary struct {
@@ -329,25 +337,38 @@ func (s *Store) FreeAccountsPage(spaceState string, limit, offset int) ([]model.
 		return nil, 0, summary, err
 	}
 	summary.PendingSeatsByAdmin = make(map[string]map[string]int)
+	summary.SeatUsageByAdmin = make(map[string]FreeAccountSeatUsage)
 	pendingRows, pendingErr := s.db.Query(cte + ` SELECT
 		COALESCE(json_extract(profile,'$.admin_account_id'),''),
 		CASE WHEN LOWER(COALESCE(json_extract(profile,'$.seat_type'),'')) IN ('prolite','premium','5x') THEN 'premium' ELSE 'standard' END,
-		COUNT(*) FROM accounts
-		WHERE space_state!='removed' AND json_extract(profile,'$.accept_status')!='completed'
-			AND json_extract(profile,'$.invite_status') IN ('pending','running','completed')
-			AND COALESCE(json_extract(profile,'$.admin_account_id'),'')!=''
+		COALESCE(SUM(space_state!='removed' AND json_extract(profile,'$.accept_status')!='completed' AND json_extract(profile,'$.invite_status') IN ('pending','running','completed')),0),
+		COALESCE(SUM(json_extract(profile,'$.accept_status')='completed' AND json_extract(profile,'$.remove_status')!='completed' AND json_extract(profile,'$.remote_removed_at') IS NULL),0),
+		COALESCE(SUM(space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL),0),
+		COALESCE(SUM(CASE WHEN space_state='inside' AND json_type(profile,'$.quota_7d.used_percent') IS NOT NULL THEN MAX(0,100-CAST(json_extract(profile,'$.quota_7d.used_percent') AS REAL)) ELSE 0 END),0)
+		FROM accounts
 		GROUP BY 1,2`)
 	if pendingErr != nil {
 		return nil, 0, summary, pendingErr
 	}
 	for pendingRows.Next() {
 		var adminID, seatType string
-		var count int
-		if pendingRows.Scan(&adminID, &seatType, &count) == nil {
-			if summary.PendingSeatsByAdmin[adminID] == nil {
-				summary.PendingSeatsByAdmin[adminID] = map[string]int{"standard": 0, "premium": 0}
+		var count, inside, quotaCount int
+		var remaining float64
+		if pendingRows.Scan(&adminID, &seatType, &count, &inside, &quotaCount, &remaining) == nil {
+			if adminID != "" && count > 0 {
+				if summary.PendingSeatsByAdmin[adminID] == nil {
+					summary.PendingSeatsByAdmin[adminID] = map[string]int{"standard": 0, "premium": 0}
+				}
+				summary.PendingSeatsByAdmin[adminID][seatType] = count
 			}
-			summary.PendingSeatsByAdmin[adminID][seatType] = count
+			usage := summary.SeatUsageByAdmin[adminID]
+			usage.Inside += inside
+			if seatType == "premium" {
+				usage.InsidePremium += inside
+			}
+			usage.QuotaCount += quotaCount
+			usage.QuotaRemaining += remaining
+			summary.SeatUsageByAdmin[adminID] = usage
 		}
 	}
 	pendingRows.Close()

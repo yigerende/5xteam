@@ -811,7 +811,14 @@ func (s *Server) performProQuota(ctx context.Context, email string, auto bool) (
 		}
 		s.auditProEvent(final, "quota", status, v.Provider, message, details)
 	}()
-	_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.QuotaStatus, p.ProLastError = "running", "" })
+	_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+		p.QuotaStatus = "running"
+		if proTransferNeedsConfirmation(*p) {
+			p.TransferStatus = "unknown"
+		} else {
+			p.ProLastError = ""
+		}
+	})
 	var five, seven *model.FreeQuotaWindow
 	if v.Provider == "cpa" {
 		if profile.CPAAuthFileName == "" {
@@ -847,10 +854,13 @@ func (s *Server) performProQuota(ctx context.Context, email string, auto bool) (
 	now := time.Now()
 	profile, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 		p.Quota5H, p.Quota7D, p.QuotaCheckedAt = five, seven, &now
-		p.QuotaStatus, p.ProLastError = "completed", ""
+		p.QuotaStatus = "completed"
+		if !proTransferNeedsConfirmation(*p) {
+			p.ProLastError = ""
+		}
 	})
-	if err == nil && auto && v.AutoMergeEnabled && !profile.SpaceMergedOnce && seven.UsedPercent >= 100 {
-		profile, err = s.performProMerge(ctx, email)
+	if err == nil && auto && v.AutoMergeEnabled && !profile.SpaceMergedOnce && seven.UsedPercent >= 100 && !proTransferNeedsConfirmation(profile) {
+		profile, err = s.startProMergeJob(email, nil)
 	}
 	return profile, err
 }
@@ -891,6 +901,9 @@ func retryProStep(ctx context.Context, attempts, delay int, operation func() err
 		if err = operation(); err == nil {
 			return nil
 		}
+		if errors.Is(err, errProTransferUncertain) {
+			return err
+		}
 	}
 	return err
 }
@@ -902,6 +915,9 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	}
 	if profile.ManagementScope != "pro" {
 		return profile, errors.New("账号不在 Pro 管理中")
+	}
+	if proTransferNeedsConfirmation(profile) {
+		return profile, errProTransferUncertain
 	}
 	executionID := randomRegistrationID()
 	v, _, _, err := s.store.ProSettings()
@@ -920,6 +936,9 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 		details := map[string]any{"execution_id": executionID, "state": proMergeState(out)}
 		if retErr != nil {
 			status, message, details["error"] = "failed", "Pro 空间四步流程失败", retErr.Error()
+			if errors.Is(retErr, errProTransferUncertain) {
+				status, message = "unknown", "Pro 合并结果待确认，已停止重复提交及移出"
+			}
 		}
 		s.auditProEvent(firstProProfile(out, profile), "space_merge", status, v.Provider, message, details)
 	}()
@@ -965,7 +984,11 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if profile.OAuthUserID == "" && profile.RemoveStatus != "completed" && profile.RemoveStatus != "team_removed" {
 		return profile, errors.New("缺少子号 OpenAI 用户 ID，无法执行母号移出")
 	}
-	unlockAdmin := s.lockProTeam(admin.TeamAccountID)
+	value, _ := s.autoAdminLocks.LoadOrStore(admin.TeamAccountID, &sync.Mutex{})
+	unlockAdmin, err := lockProMutex(ctx, value.(*sync.Mutex))
+	if err != nil {
+		return profile, err
+	}
 	defer unlockAdmin()
 	adminSettings, err := s.settingsForAdmin(s.store.Settings(), admin)
 	if err != nil {
@@ -1032,7 +1055,11 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	for _, step := range steps {
 		unlockStep := func() {}
 		if step.name == "remove" && profile.RemoveStatus != "completed" && profile.RemoveStatus != "team_removed" {
-			unlockStep = s.lockTeamAccountRemove(admin.TeamAccountID)
+			value, _ := s.teamRemoveLocks.LoadOrStore(admin.TeamAccountID, &sync.Mutex{})
+			unlockStep, err = lockProMutex(ctx, value.(*sync.Mutex))
+			if err != nil {
+				return profile, err
+			}
 		}
 		err = s.runProMergeStep(ctx, profile, v, executionID, step.name, step.proxy, step.run)
 		unlockStep()
@@ -1051,14 +1078,19 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 
 func (s *Server) mergeProAccount(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
-	unlock := s.lockProAccount(email)
-	defer unlock()
-	p, err := s.performProMerge(r.Context(), email)
+	value, _ := s.proLocks.LoadOrStore("account:"+email, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	if !lock.TryLock() {
+		writeAPI(w, 409, nil, "该账号正在执行操作，请等待后台流程完成")
+		return
+	}
+	p, err := s.startProMergeJob(email, lock.Unlock)
 	if err != nil {
+		lock.Unlock()
 		writeAPI(w, 400, nil, err.Error())
 		return
 	}
-	writeAPI(w, 200, p, "")
+	writeAPI(w, http.StatusAccepted, p, "")
 }
 func (s *Server) lockProAccount(email string) func() {
 	v, _ := s.proLocks.LoadOrStore("account:"+strings.ToLower(email), &sync.Mutex{})

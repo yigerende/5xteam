@@ -179,16 +179,23 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 	// explicit way to update the snapshot after seats/mother accounts change.
 	admins := s.store.AdminAccounts()
 	snapshots := s.store.AdminCapacitySnapshots()
+	capacityAccounts := rotationCapacityAccounts(admins, accounts)
 	seatTotal, insidePremium, snapshotCount := premiumSeatSnapshot(admins, snapshots, accounts)
 	// No durable seat reservation is created by automatic rotation. In-flight
 	// queued/running tasks are counted from their account/task state so a batch
 	// still cannot plan beyond the capacity already committed to invitations.
-	reserved := pendingAutoInviteCount(s.store.AutoRotationTasks(""), accounts)
+	reserved := 0
+	tasks := s.store.AutoRotationTasks("")
+	for _, admin := range admins {
+		if !admin.RotationDisabled {
+			reserved += pendingAutoInviteCountForAdmin(tasks, capacityAccounts, admin.ID)
+		}
+	}
 	seatRemaining := seatTotal - insidePremium
 	if seatRemaining < 0 {
 		seatRemaining = 0
 	}
-	avg := averageFreeQuota(accounts, seatTotal)
+	avg := averageFreeQuota(capacityAccounts, seatTotal)
 	spaceCount, quotaCount := 0, 0
 	for _, a := range accounts {
 		if a.AcceptStatus == "completed" && a.RemoveStatus != "completed" && a.RemoteRemovedAt == nil {
@@ -201,21 +208,21 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 	run := model.AutoRotationRun{ID: randomRegistrationID(), Trigger: trigger, AveragePercent: avg, SeatTotal: seatTotal, SeatRemaining: seatRemaining, ReservedSeats: reserved, SpaceAccountCount: spaceCount, QuotaAccountCount: quotaCount, StartedAt: time.Now(), Status: "skipped", Reason: "当前平均剩余额度未低于阈值", DecisionMaxPerRun: settings.MaxPerRun}
 	if snapshotCount == 0 {
 		run.Reason = "没有可用的席位统计快照，请先在 Team 账号管理页面刷新 5x 席位"
+		enabled := 0
+		for _, admin := range admins {
+			if !admin.RotationDisabled {
+				enabled++
+			}
+		}
+		if len(admins) > 0 && enabled == 0 {
+			run.Reason = "没有启用的母号，当前没有可调度的 5x 席位"
+		}
 		_ = s.store.SaveAutoRotationRun(run)
 		s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "seat_snapshot", Source: "auto_rotation", Operation: "decision", Stage: "seat_snapshot", Message: run.Reason, Details: map[string]any{"seat_total": seatTotal, "seat_remaining": seatRemaining, "inside_premium": insidePremium, "reserved": reserved, "snapshot_count": snapshotCount}})
 		s.enqueueAuditEvent(model.AutoRotationEvent{RunID: run.ID, Type: "final", Source: "auto_rotation", Operation: "run", Stage: "decision", Message: "自动轮转未执行", Details: map[string]any{"status": run.Status, "reason": run.Reason}})
 		return run, true, nil
 	}
 	availableSeats := availablePremiumFromSnapshot(seatTotal, insidePremium, reserved)
-	// Disabled mothers remain in statistics but cannot supply new rotation work.
-	for _, admin := range admins {
-		if admin.RotationDisabled {
-			if schedulable := s.availablePremiumSlots(ctx, admins); schedulable < availableSeats {
-				availableSeats = schedulable
-			}
-			break
-		}
-	}
 	shouldRun, decisionReason := autoRotationDecision(avg, settings.ThresholdPercent, availableSeats)
 	if !shouldRun {
 		run.Reason = decisionReason
@@ -253,17 +260,36 @@ func isPremiumSeatType(seatType string) bool {
 
 func premiumSeatSnapshot(admins []model.AdminAccountProfile, snapshots map[string]model.AdminSeatCapacity, accounts []model.FreeAccountProfile) (total, inside, snapshotsFound int) {
 	for _, admin := range admins {
+		if admin.RotationDisabled {
+			continue
+		}
 		if capacity, ok := snapshots[admin.ID]; ok {
 			total += capacity.Premium.Total
 			snapshotsFound++
 		}
 	}
-	for _, account := range accounts {
+	for _, account := range rotationCapacityAccounts(admins, accounts) {
 		if account.AcceptStatus == "completed" && account.RemoveStatus != "completed" && account.RemoteRemovedAt == nil && isPremiumSeatType(account.SeatType) {
 			inside++
 		}
 	}
 	return total, inside, snapshotsFound
+}
+
+// Disabled mothers keep their live workflows, but cannot contribute capacity
+// or consume capacity belonging to other, enabled mothers.
+func rotationCapacityAccounts(admins []model.AdminAccountProfile, accounts []model.FreeAccountProfile) []model.FreeAccountProfile {
+	disabled := make(map[string]bool)
+	for _, admin := range admins {
+		disabled[admin.ID] = admin.RotationDisabled
+	}
+	result := make([]model.FreeAccountProfile, 0, len(accounts))
+	for _, account := range accounts {
+		if !disabled[account.AdminAccountID] {
+			result = append(result, account)
+		}
+	}
+	return result
 }
 
 func availablePremiumFromSnapshot(total, inside, reserved int) int {

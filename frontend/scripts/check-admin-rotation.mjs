@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
-import { canJoinAdmin } from '../src/adminRotation.js'
+import { canJoinAdmin, rotationSeatSummary } from '../src/adminRotation.js'
 
 const admin = { id: 'mother', team_account_id: 'team', rotation_disabled: true }
 assert.equal(canJoinAdmin({}, { ...admin, rotation_disabled: false }), true)
@@ -49,3 +49,22 @@ for (const initial of [false, true]) {
   assert.equal(state.rotationSaving.value.size, 0)
 }
 console.log('Admin scheduling frontend tests passed')
+{
+  const admins = [{ id: 'on' }, { id: 'off', rotation_disabled: true }]
+  const snapshots = new Map([['on', { premium: { total: 2 } }], ['off', { premium: { total: 10 } }], ['deleted', { premium: { total: 100 } }]])
+  const summary = {
+    seat_usage_by_admin: { on: { inside: 1, inside_premium: 1, quota_count: 1, quota_remaining: 20 }, off: { inside: 4, inside_premium: 4, quota_count: 4, quota_remaining: 300 } },
+    pending_seats_by_admin: { on: { premium: 1 }, off: { premium: 2 } },
+  }
+  const active = rotationSeatSummary(admins, snapshots, summary)
+  assert.deepEqual(active, { total: 2, remaining: 0, inside: 1, insidePremium: 1, pending: 1, quotaCount: 1, quotaRemaining: 20 })
+  admins[1].rotation_disabled = false
+  assert.equal(rotationSeatSummary(admins, snapshots, summary).total, 12)
+  assert.equal(rotationSeatSummary(admins, snapshots, summary).remaining, 4)
+  admins.forEach(admin => { admin.rotation_disabled = true })
+  assert.equal(rotationSeatSummary(admins, snapshots, summary).total, 0)
+  assert.equal(rotationSeatSummary(admins, snapshots, summary).remaining, 0)
+  assert.equal(snapshots.get('off').premium.total, 10, 'Disabled snapshots must remain intact')
+  assert.equal(rotationSeatSummary([{ id: 'missing' }], new Map(), {}).total, 0)
+}
+console.log('Enabled-only seat totals, usage, quota, in-flight, re-enable and orphan snapshots passed')

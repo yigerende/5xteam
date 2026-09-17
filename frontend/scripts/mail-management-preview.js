@@ -112,8 +112,11 @@ window.fetch = async (path, options = {}) => {
   }
   if (url.pathname.startsWith('/api/pro-accounts/') && url.pathname.endsWith('/merge')) {
     const item = items.find(item => item.email === decodeURIComponent(url.pathname.split('/')[3]))
+    if (item.pro_workflow_running) return new Response(JSON.stringify({ ok: false, error: '已在后台执行' }), { status: 409 })
     item.pro_workflow_running = true
     item.pro_last_error = ''
+    const accepted = { ...item }
+    void (async () => {
     for (const step of ['invite', 'accept', 'transfer', 'remove']) {
       if (item['pro_' + step + '_status'] === 'completed') continue
       item['pro_' + step + '_status'] = 'running'
@@ -123,13 +126,14 @@ window.fetch = async (path, options = {}) => {
         item['pro_' + step + '_status'] = 'failed'
         item.pro_last_error = '模拟步骤失败，可续跑'
         item.pro_workflow_running = false
-        return new Response(JSON.stringify({ ok: false, error: item.pro_last_error }), { status: 400 })
+        return
       }
       item['pro_' + step + '_status'] = 'completed'
       if (step === 'transfer') item.space_merged_once = true
     }
     item.pro_workflow_running = false
-    return json(item)
+    })()
+    return new Response(JSON.stringify({ ok: true, data: accepted }), { status: 202 })
   }
   if (url.pathname === '/api/pro-settings') return json({ provider: 'sub2', quota_enabled: false })
   if (url.pathname === '/api/pro-accounts') {

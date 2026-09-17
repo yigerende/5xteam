@@ -17,14 +17,15 @@ import (
 )
 
 type proExecutionFixture struct {
-	s                *Server
-	email            string
-	admin            model.AdminAccountProfile
-	mu               sync.Mutex
-	calls            map[string]int
-	failStage        string
-	failCount        int
-	entered, release chan struct{}
+	s                    *Server
+	email                string
+	admin                model.AdminAccountProfile
+	mu                   sync.Mutex
+	calls                map[string]int
+	failStage            string
+	failCount            int
+	loseTransferResponse bool
+	entered, release     chan struct{}
 }
 
 func newProExecutionFixture(t *testing.T) *proExecutionFixture {
@@ -73,7 +74,19 @@ func newProExecutionFixture(t *testing.T) *proExecutionFixture {
 			f.mu.Unlock()
 			if stage == "transfer" && f.entered != nil {
 				close(f.entered)
-				<-f.release
+				select {
+				case <-f.release:
+				case <-r.Context().Done():
+				}
+			}
+			if stage == "transfer" && f.loseTransferResponse {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_ = conn.Close()
+				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			if reject {
@@ -134,7 +147,7 @@ func TestProExecutionLogsAndManualRecovery(t *testing.T) {
 		t.Run(failedStage, func(t *testing.T) {
 			f := newProExecutionFixture(t)
 			f.failStage, f.failCount = failedStage, 99
-			out := f.request(f.s.mergeProAccount, "POST", "/merge", "")
+			out := f.mergeAndWait(t)
 			if out.Code != 400 {
 				t.Fatalf("wanted failed merge: %d %s", out.Code, out.Body.String())
 			}
@@ -164,7 +177,7 @@ func TestProExecutionLogsAndManualRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			out = f.request(f.s.mergeProAccount, "POST", "/merge", "")
+			out = f.mergeAndWait(t)
 			if out.Code != 200 {
 				t.Fatalf("resume failed %d %s", out.Code, out.Body.String())
 			}
@@ -249,7 +262,7 @@ func TestProExecutionRetryDiagnostics(t *testing.T) {
 	if _, err := f.s.store.SaveProSettings(v, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if out := f.request(f.s.mergeProAccount, "POST", "/merge", ""); out.Code != 200 {
+	if out := f.mergeAndWait(t); out.Code != 200 {
 		t.Fatal(out.Body.String())
 	}
 	if f.calls["transfer"] != 2 {
@@ -320,32 +333,27 @@ func TestProStageValidationAndConcurrency(t *testing.T) {
 func TestProStageRejectsEditsDuringActualMerge(t *testing.T) {
 	f := newProExecutionFixture(t)
 	f.entered, f.release = make(chan struct{}), make(chan struct{})
-	done := make(chan int, 2)
-	go func() { done <- f.request(f.s.mergeProAccount, "POST", "/merge", "").Code }()
+	var release sync.Once
+	defer release.Do(func() { close(f.release) })
+	if out := f.request(f.s.mergeProAccount, "POST", "/merge", ""); out.Code != 202 {
+		t.Fatal(out.Body.String())
+	}
 	select {
 	case <-f.entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("merge did not start")
 	}
-	out := f.stage("transfer", "completed", "running")
-	go func() { done <- f.request(f.s.mergeProAccount, "POST", "/merge", "").Code }()
-	close(f.release)
-	if out.Code != 409 {
-		t.Fatal("concurrent manual update accepted")
+	if out := f.stage("transfer", "completed", "running"); out.Code != 409 {
+		t.Fatal("concurrent edit accepted")
 	}
-	for range 2 {
-		select {
-		case code := <-done:
-			if code != 200 {
-				t.Fatal("merge failed")
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("merge hung")
-		}
+	if out := f.request(f.s.mergeProAccount, "POST", "/merge", ""); out.Code != 409 {
+		t.Fatal("duplicate merge accepted")
 	}
+	release.Do(func() { close(f.release) })
+	f.waitMerge(t)
 	for stage, count := range f.calls {
 		if count != 1 {
-			t.Fatalf("duplicate request repeated %s", stage)
+			t.Fatalf("duplicate %s: %d", stage, count)
 		}
 	}
 }
@@ -375,7 +383,7 @@ func TestProPreparationFailureIsLogged(t *testing.T) {
 	if _, err := f.s.store.UpdateAdminAccountProxy(f.admin.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	out := f.request(f.s.mergeProAccount, "POST", "/merge", "")
+	out := f.mergeAndWait(t)
 	if out.Code != 400 {
 		t.Fatal("missing proxy accepted")
 	}

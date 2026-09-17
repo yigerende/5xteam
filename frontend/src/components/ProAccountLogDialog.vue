@@ -13,7 +13,7 @@ let generation = 0
 let request
 let observer
 const labels = { invite: '邀请空间', accept: '进入空间', transfer: '合并空间', remove: '移出空间', space_merge: '四步流程', credentials: '准备凭据', push: '推送', quota: '额度查询', stage: '手动修正' }
-const statuses = { running: '执行中', completed: '成功', failed: '失败', pending: '待处理', not_started: '未开始' }
+const statuses = { running: '执行中', completed: '成功', failed: '失败', unknown: '待确认', pending: '待处理', not_started: '未开始' }
 const label = event => labels[event.stage] || labels[event.operation] || event.stage || event.type
 const path = account => `/api/pro-accounts/${encodeURIComponent(account.email)}/events`
 watch([root, sentinel], ([container, target]) => {
