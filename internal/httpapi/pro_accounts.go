@@ -578,33 +578,35 @@ func (s *Server) saveProSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) testProSub2(w http.ResponseWriter, r *http.Request) {
-	v, password, _, err := s.store.ProSettings()
-	if err == nil {
-		_, err = s.sub2.Groups(r.Context(), v.Sub2, password)
+	v, password, _, ok := s.proConnectionSettings(w, r)
+	if !ok {
+		return
 	}
+	groups, err := s.sub2.Groups(r.Context(), v.Sub2, password)
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
 	}
-	writeAPI(w, 200, map[string]bool{"connected": true}, "")
+	writeAPI(w, 200, map[string]any{"connected": true, "groups": groups}, "")
 }
 func (s *Server) getProSub2Groups(w http.ResponseWriter, r *http.Request) {
-	v, password, _, err := s.store.ProSettings()
+	v, password, _, ok := s.proConnectionSettings(w, r)
+	if !ok {
+		return
+	}
+	groups, err := s.sub2.Groups(r.Context(), v.Sub2, password)
 	if err == nil {
-		var groups any
-		groups, err = s.sub2.Groups(r.Context(), v.Sub2, password)
-		if err == nil {
-			writeAPI(w, 200, groups, "")
-			return
-		}
+		writeAPI(w, 200, groups, "")
+		return
 	}
 	writeAPI(w, 400, nil, err.Error())
 }
 func (s *Server) testProCPA(w http.ResponseWriter, r *http.Request) {
-	v, _, key, err := s.store.ProSettings()
-	if err == nil {
-		_, err = s.cpa.List(r.Context(), v.CPA, key)
+	v, _, key, ok := s.proConnectionSettings(w, r)
+	if !ok {
+		return
 	}
+	_, err := s.cpa.List(r.Context(), v.CPA, key)
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
@@ -612,14 +614,14 @@ func (s *Server) testProCPA(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, 200, map[string]bool{"connected": true}, "")
 }
 func (s *Server) getProCPAGroups(w http.ResponseWriter, r *http.Request) {
-	v, _, key, err := s.store.ProSettings()
+	v, _, key, ok := s.proConnectionSettings(w, r)
+	if !ok {
+		return
+	}
+	groups, err := s.cpa.Groups(r.Context(), v.CPA, key)
 	if err == nil {
-		var groups any
-		groups, err = s.cpa.Groups(r.Context(), v.CPA, key)
-		if err == nil {
-			writeAPI(w, 200, groups, "")
-			return
-		}
+		writeAPI(w, 200, groups, "")
+		return
 	}
 	writeAPI(w, 400, nil, err.Error())
 }
