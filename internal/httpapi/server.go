@@ -208,6 +208,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/history", s.clearHistory)
 	mux.HandleFunc("GET /api/account-progress", s.accountProgress)
 	mux.HandleFunc("GET /api/free-accounts", s.listFreeAccounts)
+	mux.HandleFunc("GET /api/free-accounts/select-by-admin", s.selectFreeAccountsByAdmin)
 	mux.HandleFunc("GET /api/auto-rotation/settings", s.getAutoRotationSettings)
 	mux.HandleFunc("PUT /api/auto-rotation/settings", s.saveAutoRotationSettings)
 	mux.HandleFunc("POST /api/auto-rotation/run", s.triggerAutoRotation)

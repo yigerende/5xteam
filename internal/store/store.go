@@ -199,6 +199,7 @@ func (s *Store) initSchema() error {
 		CREATE INDEX IF NOT EXISTS history_completed_at_idx ON history(completed_at DESC);
 		CREATE INDEX IF NOT EXISTS account_progress_updated_at_idx ON account_progress(updated_at DESC);
 		CREATE INDEX IF NOT EXISTS free_accounts_updated_at_idx ON free_accounts(updated_at DESC);
+		CREATE INDEX IF NOT EXISTS free_accounts_admin_idx ON free_accounts(json_extract(profile, '$.admin_account_id'));
 		CREATE INDEX IF NOT EXISTS mail_accounts_scope_entered_idx ON mail_accounts(
 			LOWER(COALESCE(json_extract(profile, '$.management_scope'), '')),
 			COALESCE(NULLIF(json_extract(profile, '$.created_at'), ''), updated_at) DESC

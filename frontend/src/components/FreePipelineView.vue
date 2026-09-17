@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   BadgeCheck, Cable, DoorOpen, Download, FileJson, FolderOpen, Gauge, KeyRound, Link2,
-  History, LoaderCircle, MoreHorizontal, RefreshCw, Save, Send, Trash2, Unplug, Upload,
+  History, ListChecks, LoaderCircle, MoreHorizontal, RefreshCw, Save, Send, Trash2, Unplug, Upload,
   Waypoints, X,
 } from 'lucide-vue-next'
 import { api, downloadFile } from '../api'
@@ -159,6 +159,9 @@ const accountTotal = ref(0)
 const accountSummary = reactive({ all: 0, outside: 0, inside: 0, removed: 0, oauth_ready: 0, invite_pending: 0, monitoring: 0, inside_premium: 0, quota_7d_remaining_total: 0, quota_7d_count: 0, oldest_status_checked_at: '', oldest_quota_checked_at: '', status_unchecked: 0, quota_unchecked: 0, server_now: '', next_status_check_at: '', next_quota_check_at: '', pending_seats_by_admin: {} })
 const teamSpaceFilter = ref('')
 const selectedAccountIDs = ref(new Set())
+const selectedAccountSnapshots = ref(new Map())
+const selectedMotherID = ref('')
+let motherSelectionController
 const lifecycleView = reactive({ account: null, events: [], task: null, loading: false, loadingMore: false, hasMore: false, cursor: '', error: '' })
 const lifecycleScrollRoot = ref(null)
 const lifecycleSentinel = ref(null)
@@ -192,12 +195,9 @@ function isPremiumSeatType(seatType) {
 }
 const allDisplayedAccounts = computed(() => liveAccounts.value)
 const displayedAccounts = computed(() => liveAccounts.value)
-const selectedPipelineAccounts = computed(() => liveAccounts.value.filter((item) => selectedAccountIDs.value.has(String(item.id))))
+const selectedPipelineAccounts = computed(() => [...selectedAccountIDs.value].map((id) => selectedAccountSnapshots.value.get(id)).filter(Boolean))
 const allDisplayedSelected = computed(() => displayedAccounts.value.length > 0 && displayedAccounts.value.every((item) => selectedAccountIDs.value.has(String(item.id))))
-watch(() => liveAccounts.value.map((item) => String(item.id)).join(','), () => {
-  const available = new Set(liveAccounts.value.map((item) => String(item.id)))
-  selectedAccountIDs.value = new Set([...selectedAccountIDs.value].filter((id) => available.has(id)))
-})
+watch(liveAccounts, syncPipelineSelection)
 const activeActivities = computed(() => Object.values(activities))
 const joinedCount = computed(() => Number(accountSummary.inside || 0))
 const invitePendingCount = computed(() => Number(accountSummary.invite_pending || 0))
@@ -403,17 +403,62 @@ function activityAccount(activity) {
 }
 function isAccountBusy(account) { return busy.value === account.id || !!activityFor(account) }
 function isPipelineSelected(account) { return selectedAccountIDs.value.has(String(account.id)) }
+function clearPipelineSelection() {
+  motherSelectionController?.abort()
+  motherSelectionController = null
+  if (busy.value === 'select-mother') busy.value = ''
+  selectedAccountIDs.value = new Set()
+  selectedAccountSnapshots.value = new Map()
+}
+function syncPipelineSelection() {
+  const snapshots = new Map(selectedAccountSnapshots.value)
+  for (const account of liveAccounts.value) {
+    const id = String(account.id)
+    if (selectedAccountIDs.value.has(id)) snapshots.set(id, account)
+  }
+  selectedAccountSnapshots.value = snapshots
+}
+async function selectMotherChildren() {
+  if (busy.value) return
+  const adminID = selectedMotherID.value
+  if (!adminID) return setMessage('请先选择母号', 'error')
+  const controller = new AbortController()
+  motherSelectionController = controller
+  busy.value = 'select-mother'
+  try {
+    const params = new URLSearchParams({ admin_account_id: adminID })
+    const data = await api(`/api/free-accounts/select-by-admin?${params}`, { signal: controller.signal })
+    if (controller.signal.aborted || motherSelectionController !== controller) return
+    const accounts = data.items || []
+    if (accounts.some(account => !account.id || String(account.admin_account_id) !== String(adminID))) throw new Error('返回账号的母号不匹配，请重新选择')
+    selectedAccountSnapshots.value = new Map(accounts.map(account => [String(account.id), account]))
+    selectedAccountIDs.value = new Set(selectedAccountSnapshots.value.keys())
+    const admin = props.adminAccounts.find(item => String(item.id) === String(adminID))
+    setMessage(`${admin?.label || admin?.email || '该母号'}：已选中全部 ${selectedAccountIDs.value.size} 个子号`, 'success')
+  } catch (error) {
+    if (!controller.signal.aborted) setMessage(error.message, 'error')
+  } finally {
+    if (motherSelectionController === controller) {
+      motherSelectionController = null
+      busy.value = ''
+    }
+  }
+}
 function togglePipelineSelected(account) {
   const id = String(account.id)
   const next = new Set(selectedAccountIDs.value)
-  if (next.has(id)) next.delete(id)
-  else next.add(id)
+  const snapshots = new Map(selectedAccountSnapshots.value)
+  if (next.has(id)) { next.delete(id); snapshots.delete(id) }
+  else { next.add(id); snapshots.set(id, account) }
+  selectedAccountSnapshots.value = snapshots
   selectedAccountIDs.value = next
 }
 function toggleAllDisplayed() {
   const next = new Set(selectedAccountIDs.value)
-  if (allDisplayedSelected.value) displayedAccounts.value.forEach((item) => next.delete(String(item.id)))
-  else displayedAccounts.value.forEach((item) => next.add(String(item.id)))
+  const snapshots = new Map(selectedAccountSnapshots.value)
+  if (allDisplayedSelected.value) displayedAccounts.value.forEach((item) => { next.delete(String(item.id)); snapshots.delete(String(item.id)) })
+  else displayedAccounts.value.forEach((item) => { next.add(String(item.id)); snapshots.set(String(item.id), item) })
+  selectedAccountSnapshots.value = snapshots
   selectedAccountIDs.value = next
 }
 function elapsedSeconds(activity) { return Math.max(0, Math.floor((clock.value - activity.startedAt) / 1000)) }
@@ -459,9 +504,9 @@ async function refreshLiveAccounts() {
   liveAccounts.value.forEach(syncActivityStage)
   return liveAccounts.value
 }
-function setAccountPage(value) { page.value = value; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
-function setAccountPageSize(value) { pageSize.value = value; page.value = 1; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
-function setTeamSpaceFilter(value) { teamSpaceFilter.value = teamSpaceFilter.value === value ? '' : value; page.value = 1; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
+function setAccountPage(value) { page.value = value; refreshLiveAccounts() }
+function setAccountPageSize(value) { pageSize.value = value; page.value = 1; refreshLiveAccounts() }
+function setTeamSpaceFilter(value) { teamSpaceFilter.value = teamSpaceFilter.value === value ? '' : value; page.value = 1; clearPipelineSelection(); refreshLiveAccounts() }
 async function openLifecycle(account, qualityOnly = false) {
   closeLifecycle()
   qualityHistoryOnly.value = qualityOnly
@@ -825,7 +870,7 @@ async function runSelectedPipelineTask(action) {
   const skipped = selected.length - eligible.length
   if (!eligible.length) return setMessage(`没有符合条件的账号（已跳过 ${skipped} 个）`, 'error')
   if (action === 'remove' && !window.confirm(`确认由母号踢出已勾选的 ${eligible.length} 个账号？本次强制采用母号踢出，同一母号下的账号将按配置间隔依次执行。`)) return
-  selectedAccountIDs.value = new Set()
+  clearPipelineSelection()
   busy.value = `batch:${action}`
   const labels = { oauth: '授权', relogin: '重登', push: `推送${activeProviderLabel.value}`, quota: '查额度', remove: '移出空间' }
   setMessage(`正在批量${labels[action]}：0/${eligible.length}`)
@@ -929,7 +974,7 @@ async function removeSelectedRecords() {
   try {
     const results = await Promise.allSettled(targets.map((account) => api(`/api/free-accounts/${encodeURIComponent(account.id)}`, { method: 'DELETE' })))
     const failed = results.filter((item) => item.status === 'rejected').length
-    selectedAccountIDs.value = new Set()
+    clearPipelineSelection()
     await refreshLiveAccounts()
     emit('reload')
     setMessage(`批量删除完成：成功 ${targets.length - failed}，失败 ${failed}`, failed ? 'error' : 'success')
@@ -958,6 +1003,7 @@ onBeforeUnmount(() => pushGroupsController?.abort())
 onBeforeUnmount(stopCapacityRefreshTimer)
 onBeforeUnmount(() => window.clearTimeout(pipelineMenuCloseTimer))
 onBeforeUnmount(closeLifecycle)
+onBeforeUnmount(() => motherSelectionController?.abort())
 </script>
 
 <template>
@@ -1052,6 +1098,12 @@ onBeforeUnmount(closeLifecycle)
           <div class="execution-progress"><i></i></div>
         </div>
       </div>
+      <div class="mother-selection-toolbar">
+        <label class="field"><span>按母号选择</span><select v-model="selectedMotherID" :disabled="!!busy" @change="clearPipelineSelection"><option value="">请选择母号</option><option v-for="admin in adminAccounts" :key="admin.id" :value="admin.id">{{ admin.label || admin.email }}{{ admin.label && admin.email && admin.label !== admin.email ? ' · ' + admin.email : '' }}{{ admin.rotation_disabled ? '（已禁用）' : '' }}</option></select></label>
+        <button class="btn ghost" type="button" :disabled="!!busy || !selectedMotherID" title="跨分页选中该母号当前关联的全部子号，替换当前选择" @click="selectMotherChildren"><LoaderCircle v-if="busy === 'select-mother'" class="spin" :size="15" /><ListChecks v-else :size="15" />{{ busy === 'select-mother' ? '选择中' : '选中全部子号' }}</button>
+        <span class="selection-count" aria-live="polite">已选 {{ selectedPipelineAccounts.length }} 个</span>
+        <button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="clearPipelineSelection"><X :size="15" />清空选择</button>
+      </div>
       <div class="space-filter-tabs" role="tablist" aria-label="空间状态筛选">
         <button type="button" :class="{ active: teamSpaceFilter === 'outside' }" @click="setTeamSpaceFilter('outside')">等待进入空间 <span>{{ accountSummary.outside }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'inside' }" @click="setTeamSpaceFilter('inside')">在空间里面 <span>{{ accountSummary.inside }}</span></button>
@@ -1134,6 +1186,11 @@ onBeforeUnmount(closeLifecycle)
 </template>
 
 <style scoped>
+.mother-selection-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; padding: 14px 0; }
+.mother-selection-toolbar .field { flex: 0 1 360px; min-width: 0; margin: 0; }
+.mother-selection-toolbar select { max-width: 100%; }
+.mother-selection-toolbar .selection-count { align-self: center; color: var(--muted); font-size: 12px; }
+@media (max-width: 600px) { .mother-selection-toolbar .field { flex-basis: 100%; } }
 .team-metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .capacity-metric-card { position: relative; padding-right: 42px; }
 .metric-refresh-button { position: absolute; top: 10px; right: 10px; display: inline-grid; width: 26px; height: 26px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--muted); cursor: pointer; }

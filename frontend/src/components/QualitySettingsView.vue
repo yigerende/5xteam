@@ -10,7 +10,7 @@ const loaded = ref(false), busy = ref(false), groups = ref([]), initial = ref(nu
 const message = reactive({ text: '', type: '' })
 const stats = computed(() => (props.status || initial.value)?.summary || {})
 const metrics = [['total','监控账号'],['normal','正常'],['suspect','疑似异常'],['degraded','降智'],['errors','读取失败'],['processed','已处理'],['routed','降智分组'],['kicked','已踢出']]
-function setForm(settings) { Object.assign(form, settings, { poll_interval_seconds: settings.poll_interval_seconds || 60, max_result_age_seconds: settings.max_result_age_seconds || 900, condition_mode: settings.condition_mode || 'any' }) }
+function setForm(settings) { Object.assign(form, settings, { normal_group_ids: settings.normal_group_ids || [], degraded_group_ids: settings.degraded_group_ids || [], poll_interval_seconds: settings.poll_interval_seconds || 60, max_result_age_seconds: settings.max_result_age_seconds || 900, condition_mode: settings.condition_mode || 'any' }) }
 async function load() { try { const data = await api('/api/quality/settings'); initial.value = data; setForm(data.settings); loaded.value = true } catch(e) { message.text=e.message;message.type='error' } }
 async function loadGroups() { busy.value=true;try { groups.value=(await api('/api/sub2-settings/test',{method:'POST',body:{}})).groups || [] } catch(e) { message.text=e.message;message.type='error' } finally { busy.value=false } }
 async function save() { busy.value=true;try { const data=await api('/api/quality/settings',{method:'PUT',body:form});initial.value=data;setForm(data.settings);message.text='结果查询与处理设置已保存';message.type='success';emit('saved',data) } catch(e) { message.text=e.message;message.type='error' } finally { busy.value=false } }
@@ -39,8 +39,17 @@ onMounted(load)
    <label class="field"><span>每账号处理记录显示上限</span><input v-model.number="form.history_limit" type="number" min="1" max="1000" required></label>
    <template v-if="form.action === 'groups'">
     <div class="wide"><button class="btn ghost" type="button" :disabled="busy" @click="loadGroups"><RefreshCw :size="15" />读取 Sub2 分组</button></div>
-    <label class="field"><span>移除的正常分组</span><select v-model="form.normal_group_ids" multiple size="5"><option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}（{{ g.id }}）</option></select><small>已选 {{ (form.normal_group_ids || []).join(', ') || '无' }}</small></label>
-    <label class="field"><span>加入的降智分组</span><select v-model="form.degraded_group_ids" multiple size="5"><option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}（{{ g.id }}）</option></select><small>已选 {{ (form.degraded_group_ids || []).join(', ') || '无' }}</small></label>
+    <div v-for="field in [{ key: 'normal_group_ids', label: '移除的正常分组' }, { key: 'degraded_group_ids', label: '加入的降智分组' }]" :key="field.key" class="field">
+     <span :id="field.key + '-label'">{{ field.label }} <small>已选 {{ form[field.key].length }} 个</small></span>
+     <div class="quality-group-picker" role="group" :aria-labelledby="field.key + '-label'">
+      <label v-for="group in groups" :key="group.id">
+       <input v-model="form[field.key]" type="checkbox" :value="Number(group.id)" :disabled="busy" />
+       <span>{{ group.name }}</span><small>#{{ group.id }}</small>
+      </label>
+      <p v-if="!groups.length">暂无可选分组</p>
+     </div>
+     <small>已选 ID：{{ form[field.key].join(', ') || '无' }}</small>
+    </div>
     <label class="field check"><input v-model="form.auto_restore" type="checkbox"><span>所有勾选检测恢复正常后自动恢复分组</span></label>
     <label v-if="form.auto_restore" class="field"><span>恢复至少需要连续正常次数</span><input v-model.number="form.recovery_limit" type="number" min="1" max="20" required></label>
    </template>
@@ -50,5 +59,12 @@ onMounted(load)
 </section>
 </template>
 <style scoped>
-.quality-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(2,minmax(88px,auto));gap:10px;margin-bottom:20px}.quality-stats article{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.quality-stats span{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.quality-stats strong{display:block;font-size:24px}.quality-settings{padding:16px 0}.quality-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin:20px 0}.quality-grid>*{min-width:0}.quality-grid .wide{grid-column:1/-1}.check{display:flex;flex-direction:row;align-items:center;gap:10px}.check input{width:18px;height:18px;min-height:18px;padding:0}.quality-grid select[multiple]{min-height:125px}@media(max-width:700px){.quality-grid{grid-template-columns:minmax(0,1fr)}.quality-stats{gap:6px}.quality-stats article{padding:8px}.quality-stats strong{font-size:20px}}
+.quality-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(2,minmax(88px,auto));gap:10px;margin-bottom:20px}.quality-stats article{border:1px solid var(--line);border-radius:6px;padding:12px;min-width:0}.quality-stats span{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.quality-stats strong{display:block;font-size:24px}.quality-settings{padding:16px 0}.quality-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;margin:20px 0}.quality-grid>*{min-width:0}.quality-grid .wide{grid-column:1/-1}.check{display:flex;flex-direction:row;align-items:center;gap:10px}.check input{width:18px;height:18px;min-height:18px;padding:0}@media(max-width:700px){.quality-grid{grid-template-columns:minmax(0,1fr)}.quality-stats{gap:6px}.quality-stats article{padding:8px}.quality-stats strong{font-size:20px}}
+.quality-group-picker { display: grid; align-content: start; min-height: 132px; max-height: 190px; overflow-y: auto; padding: 7px; gap: 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg-elevated); }
+.quality-group-picker label { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; min-height: 34px; padding: 6px 8px; gap: 8px; border-radius: 4px; cursor: pointer; }
+.quality-group-picker label:hover, .quality-group-picker label:focus-within { background: var(--surface-2); }
+.quality-group-picker input[type="checkbox"] { width: 16px; height: 16px; min-height: 16px; margin: 0; padding: 0; }
+.quality-group-picker label span { overflow-wrap: anywhere; font-size: 12px; font-weight: 600; }
+.quality-group-picker small, .quality-group-picker p { color: var(--muted); font-size: 11px; }
+.quality-group-picker p { margin: 0; padding: 9px; }
 </style>
