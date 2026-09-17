@@ -21,6 +21,9 @@ type QualityQuestion struct {
 }
 
 type QualitySettings struct {
+	PollIntervalSeconds       int               `json:"poll_interval_seconds"`
+	MaxResultAgeSeconds       int               `json:"max_result_age_seconds"`
+	ConditionMode             string            `json:"condition_mode"`
 	Enabled                   bool              `json:"enabled"`
 	QuestionEnabled           bool              `json:"question_enabled"`
 	Questions                 []QualityQuestion `json:"questions"`
@@ -72,6 +75,15 @@ func (v QualitySettings) ActiveQuestions() []QualityQuestion {
 	return out
 }
 func (v QualitySettings) Validate() error {
+	if v.PollIntervalSeconds != 0 && (v.PollIntervalSeconds < 10 || v.PollIntervalSeconds > 86400) {
+		return errors.New("查询间隔必须为10至86400秒")
+	}
+	if v.MaxResultAgeSeconds != 0 && (v.MaxResultAgeSeconds < 30 || v.MaxResultAgeSeconds > 86400) {
+		return errors.New("结果有效期必须为30至86400秒")
+	}
+	if v.ConditionMode != "" && v.ConditionMode != "any" && v.ConditionMode != "all" {
+		return errors.New("异常条件组合无效")
+	}
 	if v.Enabled && !v.QuestionEnabled && !v.ModelAuditEnabled {
 		return errors.New("请至少开启一种检测")
 	}
@@ -174,30 +186,37 @@ func (v QualitySettings) Validate() error {
 
 // This state follows the child across cycles; it is not a dead-account flag.
 type AccountQuality struct {
-	QuestionStatus   string          `json:"question_status,omitempty"`
-	QuestionID       string          `json:"question_id,omitempty"`
-	QuestionName     string          `json:"question_name,omitempty"`
-	NextQuestionID   string          `json:"next_question_id,omitempty"`
-	QuestionDegraded bool            `json:"question_degraded"`
-	ModelAudit       ModelAuditState `json:"model_audit"`
-	Status           string          `json:"status,omitempty"`
-	Failures         int             `json:"failures"`
-	Successes        int             `json:"successes"`
-	Degraded         bool            `json:"degraded"`
-	Excluded         bool            `json:"excluded"`
-	Revision         string          `json:"revision,omitempty"`
-	Identity         string          `json:"identity,omitempty"`
-	CheckedAt        *time.Time      `json:"checked_at,omitempty"`
-	NextAt           *time.Time      `json:"next_at,omitempty"`
-	DurationMS       int64           `json:"duration_ms"`
-	ContentPassed    *bool           `json:"content_passed,omitempty"`
-	TimePassed       *bool           `json:"time_passed,omitempty"`
-	Answer           string          `json:"answer,omitempty"`
-	Reason           string          `json:"reason,omitempty"`
-	Error            string          `json:"error,omitempty"`
-	Action           string          `json:"action,omitempty"`
-	ActionStatus     string          `json:"action_status,omitempty"`
-	RestoreManual    bool            `json:"restore_manual,omitempty"`
+	SourceRecovered    bool            `json:"source_recovered"`
+	SourceVersion      string          `json:"source_version,omitempty"`
+	SourceFailureLimit int             `json:"source_failure_limit,omitempty"`
+	SourceModel        string          `json:"source_model,omitempty"`
+	SourceQuestionAt   *time.Time      `json:"source_question_at,omitempty"`
+	SourceModelAt      *time.Time      `json:"source_model_at,omitempty"`
+	SourceFresh        bool            `json:"source_fresh"`
+	QuestionStatus     string          `json:"question_status,omitempty"`
+	QuestionID         string          `json:"question_id,omitempty"`
+	QuestionName       string          `json:"question_name,omitempty"`
+	NextQuestionID     string          `json:"next_question_id,omitempty"`
+	QuestionDegraded   bool            `json:"question_degraded"`
+	ModelAudit         ModelAuditState `json:"model_audit"`
+	Status             string          `json:"status,omitempty"`
+	Failures           int             `json:"failures"`
+	Successes          int             `json:"successes"`
+	Degraded           bool            `json:"degraded"`
+	Excluded           bool            `json:"excluded"`
+	Revision           string          `json:"revision,omitempty"`
+	Identity           string          `json:"identity,omitempty"`
+	CheckedAt          *time.Time      `json:"checked_at,omitempty"`
+	NextAt             *time.Time      `json:"next_at,omitempty"`
+	DurationMS         int64           `json:"duration_ms"`
+	ContentPassed      *bool           `json:"content_passed,omitempty"`
+	TimePassed         *bool           `json:"time_passed,omitempty"`
+	Answer             string          `json:"answer,omitempty"`
+	Reason             string          `json:"reason,omitempty"`
+	Error              string          `json:"error,omitempty"`
+	Action             string          `json:"action,omitempty"`
+	ActionStatus       string          `json:"action_status,omitempty"`
+	RestoreManual      bool            `json:"restore_manual,omitempty"`
 	// Persist the intended target BEFORE the remote call, so ambiguous failures
 	// and process restarts can retry without losing the original group set.
 	RemovedGroups  []int64 `json:"removed_groups,omitempty"`

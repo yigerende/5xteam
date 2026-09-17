@@ -23,6 +23,8 @@ import (
 )
 
 type qualityFixture struct {
+	remoteQuality *sub2.RemoteQualitySnapshot
+	qualityReads  [][]int64
 	s             *Server
 	st            *store.Store
 	push          model.Sub2Settings
@@ -59,6 +61,41 @@ func newQualityFixture(t *testing.T) *qualityFixture {
 	f.remote = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		reply := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": data}) }
+		if r.URL.Path == "/api/v1/admin/account-quality/capabilities" {
+			reply(map[string]any{"version": 1, "max_accounts": 100, "read_only": true})
+			return
+		}
+		if r.URL.Path == "/api/v1/admin/account-quality/results" {
+			var input struct {
+				AccountIDs []int64 `json:"account_ids"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&input)
+			f.mu.Lock()
+			f.qualityReads = append(f.qualityReads, input.AccountIDs)
+			var result sub2.RemoteQualitySnapshot
+			if f.remoteQuality != nil {
+				result = *f.remoteQuality
+			} else {
+				result.Version = 1
+				result.ServerNow = time.Now().UTC()
+				result.Settings.Enabled = true
+				result.Settings.QuestionEnabled = true
+				result.Settings.Revision = "remote-r1"
+				result.Settings.FailureLimit = 2
+				result.Settings.RecoveryLimit = 2
+				for _, id := range input.AccountIDs {
+					verdict := sub2.RemoteQualityVerdict{Status: "degraded", Degraded: true, Failures: 2, CheckedAt: &result.ServerNow, EvidenceAt: &result.ServerNow, StreakStartedAt: &result.ServerNow}
+					result.Accounts = append(result.Accounts, sub2.RemoteQualityResult{AccountID: id, Revision: "remote-r1", Version: "remote-v1", Question: sub2.RemoteQualityQuestion{RemoteQualityVerdict: verdict}})
+				}
+			}
+			hook := f.hook
+			f.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
+			reply(result)
+			return
+		}
 		if r.URL.Path == "/api/v1/auth/login" {
 			reply(map[string]any{"access_token": "test-admin"})
 			return

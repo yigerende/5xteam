@@ -36,7 +36,7 @@ func qualityIdentity(p model.FreeAccountProfile, settings model.Sub2Settings) st
 	return fmt.Sprintf("%s|%d|%s|%s", strings.TrimRight(settings.URL, "/"), p.Sub2AccountID, p.CycleID, pushed)
 }
 func qualityDue(p model.FreeAccountProfile, q model.QualitySettings, s model.Sub2Settings, now time.Time) bool {
-	if !q.QuestionEnabled && p.Quality.ActionStatus != "pending" && p.Quality.ActionStatus != "failed" {
+	if !q.QuestionEnabled && !q.ModelAuditEnabled && p.Quality.ActionStatus != "pending" && p.Quality.ActionStatus != "failed" {
 		return false
 	}
 	return (qualityEligible(p) || qualityActionRetryEligible(p)) && (p.Quality.Revision != q.Revision || p.Quality.Identity != qualityIdentity(p, s) || p.Quality.NextAt == nil || !now.Before(*p.Quality.NextAt))
@@ -73,7 +73,7 @@ func (s *Server) qualityStatus() map[string]any {
 		return status
 	}
 	status["eligible"] = count
-	if q.Enabled && q.QuestionEnabled && count > 0 {
+	if q.Enabled && (q.QuestionEnabled || q.ModelAuditEnabled) && count > 0 {
 		if next.IsZero() {
 			next = time.Now()
 		}
@@ -133,8 +133,8 @@ func (s *Server) saveQualitySettings(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		if err == nil && q.ModelAuditEnabled {
-			err = s.sub2.ModelAuditCapabilities(ctx, push, password)
+		if err == nil {
+			err = s.sub2.QualityCapabilities(ctx, push, password)
 		}
 		if err == nil && q.Action == "groups" {
 			var groups []sub2.Group
@@ -185,22 +185,10 @@ func (s *Server) triggerQuality(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 409, nil, "降智检测正在执行，本轮结束后才能继续")
 		return
 	}
-	modelLocked := false
-	if q.ModelAuditEnabled {
-		if !s.qualityModelRunMu.TryLock() {
-			s.qualityRunMu.Unlock()
-			writeAPI(w, 409, nil, "模型检查正在执行")
-			return
-		}
-		modelLocked = true
-	}
 	s.qualityMu.Lock()
 	if s.qualityClosed {
 		s.qualityMu.Unlock()
 		s.qualityRunMu.Unlock()
-		if modelLocked {
-			s.qualityModelRunMu.Unlock()
-		}
 		writeAPI(w, 503, nil, "服务正在关闭")
 		return
 	}
@@ -212,17 +200,7 @@ func (s *Server) triggerQuality(w http.ResponseWriter, r *http.Request) {
 		defer s.qualityRunMu.Unlock()
 		defer s.qualityWG.Done()
 		defer cancel()
-		var jobs sync.WaitGroup
-		if modelLocked {
-			jobs.Add(1)
-			go func() {
-				defer jobs.Done()
-				defer s.qualityModelRunMu.Unlock()
-				s.runQualityModelBatch(ctx, true, accountID)
-			}()
-		}
-		s.runQualityBatch(ctx, true, accountID)
-		jobs.Wait()
+		s.runRemoteQualityBatch(ctx, true, accountID)
 	}()
 	writeAPI(w, 202, map[string]any{"started": true}, "")
 }
@@ -246,7 +224,7 @@ func (s *Server) monitorQuality(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if s.qualityRunMu.TryLock() {
-				s.runQualityBatch(ctx, false)
+				s.runRemoteQualityBatch(ctx, false, "")
 				s.qualityRunMu.Unlock()
 			}
 		}

@@ -321,7 +321,6 @@ func (s *Server) StartBackground(ctx context.Context) {
 	go s.monitorHeroActivations(ctx)
 	go s.monitorFreeAccounts(ctx)
 	go s.monitorQuality(ctx)
-	go s.monitorQualityModels(ctx)
 	go s.autoRotationLoop(ctx)
 	go s.autoRotationHistoryCleanup(ctx)
 	go s.monitorProAccounts(ctx)

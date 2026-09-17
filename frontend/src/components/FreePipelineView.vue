@@ -89,7 +89,7 @@ function qualityCountdownValue(modelCheck = false) {
   clock.value
   const value = qualityStatus.value
   if (!value) return '加载中'
-  if (!value.settings?.enabled || !(modelCheck ? value.settings?.model_audit_enabled : value.settings?.question_enabled)) return '已关闭'
+  if (!value.settings?.enabled) return '已关闭'
   if (value.inactive_reason) return '仅支持 Sub2'
   const runtime = modelCheck ? value.model_runtime : value.runtime
   if (runtime?.running) return '检测中 ' + runtime.done + '/' + runtime.total
@@ -100,7 +100,6 @@ function qualityCountdownValue(modelCheck = false) {
   return remaining > 0 ? remaining + 's' : '即将检测'
 }
 const qualityCountdown = computed(() => qualityCountdownValue())
-const qualityModelCountdown = computed(() => qualityCountdownValue(true))
 function qualityText(account) {
   const state = account.quality || {}
   const labels = { unknown: '未检测', normal: '正常', suspect: '疑似异常', degraded: '降智', error: '检测失败' }
@@ -110,7 +109,7 @@ function qualityText(account) {
 function qualityModelText(account) {
   if (!qualityStatus.value?.settings?.model_audit_enabled) return '未开启'
   const a = account.quality?.model_audit || {}
-  return ({normal:'一致',variant:'版本差异',suspect:'不一致',no_samples:'暂无样本',unknown:'无法判断',error:'查询失败'})[a.status] || '未检测'
+  return ({normal:'一致',variant:'版本差异',suspect:'疑似不一致',degraded:'已确认不一致',no_samples:'暂无样本',unknown:'无法判断',error:'查询失败'})[a.status] || '未检测'
 }
 function qualityModelTitle(account) {
   const a = account.quality?.model_audit || {}
@@ -125,10 +124,10 @@ async function restoreQuality(account) {
   } catch (error) { setMessage(error.message, 'error') }
 }
 async function probeQuality(account) {
-  if (!window.confirm('按已保存设置检测账号；答题消耗实际额度，模型检查只读日志。达到异常阈值后将踢出或切组。继续？')) return
+  if (!window.confirm('读取 Sub2 已保存的检测结果，满足条件后将踢出或切组。继续？')) return
   try {
     await api('/api/free-accounts/' + encodeURIComponent(account.id) + '/quality/probe', { method: 'POST' })
-    setMessage('已启动后台降智检测', 'success')
+    setMessage('已启动 Sub2 结果查询', 'success')
     await loadQualityStatus()
   } catch (error) { setMessage(error.message, 'error') }
 }
@@ -1044,7 +1043,7 @@ onBeforeUnmount(closeLifecycle)
     <MessageBar :message="message" />
 
     <section v-if="teamMenu === 'accounts'" class="panel list-panel free-list">
-      <div class="panel-title responsive"><div><span>PIPELINE</span><h2>账号流程状态</h2></div><div class="heading-actions"><StatusPill v-if="activeActivities.length" tone="running"><LoaderCircle class="spin" :size="12" />执行中 {{ activeActivities.length }}</StatusPill><div class="monitor-countdowns" title="后台监控任务倒计时"><span class="countdown-pill status-countdown">401 检测 <strong>{{ countdownText(statusCountdown, pushProvider === 'cpa' ? !cpaForm.enable401Check : !sub2Form.enable401Check) }}</strong></span><span class="countdown-pill quota-countdown">额度 / 移出 <strong>{{ countdownText(quotaCountdown, !activeQuotaEnabled) }}</strong></span><span v-if="qualityStatus?.settings?.enabled && qualityStatus?.settings?.question_enabled" class="countdown-pill quality-countdown">题目检测 <strong>{{ qualityCountdown }}</strong></span><span v-if="qualityStatus?.settings?.enabled && qualityStatus?.settings?.model_audit_enabled" class="countdown-pill quality-countdown">模型检查 <strong>{{ qualityModelCountdown }}</strong></span></div><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('relogin')"><RefreshCw :size="15" />批量重登<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('oauth')"><KeyRound :size="15" />批量授权<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('push')"><Send :size="15" />批量推送 {{ activeProviderLabel }}<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('quota')"><Gauge :size="15" />批量查额度<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('remove')"><Unplug :size="15" />批量移出<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="removeSelectedRecords"><Trash2 :size="15" />批量删除<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button></div></div>
+      <div class="panel-title responsive"><div><span>PIPELINE</span><h2>账号流程状态</h2></div><div class="heading-actions"><StatusPill v-if="activeActivities.length" tone="running"><LoaderCircle class="spin" :size="12" />执行中 {{ activeActivities.length }}</StatusPill><div class="monitor-countdowns" title="后台监控任务倒计时"><span class="countdown-pill status-countdown">401 检测 <strong>{{ countdownText(statusCountdown, pushProvider === 'cpa' ? !cpaForm.enable401Check : !sub2Form.enable401Check) }}</strong></span><span class="countdown-pill quota-countdown">额度 / 移出 <strong>{{ countdownText(quotaCountdown, !activeQuotaEnabled) }}</strong></span><span v-if="qualityStatus?.settings?.enabled" class="countdown-pill quality-countdown">降智结果查询 <strong>{{ qualityCountdown }}</strong></span></div><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('relogin')"><RefreshCw :size="15" />批量重登<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('oauth')"><KeyRound :size="15" />批量授权<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('push')"><Send :size="15" />批量推送 {{ activeProviderLabel }}<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('quota')"><Gauge :size="15" />批量查额度<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('remove')"><Unplug :size="15" />批量移出<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="removeSelectedRecords"><Trash2 :size="15" />批量删除<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button></div></div>
       <div v-if="activeActivities.length" class="execution-list" aria-live="polite">
         <div v-for="activity in activeActivities" :key="activity.id" class="execution-item">
           <LoaderCircle class="spin" :size="18" />
@@ -1070,9 +1069,9 @@ onBeforeUnmount(closeLifecycle)
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
           <td class="quality-cell">
             <strong :class="{ 'danger-text': account.quality?.question_degraded }" :title="account.quality?.answer">题目：{{ qualityStatus?.runtime?.active?.[account.id] ? '检测中' : qualityText(account) }}</strong>
-            <small v-if="account.quality?.checked_at && qualityStatus?.settings?.question_enabled" class="table-note">{{ account.quality.question_name }} · {{ account.quality.duration_ms }} ms · 异常 {{ account.quality.failures || 0 }}/{{ qualityStatus?.settings?.failure_limit || 2 }}</small>
+            <small v-if="account.quality?.checked_at && qualityStatus?.settings?.question_enabled" class="table-note">{{ account.quality.question_name }} · {{ account.quality.duration_ms }} ms · 异常 {{ account.quality.failures || 0 }}/{{ account.quality?.source_failure_limit || '-' }}</small>
             <strong class="quality-model-line" :class="{ 'danger-text': account.quality?.model_audit?.failures > 0 }" :title="qualityModelTitle(account)">模型：{{ qualityModelText(account) }}</strong>
-            <small v-if="qualityStatus?.settings?.model_audit_enabled" class="table-note" :title="qualityModelTitle(account)">{{ qualityStatus.settings.model_audit_model }} · 异常 {{ account.quality?.model_audit?.failures || 0 }}/{{ qualityStatus.settings.failure_limit }}<template v-if="account.quality?.model_audit?.no_new_samples"> · 无新样本</template></small>
+            <small v-if="qualityStatus?.settings?.model_audit_enabled" class="table-note" :title="qualityModelTitle(account)">{{ account.quality?.source_model || qualityStatus.settings.model_audit_model }} · 异常 {{ account.quality?.model_audit?.failures || 0 }}/{{ account.quality?.source_failure_limit || '-' }}<template v-if="account.quality?.model_audit?.no_new_samples"> · 无新样本</template></small>
             <small v-if="account.quality?.excluded" class="danger-text">降智停用</small><small v-else-if="account.quality?.routed" class="table-note">降智分组</small>
             <small v-if="account.quality?.action_status === 'failed'" class="danger-text">处理失败，等待重试</small><small v-if="account.quality?.error" class="table-note" :title="account.quality.error">{{ account.quality.error }}</small>
           </td>

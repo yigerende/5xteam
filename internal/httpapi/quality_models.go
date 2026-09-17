@@ -13,6 +13,9 @@ import (
 )
 
 func qualityRecoveryReady(state model.AccountQuality, q model.QualitySettings) bool {
+	if state.SourceVersion != "" {
+		return state.SourceFresh && state.SourceRecovered
+	}
 	if state.QuestionDegraded && !q.QuestionEnabled || state.ModelAudit.Degraded && !q.ModelAuditEnabled {
 		return false
 	}
