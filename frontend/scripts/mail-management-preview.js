@@ -23,6 +23,9 @@ const items = Array.from({ length: 24 }, (_, i) => ({
 if (new URLSearchParams(location.search).has('totp-no-at')) items[0].access_token_present = false
 window.mailExportFixture = { requests: [], fail: false, delay: 350, totpValue: '012345', totpValidity: 30000, totpFail: false, totpDelay: 0 }
 const fixture = window.mailExportFixture
+fixture.items = items
+fixture.logEvents = Array.from({ length: 63 }, (_, i) => ({ id: `pro-event-${i}`, created_at: new Date(Date.now() - i * 1000).toISOString(), type: 'pro_request', stage: 'transfer', to_status: 'failed', level: 'error', message: '合并空间：请求失败', http_status: 429, attempt: 2, duration_ms: 220, request: { method: 'POST', url: 'https://chatgpt.com/backend-api/accounts/transfer', body: { target_account_id: 'fixture-team', transfer_personal: true } }, response: { http_status: 429, body: { error: { code: 'rate_limited', message: 'fixture remote detail' } } }, details: { execution_id: 'fixture-execution', proxy: { name: '全局代理', source: 'global' } } }))
+fixture.logFailure = false
 fixture.mergeStepDelay = 1800
 fixture.mergeFailStage = ''
 fixture.mergeCalls = []
@@ -46,6 +49,26 @@ window.fetch = async (path, options = {}) => {
   const url = new URL(path, location.origin)
   const body = options.body ? JSON.parse(options.body) : {}
   fixture.requests.push({ path: url.pathname, body })
+  if (url.pathname.startsWith('/api/pro-accounts/') && url.pathname.endsWith('/stage')) {
+    const item = items.find(item => item.email === decodeURIComponent(url.pathname.split('/')[3]))
+    if (item.pro_workflow_running || (item['pro_' + body.stage + '_status'] || '') !== body.expected_status) return new Response(JSON.stringify({ ok: false, error: '步骤状态已变化，请刷新后重新确认' }), { status: 409 })
+    const before = item['pro_' + body.stage + '_status'] || ''
+    item['pro_' + body.stage + '_status'] = body.status
+    item.pro_last_error = ''
+    if (body.stage === 'transfer' && body.status === 'completed') item.space_merged_once = true
+    fixture.logEvents.unshift({ id: 'manual-' + fixture.requests.length, created_at: new Date().toISOString(), type: 'manual_stage', stage: body.stage, from_status: before, to_status: body.status, message: '手动修正 Pro 合并空间状态', details: { remote_request_sent: false } })
+    return json(item)
+  }
+  if (url.pathname.startsWith('/api/pro-accounts/') && url.pathname.endsWith('/events/export')) {
+    return new Response(JSON.stringify({ events: fixture.logEvents, retention: '48h' }), { headers: { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename="pro-fixture-logs.json"' } })
+  }
+  if (url.pathname.startsWith('/api/pro-accounts/') && url.pathname.endsWith('/events')) {
+    if (fixture.logFailure) return new Response(JSON.stringify({ ok: false, error: '模拟日志加载失败' }), { status: 500 })
+    const item = items.find(item => item.email === decodeURIComponent(url.pathname.split('/')[3]))
+    const offset = Number(url.searchParams.get('cursor') || 0), limit = Number(url.searchParams.get('limit') || 50)
+    const more = offset + limit < fixture.logEvents.length
+    return json({ account: item, events: fixture.logEvents.slice(offset, offset + limit), has_more: more, next_cursor: more ? String(offset + limit) : '' })
+  }
   if (url.pathname.startsWith('/api/mail/accounts/') && url.pathname.endsWith('/oauth')) {
     const email = decodeURIComponent(url.pathname.split('/')[4])
     const jobID = 'codex-oauth-' + (oauthJobs.size + 1)

@@ -2,7 +2,21 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
+import { parse } from '@vue/compiler-dom'
 const source=readFileSync(new URL('../src/components/ProManagementView.vue',import.meta.url),'utf8')
+const template=source.slice(source.indexOf('<template>')+'<template>'.length,source.lastIndexOf('</template>'))
+const tree=parse(template)
+function checkActionOrder(node) {
+ const children=node.children || []
+ const title=element=>element.props?.find(prop=>prop.type===6 && prop.name==='title')?.value?.content
+ const login=children.findIndex(child=>title(child)==='登录获取 RT / AT')
+ if (login>=0) {
+  assert.equal(title(children[login+1]),'推送当前下游','OAuth login must immediately precede push')
+  return true
+ }
+ return children.some(checkActionOrder)
+}
+assert.ok(checkActionOrder(tree),'Pro row must contain the OAuth login action')
 const script=source.split('<script setup>')[1].split('</script>')[0]
 const parsed=ts.createSourceFile('pro.js',script,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS)
 const code=parsed.statements.filter(node=>!ts.isImportDeclaration(node)).map(node=>node.getText(parsed)).join('\n')

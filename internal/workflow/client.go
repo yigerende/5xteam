@@ -630,7 +630,7 @@ type requestOptions struct {
 	childLeave bool
 }
 
-func (c *Client) doWithOptions(ctx context.Context, method, path, token, accountID string, payload any, options requestOptions) (Response, error) {
+func (c *Client) doWithOptions(ctx context.Context, method, path, token, accountID string, payload any, options requestOptions) (result Response, retErr error) {
 	var body io.Reader
 	var bodyBytes []byte
 	if payload != nil {
@@ -679,6 +679,19 @@ func (c *Client) doWithOptions(ctx context.Context, method, path, token, account
 	var statusCode int
 	var data []byte
 	var requestErr error
+	if observer, ok := ctx.Value(requestObserverKey{}).(func(RequestObservation)); ok && observer != nil {
+		started := time.Now()
+		observation := RequestObservation{Phase: "start", Method: method, URL: req.URL.String(), Headers: diagnosticHeaders(req.Header), Payload: payload, Transport: "net/http"}
+		if c.python != "" && strings.HasPrefix(c.baseURL, "https://") && strings.TrimSpace(c.settings.ProxyURL) != "" {
+			observation.Transport = "curl_cffi/chrome136"
+		}
+		observer(observation)
+		defer func() {
+			observation.Phase, observation.StatusCode = "end", statusCode
+			observation.Body, observation.Err, observation.Duration = data, retErr, time.Since(started)
+			observer(observation)
+		}()
+	}
 	if c.python != "" && strings.HasPrefix(c.baseURL, "https://") && strings.TrimSpace(c.settings.ProxyURL) != "" {
 		if options.childLeave {
 			// Keep the same Chrome profile used by the rest of the Team
@@ -704,7 +717,7 @@ func (c *Client) doWithOptions(ctx context.Context, method, path, token, account
 		data = data[:maxResponseBytes]
 	}
 	message := responseMessage(data)
-	result := Response{StatusCode: statusCode, Message: message}
+	result = Response{StatusCode: statusCode, Message: message}
 	if statusCode < 200 || statusCode >= 300 {
 		if message == "" || message == "请求成功" {
 			message = limitText(strings.TrimSpace(string(data)), 500)

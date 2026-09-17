@@ -896,27 +896,43 @@ func retryProStep(ctx context.Context, attempts, delay int, operation func() err
 }
 
 func (s *Server) performProMerge(ctx context.Context, email string) (out model.MailAccountProfile, retErr error) {
-	profile, credentials, err := s.currentProCredential(ctx, email)
+	profile, credentials, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return profile, err
 	}
-	if profile.SpaceMergedOnce && profile.RemoveStatus == "completed" {
-		return profile, nil
+	if profile.ManagementScope != "pro" {
+		return profile, errors.New("账号不在 Pro 管理中")
 	}
+	executionID := randomRegistrationID()
 	v, _, _, err := s.store.ProSettings()
 	if err != nil {
 		return profile, err
 	}
-	s.auditProEvent(profile, "space_merge", "running", v.Provider, "开始执行 Pro 空间四步流程", map[string]any{"target_admin_id": v.TargetAdminID, "seat_type": v.TargetSeatType})
+	s.auditProEvent(profile, "space_merge", "running", v.Provider, "开始执行 Pro 空间四步流程", map[string]any{"execution_id": executionID, "state": proMergeState(profile), "configured_admin_id": v.TargetAdminID})
 	defer func() {
-		final := firstProProfile(out, profile)
-		status, message := "completed", "Pro 空间四步流程完成"
-		details := map[string]any{"invite": final.InviteStatus, "accept": final.AcceptStatus, "transfer": final.TransferStatus, "remove": final.RemoveStatus}
 		if retErr != nil {
-			status, message, details = "failed", "Pro 空间四步流程失败", map[string]any{"error": retErr.Error(), "invite": final.InviteStatus, "accept": final.AcceptStatus, "transfer": final.TransferStatus, "remove": final.RemoveStatus}
+			_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.ProLastError = retErr.Error() })
 		}
-		s.auditProEvent(final, "space_merge", status, v.Provider, message, details)
+		if latest, _, readErr := s.store.MailAccountCredential(email); readErr == nil {
+			out = latest
+		}
+		status, message := "completed", "Pro 空间四步流程完成"
+		details := map[string]any{"execution_id": executionID, "state": proMergeState(out)}
+		if retErr != nil {
+			status, message, details["error"] = "failed", "Pro 空间四步流程失败", retErr.Error()
+		}
+		s.auditProEvent(firstProProfile(out, profile), "space_merge", status, v.Provider, message, details)
 	}()
+	if profile.SpaceMergedOnce && profile.RemoveStatus == "completed" {
+		return profile, nil
+	}
+	// Resume against the original Team, even if the default target has changed.
+	if profile.TargetAdminID != "" {
+		v.TargetAdminID = profile.TargetAdminID
+		if profile.TargetSeatType != "" {
+			v.TargetSeatType = profile.TargetSeatType
+		}
+	}
 	if v.TargetAdminID == "" {
 		return profile, errors.New("未配置目标母号")
 	}
@@ -927,8 +943,27 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if admin.TeamAccountID == "" {
 		return profile, errors.New("目标母号缺少 Team ID")
 	}
-	if strings.TrimSpace(s.store.Settings().ProxyURL) == "" {
-		return profile, errors.New("请先配置全局代理；子号空间操作禁止直连")
+	if profile.TargetTeamID != "" && profile.TargetTeamID != admin.TeamAccountID {
+		return profile, errors.New("原流程空间与母号当前空间不一致，禁止向其他空间续跑")
+	}
+	needsChild := profile.AcceptStatus != "completed" || profile.TransferStatus != "completed"
+	if needsChild {
+		s.auditProEvent(profile, "credentials", "running", v.Provider, "准备子号空间操作凭据", map[string]any{"execution_id": executionID})
+		profile, credentials, err = s.currentProCredential(ctx, email)
+		if err != nil {
+			return profile, err
+		}
+		if strings.TrimSpace(s.store.Settings().ProxyURL) == "" {
+			return profile, errors.New("请先配置全局代理；子号空间操作禁止直连")
+		}
+	}
+	if profile.OAuthUserID == "" {
+		if info, decodeErr := workflow.DecodeUserInfo(credentials.AccessToken); decodeErr == nil {
+			profile.OAuthUserID = info.UserID
+		}
+	}
+	if profile.OAuthUserID == "" && profile.RemoveStatus != "completed" && profile.RemoveStatus != "team_removed" {
+		return profile, errors.New("缺少子号 OpenAI 用户 ID，无法执行母号移出")
 	}
 	unlockAdmin := s.lockProTeam(admin.TeamAccountID)
 	defer unlockAdmin()
@@ -940,89 +975,78 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if err != nil {
 		return profile, err
 	}
-	userClient, err := workflow.NewClient(s.store.Settings())
+	var userClient *workflow.Client
+	if needsChild {
+		userClient, err = workflow.NewClient(s.store.Settings())
+		if err != nil {
+			return profile, err
+		}
+	}
+	userID := profile.OAuthUserID
+	profile, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+		p.ProWorkflowRunning, p.ProLastError = true, ""
+		p.OAuthUserID = userID
+		p.TargetAdminID, p.TargetTeamID, p.TargetSeatType = admin.ID, admin.TeamAccountID, v.TargetSeatType
+		for _, stage := range []string{"invite", "accept", "transfer", "remove"} {
+			if proStageStatus(*p, stage) == "" {
+				setProStage(p, stage, "pending")
+			}
+		}
+	})
 	if err != nil {
 		return profile, err
 	}
-	profile, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
-		p.ProWorkflowRunning = true
-		p.TargetAdminID, p.TargetTeamID, p.TargetSeatType = admin.ID, admin.TeamAccountID, v.TargetSeatType
-		p.ProLastError = ""
-		if p.InviteStatus == "" {
-			p.InviteStatus, p.AcceptStatus, p.TransferStatus, p.RemoveStatus = "pending", "pending", "pending", "pending"
-		}
-	})
-	fail := func(stage string, e error) (model.MailAccountProfile, error) {
-		p, _ := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+	defer func() {
+		_, saveErr := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 			p.ProWorkflowRunning = false
-			p.ProLastError = e.Error()
-			switch stage {
-			case "invite":
-				p.InviteStatus = "failed"
-			case "accept":
-				p.AcceptStatus = "failed"
-			case "transfer":
-				p.TransferStatus = "failed"
-			case "remove":
-				p.RemoveStatus = "failed"
+			if retErr != nil {
+				p.ProLastError = retErr.Error()
+			} else {
+				p.ProLastError = ""
 			}
 		})
-		return p, e
+		if saveErr != nil {
+			retErr = errors.Join(retErr, saveErr)
+		}
+	}()
+	adminProxy := s.adminProxyLogDetails(adminSettings, admin)
+	childProxy := s.proxyLogDetails(s.store.Settings(), "global")
+	steps := []struct {
+		name  string
+		proxy map[string]any
+		run   func(context.Context) (workflow.Response, error)
+	}{
+		{"invite", adminProxy, func(stepCtx context.Context) (workflow.Response, error) {
+			return adminClient.Invite(stepCtx, adminCreds.AccessToken, admin.TeamAccountID, profile.Email, v.TargetSeatType)
+		}},
+		{"accept", childProxy, func(stepCtx context.Context) (workflow.Response, error) {
+			return userClient.Accept(stepCtx, credentials.AccessToken, admin.TeamAccountID, profile.OAuthUserID)
+		}},
+		{"transfer", childProxy, func(stepCtx context.Context) (workflow.Response, error) {
+			return userClient.Transfer(stepCtx, credentials.AccessToken, admin.TeamAccountID)
+		}},
+		{"remove", adminProxy, func(stepCtx context.Context) (workflow.Response, error) {
+			return adminClient.Kick(stepCtx, adminCreds.AccessToken, admin.TeamAccountID, profile.OAuthUserID)
+		}},
 	}
-	if profile.InviteStatus != "completed" {
-		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.InviteStatus = "running" })
-		err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error {
-			_, e := adminClient.Invite(ctx, adminCreds.AccessToken, admin.TeamAccountID, profile.Email, v.TargetSeatType)
-			return e
-		})
+	for _, step := range steps {
+		unlockStep := func() {}
+		if step.name == "remove" && profile.RemoveStatus != "completed" && profile.RemoveStatus != "team_removed" {
+			unlockStep = s.lockTeamAccountRemove(admin.TeamAccountID)
+		}
+		err = s.runProMergeStep(ctx, profile, v, executionID, step.name, step.proxy, step.run)
+		unlockStep()
 		if err != nil {
-			return fail("invite", err)
+			return profile, err
 		}
-		profile, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.InviteStatus = "completed" })
-	}
-	if profile.AcceptStatus != "completed" {
-		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.AcceptStatus = "running" })
-		err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error {
-			_, e := userClient.Accept(ctx, credentials.AccessToken, admin.TeamAccountID, profile.OAuthUserID)
-			return e
-		})
-		if err != nil {
-			return fail("accept", err)
+		var readErr error
+		profile, _, readErr = s.store.MailAccountCredential(email)
+		if readErr != nil {
+			return profile, readErr
 		}
-		profile, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.AcceptStatus = "completed" })
 	}
-	if profile.TransferStatus != "completed" {
-		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.TransferStatus = "running" })
-		err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error { _, e := userClient.Transfer(ctx, credentials.AccessToken, admin.TeamAccountID); return e })
-		if err != nil {
-			return fail("transfer", err)
-		}
-		now := time.Now()
-		profile, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
-			p.TransferStatus = "completed"
-			p.SpaceMergedOnce = true
-			p.SpaceMergedAt = &now
-		})
-	}
-	if profile.RemoveStatus != "completed" {
-		if profile.RemoveStatus != "team_removed" {
-			_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "running" })
-			unlockRemove := s.lockTeamAccountRemove(admin.TeamAccountID)
-			err = retryProStep(ctx, v.RetryCount, v.RetryIntervalSeconds, func() error {
-				_, e := adminClient.Kick(ctx, adminCreds.AccessToken, admin.TeamAccountID, profile.OAuthUserID)
-				return e
-			})
-			unlockRemove()
-			if err != nil {
-				return fail("remove", err)
-			}
-			profile, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "team_removed" })
-		}
-		// Pro leaves the Team after merging, but keeps its pushed Sub2/CPA account.
-		// Also finish legacy team_removed records without kicking or deleting again.
-		profile, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "completed" })
-	}
-	return s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.ProWorkflowRunning = false; p.ProLastError = "" })
+	// Pro keeps its Sub2/CPA account after leaving, including legacy cleanup states.
+	return s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "completed" })
 }
 
 func (s *Server) mergeProAccount(w http.ResponseWriter, r *http.Request) {
@@ -1051,7 +1075,11 @@ func firstProProfile(candidate, fallback model.MailAccountProfile) model.MailAcc
 }
 
 func (s *Server) auditProEvent(profile model.MailAccountProfile, operation, status, provider, message string, details map[string]any) {
-	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.TargetAdminID, Type: "pro_step", Source: "pro_management", Provider: provider, Operation: operation, Stage: operation, ToStatus: status, Message: message, Details: details})
+	level := "info"
+	if status == "failed" {
+		level = "error"
+	}
+	s.enqueueAuditEvent(model.AutoRotationEvent{AccountID: profile.ID, Email: profile.Email, AdminAccountID: profile.TargetAdminID, Type: "pro_step", Source: "pro_management", Provider: provider, Operation: operation, Stage: operation, ToStatus: status, Level: level, Message: message, Details: details})
 }
 func (s *Server) lockProTeam(adminID string) func() {
 	v, _ := s.autoAdminLocks.LoadOrStore(adminID, &sync.Mutex{})

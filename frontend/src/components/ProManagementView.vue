@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { BadgeCheck, CirclePlus, Clock3, FileKey2, Gauge, KeyRound, LoaderCircle, LogIn, RefreshCw, Rocket, RotateCcw, Search, Settings2, ShieldCheck, UsersRound, X } from 'lucide-vue-next'
+import { BadgeCheck, CirclePlus, Clock3, FileKey2, Gauge, History, KeyRound, LoaderCircle, LogIn, RefreshCw, Rocket, RotateCcw, Search, Settings2, ShieldCheck, UsersRound, X } from 'lucide-vue-next'
 import { api } from '../api'
 import { copyText } from '../clipboard'
 import { formatTime } from '../utils'
@@ -10,6 +10,7 @@ import StatusPill from './StatusPill.vue'
 import IconButton from './IconButton.vue'
 import AccountCredentialsDialog from './AccountCredentialsDialog.vue'
 import TemporaryATDialog from './TemporaryATDialog.vue'
+import ProAccountLogDialog from './ProAccountLogDialog.vue'
 
 const props = defineProps({ accounts: { type: Array, default: () => [] }, adminAccounts: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
 const emit = defineEmits(['reload'])
@@ -25,6 +26,7 @@ const selectedEmails = ref(new Set())
 const busy = ref('')
 const credentialViewer = ref(null)
 const temporaryAT = ref(null)
+const accountLogs = ref(null)
 const message = reactive({ text: '', type: '' })
 const oauth = reactive({ open: false, loading: false, sessionID: '', authURL: '', callbackURL: '', expiresAt: '', targetEmail: '' })
 const sub2Groups = ref([])
@@ -84,7 +86,7 @@ function schedulePoll(delay = 1500) {
 watch(activeTab, tab => { if (tab === 'accounts') schedulePoll(0) })
 function mergeStages(account) {
   const labels = { invite: '邀请空间', accept: '进入空间', transfer: '合并空间', remove: '移出空间' }
-  const states = { pending: '待处理', running: '执行中', completed: '成功', failed: '失败', team_removed: '已移出' }
+  const states = { not_started: '未开始', pending: '待处理', running: '执行中', completed: '成功', failed: '失败', team_removed: '已移出' }
   return Object.entries(labels).map(([key, label]) => {
     const status = account['pro_' + key + '_status'] || 'pending'
     return { key, label, status, text: states[status] || '待处理' }
@@ -95,6 +97,20 @@ function mergeActivity(account) {
   if (step) return step.label + '中'
   if (busy.value === 'merge:' + account.email) return '正在启动或续跑'
   return account.pro_workflow_running ? '流程执行中' : ''
+}
+async function saveMergeStage(account, step, event) {
+  const status = event.target.value
+  event.target.value = step.status
+  if (busy.value || account.pro_workflow_running) return
+  const labels = { not_started: '未开始', pending: '待处理', completed: '成功', failed: '失败' }
+  if (!window.confirm(`确认将 ${account.email} 的${step.label}修正为“${labels[status]}”？此操作仅修改本地状态，不会执行远程操作。请先确认实际结果，续跑时会跳过已成功步骤。`)) return
+  busy.value = `stage:${account.email}`
+  try {
+    await api(`/api/pro-accounts/${encodeURIComponent(account.email)}/stage`, { method: 'PUT', body: { stage: step.key, status, expected_status: account['pro_' + step.key + '_status'] || '' } })
+    await reload()
+    setMessage(`${step.label}已修正为${labels[status]}`, 'success')
+  } catch (error) { await loadPage().catch(() => {}); setMessage(error.message, 'error') }
+  finally { busy.value = '' }
 }
 function setPage(value) { page.value = value; selectedEmails.value = new Set(); loadPage() }
 function setPageSize(value) { pageSize.value = value; page.value = 1; selectedEmails.value = new Set(); loadPage() }
@@ -229,6 +245,7 @@ onBeforeUnmount(() => { disposed = true; listRequestID++; window.clearInterval(c
 
 <template>
   <section class="view-stack">
+    <ProAccountLogDialog ref="accountLogs" />
     <header class="page-heading">
       <div><span class="overline">PRO ACCOUNTS</span><h1>Pro 管理</h1><p>通过 Codex OAuth 管理 Pro 凭证、下游额度与自动空间合并</p></div>
       <div class="heading-actions"><span v-if="settings.quota_enabled" class="countdown"><Clock3 :size="14" />{{ countdown }}s 后检测</span><button v-if="activeTab === 'accounts'" class="btn primary" type="button" :disabled="!!busy" @click="beginOAuth()"><CirclePlus :size="15" />添加账号</button></div>
@@ -251,7 +268,7 @@ onBeforeUnmount(() => { disposed = true; listRequestID++; window.clearInterval(c
         <div class="account-toolbar"><div class="space-filter-tabs"><button :class="{ active: spaceFilter === 'all' }" @click="setSpaceFilter('all')">全部 <span>{{ listSummary.all }}</span></button><button :class="{ active: spaceFilter === 'unmerged' }" @click="setSpaceFilter('unmerged')">未空间合并 <span>{{ Math.max(0, listSummary.all - merged) }}</span></button><button :class="{ active: spaceFilter === 'merged' }" @click="setSpaceFilter('merged')">已空间合并 <span>{{ merged }}</span></button></div><div class="heading-actions"><label class="compact-search"><Search :size="14" /><input v-model="query" placeholder="搜索账号" /></label><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length || selectedAccounts.some(account => account.pro_workflow_running)" @click="requestTemporaryAT(selectedAccounts, true)"><KeyRound :size="14" />批量获取临时 AT</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="checkPlans"><RefreshCw :size="14" />识别套餐</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('push')"><Rocket :size="14" />批量推送</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('quota')"><Gauge :size="14" />批量查额度</button></div></div>
         <div class="table-shell"><table class="pro-table"><thead><tr><th><input type="checkbox" :checked="allVisibleSelected" @change="toggleVisible" /></th><th>账号</th><th>OAuth</th><th>套餐</th><th>推送</th><th>5小时</th><th>7天</th><th>空间合并</th><th>四步状态</th><th class="actions-column">操作</th></tr></thead><tbody>
           <tr v-if="!displayedAccounts.length"><td colspan="10" class="empty-cell">暂无符合条件的 Pro 账号</td></tr>
-<tr v-for="account in displayedAccounts" :key="account.email"><td><input type="checkbox" :checked="selectedEmails.has(account.email.toLowerCase())" @change="toggle(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ formatTime(account.pro_managed_at || account.updated_at) }}</small><small v-if="account.pro_last_error" class="danger-text" :title="account.pro_last_error">{{ account.pro_last_error }}</small></td><td><StatusPill :tone="statusTone(account.oauth_status)">{{ account.access_token_present && account.refresh_token_present ? 'AT / RT 完整' : '待授权' }}</StatusPill><small v-if="account.oauth_expires_at" class="table-note">{{ formatTime(account.oauth_expires_at) }}</small></td><td><StatusPill :tone="account.current_plan_type === 'pro' ? 'success' : 'pending'">{{ account.current_plan_type || '未识别' }}</StatusPill></td><td><StatusPill :tone="statusTone(account.push_status)">{{ account.push_status === 'completed' ? (account.push_provider || '-').toUpperCase() : account.push_status || '未推送' }}</StatusPill></td><td>{{ quotaLabel(account.quota_5h) }}</td><td>{{ quotaLabel(account.quota_7d) }}<small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td><td><StatusPill :tone="account.space_merged_once ? 'success' : 'pending'">{{ account.space_merged_once ? '已成功' : '未合并' }}</StatusPill></td><td class="flow-state"><div class="merge-stage-strip"><span v-for="step in mergeStages(account)" :key="step.key" class="merge-stage" :class="step.status" :data-stage="step.key" :title="`${step.label}：${step.text}`"><LoaderCircle v-if="step.status === 'running'" class="spin" :size="11" /><b>{{ { invite: '邀', accept: '进', transfer: '合', remove: '移' }[step.key] }}</b><small>{{ step.text }}</small></span></div><small v-if="mergeActivity(account)" class="merge-activity"><LoaderCircle class="spin" :size="11" />{{ mergeActivity(account) }}</small></td><td><div class="row-actions"><IconButton label="查看、复制和导出 AT / RT" @click="credentialViewer?.open(account)"><FileKey2 :size="15" /></IconButton><button class="icon-button" title="重新授权" :disabled="!!busy || account.pro_workflow_running" @click="beginOAuth(account)"><LogIn :size="15" /></button><button class="icon-button" title="登录获取 RT / AT" :disabled="!!busy || account.pro_workflow_running" @click="requestOAuthLogin(account)"><BadgeCheck :size="15" /></button><button class="icon-button" title="获取临时 AT" :disabled="!!busy || account.pro_workflow_running" @click="requestTemporaryAT([account])"><KeyRound :size="15" /></button><button class="icon-button" title="刷新 AT" :disabled="!!busy || account.pro_workflow_running || !account.refresh_token_present" @click="runOne(account, 'refresh')"><RefreshCw :size="15" /></button><button class="icon-button" title="推送当前下游" :disabled="!!busy || account.pro_workflow_running || !account.refresh_token_present" @click="runOne(account, 'push')"><Rocket :size="15" /></button><button class="icon-button" title="查询额度" :disabled="!!busy || account.pro_workflow_running || account.push_status !== 'completed'" @click="runOne(account, 'quota')"><Gauge :size="15" /></button><button class="icon-button" title="执行或续跑空间合并" :disabled="!!busy || account.pro_workflow_running || !account.refresh_token_present || account.pro_remove_status === 'completed'" @click="runOne(account, 'merge')"><LoaderCircle v-if="busy === `merge:${account.email}` || account.pro_workflow_running" class="spin" :size="15" /><ShieldCheck v-else :size="15" /></button><button class="icon-button" title="移回邮件管理" :disabled="!!busy || account.pro_workflow_running" @click="returnOne(account)"><RotateCcw :size="15" /></button></div></td></tr>
+<tr v-for="account in displayedAccounts" :key="account.email"><td><input type="checkbox" :checked="selectedEmails.has(account.email.toLowerCase())" @change="toggle(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ formatTime(account.pro_managed_at || account.updated_at) }}</small><small v-if="account.pro_last_error" class="danger-text" :title="account.pro_last_error">{{ account.pro_last_error }}</small></td><td><StatusPill :tone="statusTone(account.oauth_status)">{{ account.access_token_present && account.refresh_token_present ? 'AT / RT 完整' : '待授权' }}</StatusPill><small v-if="account.oauth_expires_at" class="table-note">{{ formatTime(account.oauth_expires_at) }}</small></td><td><StatusPill :tone="account.current_plan_type === 'pro' ? 'success' : 'pending'">{{ account.current_plan_type || '未识别' }}</StatusPill></td><td><StatusPill :tone="statusTone(account.push_status)">{{ account.push_status === 'completed' ? (account.push_provider || '-').toUpperCase() : account.push_status || '未推送' }}</StatusPill></td><td>{{ quotaLabel(account.quota_5h) }}</td><td>{{ quotaLabel(account.quota_7d) }}<small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td><td><StatusPill :tone="account.space_merged_once ? 'success' : 'pending'">{{ account.space_merged_once ? '已成功' : '未合并' }}</StatusPill></td><td class="flow-state"><div class="merge-stage-strip"><label v-for="step in mergeStages(account)" :key="step.key" class="merge-stage" :class="step.status" :data-stage="step.key" :title="`${step.label}：${step.text}`"><LoaderCircle v-if="step.status === 'running'" class="spin" :size="11" /><b>{{ { invite: '邀', accept: '进', transfer: '合', remove: '移' }[step.key] }}</b><select :value="step.status" :aria-label="`${step.label}阶段状态`" :disabled="!!busy || account.pro_workflow_running" @change="saveMergeStage(account, step, $event)"><option value="not_started">未开始</option><option value="pending">待处理</option><option v-if="step.status === 'running'" value="running" disabled>执行中</option><option v-if="step.status === 'team_removed'" value="team_removed" disabled>已移出</option><option value="completed">成功</option><option value="failed">失败</option></select></label></div><small v-if="mergeActivity(account)" class="merge-activity"><LoaderCircle class="spin" :size="11" />{{ mergeActivity(account) }}</small></td><td><div class="row-actions"><IconButton label="查看账号全流程日志" @click="accountLogs?.open(account)"><History :size="15" /></IconButton><IconButton label="查看、复制和导出 AT / RT" @click="credentialViewer?.open(account)"><FileKey2 :size="15" /></IconButton><button class="icon-button" title="重新授权" :disabled="!!busy || account.pro_workflow_running" @click="beginOAuth(account)"><LogIn :size="15" /></button><button class="icon-button" title="获取临时 AT" :disabled="!!busy || account.pro_workflow_running" @click="requestTemporaryAT([account])"><KeyRound :size="15" /></button><button class="icon-button" title="刷新 AT" :disabled="!!busy || account.pro_workflow_running || !account.refresh_token_present" @click="runOne(account, 'refresh')"><RefreshCw :size="15" /></button><button class="icon-button" title="登录获取 RT / AT" :disabled="!!busy || account.pro_workflow_running" @click="requestOAuthLogin(account)"><BadgeCheck :size="15" /></button><button class="icon-button" title="推送当前下游" :disabled="!!busy || account.pro_workflow_running || !account.refresh_token_present" @click="runOne(account, 'push')"><Rocket :size="15" /></button><button class="icon-button" title="查询额度" :disabled="!!busy || account.pro_workflow_running || account.push_status !== 'completed'" @click="runOne(account, 'quota')"><Gauge :size="15" /></button><button class="icon-button" title="执行或续跑空间合并" :disabled="!!busy || account.pro_workflow_running || ((!account.refresh_token_present) && (account.pro_accept_status !== 'completed' || account.pro_transfer_status !== 'completed')) || account.pro_remove_status === 'completed'" @click="runOne(account, 'merge')"><LoaderCircle v-if="busy === `merge:${account.email}` || account.pro_workflow_running" class="spin" :size="15" /><ShieldCheck v-else :size="15" /></button><button class="icon-button" title="移回邮件管理" :disabled="!!busy || account.pro_workflow_running" @click="returnOne(account)"><RotateCcw :size="15" /></button></div></td></tr>
         </tbody></table></div>
         <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="setPage" @update:page-size="setPageSize" />
       </section>
@@ -287,7 +304,8 @@ onBeforeUnmount(() => { disposed = true; listRequestID++; window.clearInterval(c
 .flow-state { white-space: nowrap; }
 .merge-stage-strip { display: flex; gap: 5px; }
 .merge-stage { display: inline-flex; gap: 4px; align-items: center; padding: 5px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 10px; }
-.merge-stage small { font-size: 9px; }
+.merge-stage select { width: 54px; min-width: 0; border: 0; padding: 0; background: transparent; color: inherit; font-size: 10px; cursor: pointer; }
+.merge-stage select:disabled { cursor: default; }
 .merge-stage.completed, .merge-stage.team_removed { border-color: rgba(37,143,97,.35); background: var(--green-bg); color: var(--green-strong); }
 .merge-stage.running { border-color: var(--amber); background: var(--amber-bg); color: var(--amber); }
 .merge-stage.failed { border-color: var(--red); background: var(--red-bg); color: var(--red); }

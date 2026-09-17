@@ -90,6 +90,7 @@ type executionLogExport struct {
 	ExportedAt    time.Time                 `json:"exported_at"`
 	Retention     string                    `json:"retention"`
 	Account       *model.FreeAccountProfile `json:"account,omitempty"`
+	ProAccount    *model.MailAccountProfile `json:"pro_account,omitempty"`
 	LifecycleTask *model.AutoRotationTask   `json:"lifecycle_task,omitempty"`
 	Events        []model.AutoRotationEvent `json:"events"`
 }
