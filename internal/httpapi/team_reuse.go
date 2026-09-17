@@ -50,7 +50,7 @@ func (s *Server) reviewTeamHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func reusableAccount(p model.FreeAccountProfile) bool {
-	return !p.Dead && !p.HistoryUncertain && p.RemoveStatus == "completed" && p.VisitedTeamCount > 0
+	return !p.Dead && !p.Quality.Excluded && !p.HistoryUncertain && p.RemoveStatus == "completed" && p.VisitedTeamCount > 0
 }
 
 // Callers hold the account lock; the removal lock also covers emergency manual removal.

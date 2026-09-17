@@ -154,12 +154,13 @@ func (s *Store) BeginFreeAccountCycle(id, expectedCycle, sourceToken string) (mo
 	if p.CycleID != expectedCycle {
 		return p, ErrStaleCycle
 	}
-	if p.Dead || p.HistoryUncertain || p.RemoveStatus != "completed" || !p.DownstreamCleaned {
+	if p.Dead || p.Quality.Excluded || p.HistoryUncertain || p.RemoveStatus != "completed" || !p.DownstreamCleaned {
 		return p, errors.New("账号未清理完成、历史未确认或已判死号，不能复用")
 	}
 	before := p
 	// Keep identity, original list timestamps, lifetime costs and visit history.
 	p = model.FreeAccountProfile{ID: p.ID, Label: p.Label, Email: p.Email, Name: p.Name, UserID: p.UserID,
+		Quality:           nextCycleQuality(before.Quality),
 		PersonalAccountID: p.PersonalAccountID, PlanType: p.PlanType, CreatedAt: p.CreatedAt, ImportedAt: p.ImportedAt,
 		VisitedTeamCount: p.VisitedTeamCount, TotalCostUSD: p.TotalCostUSD, TotalUserCostUSD: p.TotalUserCostUSD,
 		CostByAdmin: p.CostByAdmin, UserCostByAdmin: p.UserCostByAdmin, CostCheckedAt: p.CostCheckedAt, ReloginCount: p.ReloginCount,

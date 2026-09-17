@@ -98,6 +98,7 @@ func (s *Store) initSchema() error {
 		CREATE TABLE IF NOT EXISTS settings (
 			id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS quality_settings (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS proxies (
 			id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, url TEXT NOT NULL,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL

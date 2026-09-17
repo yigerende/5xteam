@@ -259,6 +259,10 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auditAccountEvent(r.Context(), profile.ID, "join", "invite", "manual_single", "", "开始邀请/进入空间", map[string]any{"seat_type": input.SeatType, "admin_account_id": input.AdminAccountID})
+	if profile.Quality.Excluded {
+		writeAPI(w, http.StatusConflict, nil, "该账号已因降智检测停用，请先人工恢复")
+		return
+	}
 	if profile.Dead {
 		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不能再次进入空间")
 		return
@@ -1291,6 +1295,10 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusConflict, nil, "该账号已判定为死号，不再推送到 Sub2")
 		return
 	}
+	if profile.Quality.Excluded {
+		writeAPI(w, 409, nil, "该账号已因降智检测停用")
+		return
+	}
 	if profile.RemoveStatus == "completed" || profile.RemoteRemovedAt != nil {
 		writeAPI(w, 409, nil, "账号已退出空间，请先完成下一轮进入及授权")
 		return
@@ -1344,6 +1352,21 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusOK, profile, "")
 		return
 	}
+	pushQuality := profile.Quality
+	if profile.Quality.Degraded {
+		quality, qualityErr := s.store.QualitySettings()
+		if qualityErr != nil || len(quality.DegradedGroupIDs) == 0 {
+			writeAPI(w, 409, nil, "该账号已标记降智，请配置降智分组或人工恢复后再推送")
+			return
+		}
+		pushQuality.RemovedGroups = intersectQualityGroups(settings.GroupIDs, quality.NormalGroupIDs)
+		pushQuality.AddedGroups = transformQualityGroups(quality.DegradedGroupIDs, settings.GroupIDs, nil)
+		pushQuality.AssignGroups = append([]int64{}, quality.DegradedGroupIDs...)
+		pushQuality.PlanReady = true
+		settings.GroupIDs = transformQualityGroups(settings.GroupIDs, quality.NormalGroupIDs, quality.DegradedGroupIDs)
+		pushQuality.TargetGroups = append([]int64{}, settings.GroupIDs...)
+		settings.GroupNames = nil
+	}
 	if profile.OAuthStatus != "completed" || credentials.OAuthAccessToken == "" || credentials.OAuthRefreshToken == "" {
 		writeAPI(w, http.StatusConflict, nil, "请先绑定完整的 Codex OAuth Access Token 和 Refresh Token")
 		return
@@ -1388,6 +1411,12 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		item.PushProvider = "sub2"
 		item.CPAAuthFileName = ""
 		item.Sub2AccountID, item.Sub2AccountName = created.ID, created.Name
+		if item.Quality.Degraded {
+			item.Quality = pushQuality
+			item.Quality.Routed = true
+			item.Quality.RouteURL, item.Quality.RouteAccountID = settings.URL, created.ID
+			item.Quality.Action, item.Quality.ActionStatus = "groups", "completed"
+		}
 		item.StatusCheckedAt = nil
 		item.Sub2GroupIDs, item.Sub2GroupNames = append([]int64(nil), settings.GroupIDs...), append([]string(nil), settings.GroupNames...)
 		if len(settings.GroupIDs) > 0 {
@@ -2088,14 +2117,8 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 		item.CPAAuthFileName = ""
 		item.Sub2AccountID, item.Sub2AccountName = oldAccountID, updatedName
 		item.StatusCheckedAt = nil
+		item.Quality.NextAt = nil
 		clearReloginFailures(item)
-		item.Sub2GroupIDs, item.Sub2GroupNames = append([]int64(nil), settings.GroupIDs...), append([]string(nil), settings.GroupNames...)
-		if len(settings.GroupIDs) > 0 {
-			item.Sub2GroupID = settings.GroupIDs[0]
-		}
-		if len(settings.GroupNames) > 0 {
-			item.Sub2GroupName = settings.GroupNames[0]
-		}
 		item.PushedAt, item.ReloginCount = &now, item.ReloginCount+1
 	})
 	if err == nil && profile.ReloginFailureCount > 0 {
@@ -2234,7 +2257,7 @@ func (s *Server) performFreeAccountRemoval(ctx context.Context, id string, force
 func removalMethodForCycle(profile model.FreeAccountProfile, settings model.AutoRotationSettings) string {
 	// A dead child account can no longer authenticate with its own AT. Always
 	// remove it through the mother account, regardless of the cycle setting.
-	if profile.Dead {
+	if profile.Dead || profile.Quality.Excluded {
 		return "mother_kick"
 	}
 	// Exhausted 401 relogins mean the child AT could not be renewed, so a

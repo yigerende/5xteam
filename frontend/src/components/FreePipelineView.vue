@@ -16,6 +16,7 @@ import Pagination from './Pagination.vue'
 import TeamVisitCount from './TeamVisitCount.vue'
 import AutoRotationView from './AutoRotationView.vue'
 import ExecutionHistoryView from './ExecutionHistoryView.vue'
+import QualitySettingsView from './QualitySettingsView.vue'
 
 const props = defineProps({
   accounts: { type: Array, default: () => [] },
@@ -70,6 +71,67 @@ const joinOpen = ref(false)
 const fileInput = ref(null)
 const folderInput = ref(null)
 const teamMenu = ref('accounts')
+const qualityStatus = ref(null)
+const qualityHistoryOnly = ref(false)
+const qualityClockAnchor = ref({ server: 0, local: 0 })
+let qualityLoading = false
+async function loadQualityStatus() {
+  if (qualityLoading) return
+  qualityLoading = true
+  try {
+    const data = await api('/api/quality/settings')
+    qualityStatus.value = data
+    qualityClockAnchor.value = { server: Date.parse(data.server_now), local: performance.now() }
+  } catch (error) { console.warn('降智检测状态加载失败', error) }
+  finally { qualityLoading = false }
+}
+function qualityCountdownValue(modelCheck = false) {
+  clock.value
+  const value = qualityStatus.value
+  if (!value) return '加载中'
+  if (!value.settings?.enabled || !(modelCheck ? value.settings?.model_audit_enabled : value.settings?.question_enabled)) return '已关闭'
+  if (value.inactive_reason) return '仅支持 Sub2'
+  const runtime = modelCheck ? value.model_runtime : value.runtime
+  if (runtime?.running) return '检测中 ' + runtime.done + '/' + runtime.total
+  if (!value.eligible) return '暂无账号'
+  const next = Date.parse(modelCheck ? value.model_next_at : value.next_at)
+  const now = qualityClockAnchor.value.server + performance.now() - qualityClockAnchor.value.local
+  const remaining = Math.ceil((next - now) / 1000)
+  return remaining > 0 ? remaining + 's' : '即将检测'
+}
+const qualityCountdown = computed(() => qualityCountdownValue())
+const qualityModelCountdown = computed(() => qualityCountdownValue(true))
+function qualityText(account) {
+  const state = account.quality || {}
+  const labels = { unknown: '未检测', normal: '正常', suspect: '疑似异常', degraded: '降智', error: '检测失败' }
+  if (!qualityStatus.value?.settings?.question_enabled) return '未开启'
+  return labels[state.question_status || state.status] || '未检测'
+}
+function qualityModelText(account) {
+  if (!qualityStatus.value?.settings?.model_audit_enabled) return '未开启'
+  const a = account.quality?.model_audit || {}
+  return ({normal:'一致',variant:'版本差异',suspect:'不一致',no_samples:'暂无样本',unknown:'无法判断',error:'查询失败'})[a.status] || '未检测'
+}
+function qualityModelTitle(account) {
+  const a = account.quality?.model_audit || {}
+  return ['发送：' + (a.sent_model || '-'), '响应：' + (a.response_model || '-'), '样本：' + formatTime(a.sample_at), a.error || ''].join('\n')
+}
+async function restoreQuality(account) {
+  if (!window.confirm('确认人工恢复该账号的降智状态？已切组账号将恢复此前正常分组；已移出账号只解除停用，不会重新进入空间。')) return
+  try {
+    await api('/api/free-accounts/' + encodeURIComponent(account.id) + '/quality/restore', { method: 'POST' })
+    setMessage('降智状态已恢复', 'success')
+    await refreshLiveAccounts()
+  } catch (error) { setMessage(error.message, 'error') }
+}
+async function probeQuality(account) {
+  if (!window.confirm('按已保存设置检测账号；答题消耗实际额度，模型检查只读日志。达到异常阈值后将踢出或切组。继续？')) return
+  try {
+    await api('/api/free-accounts/' + encodeURIComponent(account.id) + '/quality/probe', { method: 'POST' })
+    setMessage('已启动后台降智检测', 'success')
+    await loadQualityStatus()
+  } catch (error) { setMessage(error.message, 'error') }
+}
 const pipelineMenu = reactive({ account: null, top: 0, left: 0, open: false })
 let pipelineMenuCloseTimer
 const capacityCacheKey = 'space-console-admin-capacities-v1'
@@ -175,7 +237,7 @@ function countdownText(value, disabled = false) {
   return `${value}s`
 }
 
-const stageLabels = { invite: '邀请', accept: '进入', oauth: '授权', push: '推送', quota: '额度', remove: '移出' }
+const stageLabels = { invite: '邀请', accept: '进入', oauth: '授权', push: '推送', quota: '额度', remove: '移出', quality: '降智检测' }
 function stageLabel(key, account) {
   if (key === 'remove' && activities[account?.id]?.action === 'remove') return '移出'
   if (account?.join_method === 'child_request') {
@@ -401,8 +463,9 @@ async function refreshLiveAccounts() {
 function setAccountPage(value) { page.value = value; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
 function setAccountPageSize(value) { pageSize.value = value; page.value = 1; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
 function setTeamSpaceFilter(value) { teamSpaceFilter.value = teamSpaceFilter.value === value ? '' : value; page.value = 1; selectedAccountIDs.value = new Set(); refreshLiveAccounts() }
-async function openLifecycle(account) {
+async function openLifecycle(account, qualityOnly = false) {
   closeLifecycle()
+  qualityHistoryOnly.value = qualityOnly
   Object.assign(lifecycleView, { account, events: [], task: null, loading: true, loadingMore: false, hasMore: false, cursor: '', error: '' })
   const generation = lifecycleGeneration
   await nextTick()
@@ -430,7 +493,8 @@ async function loadLifecyclePage(initial = false) {
   try {
     const params = new URLSearchParams({ limit: '50' })
     if (!initial && lifecycleView.cursor) params.set('cursor', lifecycleView.cursor)
-    const result = await api(`/api/free-accounts/${encodeURIComponent(account.id)}/events?${params}`, { signal: controller.signal })
+    const route = qualityHistoryOnly.value ? 'quality/history' : `events?${params}`
+    const result = await api(`/api/free-accounts/${encodeURIComponent(account.id)}/${route}`, { signal: controller.signal })
     if (generation !== lifecycleGeneration) return
     if (initial) {
       lifecycleView.account = result.account || account
@@ -885,9 +949,9 @@ function quotaText(window) {
 let clockTimer
 let liveRefreshTimer
 onMounted(async () => {
-  await Promise.all([loadPushSettings(), loadSub2(), refreshLiveAccounts()])
+  await Promise.all([loadPushSettings(), loadSub2(), refreshLiveAccounts(), loadQualityStatus()])
   clockTimer = window.setInterval(() => { clock.value = Date.now() }, 1000)
-  liveRefreshTimer = window.setInterval(() => { if (props.active) refreshLiveAccounts().catch(() => {}) }, 10000)
+  liveRefreshTimer = window.setInterval(() => { if (props.active) { refreshLiveAccounts().catch(() => {}); loadQualityStatus() } }, 10000)
 })
 onBeforeUnmount(() => window.clearInterval(clockTimer))
 onBeforeUnmount(() => window.clearInterval(liveRefreshTimer))
@@ -908,6 +972,7 @@ onBeforeUnmount(closeLifecycle)
       <button type="button" :class="{ active: teamMenu === 'accounts' }" @click="teamMenu = 'accounts'"><Waypoints :size="14" />账号管理</button>
       <button type="button" :class="{ active: teamMenu === 'import' }" @click="teamMenu = 'import'"><Upload :size="14" />导入 Free 账号</button>
       <button type="button" :class="{ active: teamMenu === 'sub2' }" @click="teamMenu = 'sub2'"><Send :size="14" />推送设置</button>
+      <button type="button" :class="{ active: teamMenu === 'quality' }" @click="teamMenu = 'quality'"><Gauge :size="14" />降智检测设置</button>
       <button type="button" :class="{ active: teamMenu === 'auto' }" @click="teamMenu = 'auto'"><RefreshCw :size="14" />全自动轮转</button>
       <button type="button" :class="{ active: teamMenu === 'history' }" @click="teamMenu = 'history'"><History :size="14" />执行历史</button>
     </nav>
@@ -973,12 +1038,13 @@ onBeforeUnmount(closeLifecycle)
     </form>
 
     <AutoRotationView v-if="teamMenu === 'auto'" :admin-accounts="adminAccounts" :default-page-size="defaultPageSize" />
+    <QualitySettingsView v-if="teamMenu === 'quality'" :provider="pushProvider" :status="qualityStatus" @saved="loadQualityStatus" />
     <ExecutionHistoryView v-if="teamMenu === 'history'" :default-page-size="defaultPageSize" />
 
     <MessageBar :message="message" />
 
     <section v-if="teamMenu === 'accounts'" class="panel list-panel free-list">
-      <div class="panel-title responsive"><div><span>PIPELINE</span><h2>账号流程状态</h2></div><div class="heading-actions"><StatusPill v-if="activeActivities.length" tone="running"><LoaderCircle class="spin" :size="12" />执行中 {{ activeActivities.length }}</StatusPill><div class="monitor-countdowns" title="后台监控任务倒计时"><span class="countdown-pill status-countdown">401 检测 <strong>{{ countdownText(statusCountdown, pushProvider === 'cpa' ? !cpaForm.enable401Check : !sub2Form.enable401Check) }}</strong></span><span class="countdown-pill quota-countdown">额度 / 移出 <strong>{{ countdownText(quotaCountdown, !activeQuotaEnabled) }}</strong></span></div><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('relogin')"><RefreshCw :size="15" />批量重登<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('oauth')"><KeyRound :size="15" />批量授权<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('push')"><Send :size="15" />批量推送 {{ activeProviderLabel }}<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('quota')"><Gauge :size="15" />批量查额度<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('remove')"><Unplug :size="15" />批量移出<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="removeSelectedRecords"><Trash2 :size="15" />批量删除<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button></div></div>
+      <div class="panel-title responsive"><div><span>PIPELINE</span><h2>账号流程状态</h2></div><div class="heading-actions"><StatusPill v-if="activeActivities.length" tone="running"><LoaderCircle class="spin" :size="12" />执行中 {{ activeActivities.length }}</StatusPill><div class="monitor-countdowns" title="后台监控任务倒计时"><span class="countdown-pill status-countdown">401 检测 <strong>{{ countdownText(statusCountdown, pushProvider === 'cpa' ? !cpaForm.enable401Check : !sub2Form.enable401Check) }}</strong></span><span class="countdown-pill quota-countdown">额度 / 移出 <strong>{{ countdownText(quotaCountdown, !activeQuotaEnabled) }}</strong></span><span v-if="qualityStatus?.settings?.enabled && qualityStatus?.settings?.question_enabled" class="countdown-pill quality-countdown">题目检测 <strong>{{ qualityCountdown }}</strong></span><span v-if="qualityStatus?.settings?.enabled && qualityStatus?.settings?.model_audit_enabled" class="countdown-pill quality-countdown">模型检查 <strong>{{ qualityModelCountdown }}</strong></span></div><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('relogin')"><RefreshCw :size="15" />批量重登<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('oauth')"><KeyRound :size="15" />批量授权<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('push')"><Send :size="15" />批量推送 {{ activeProviderLabel }}<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn ghost" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('quota')"><Gauge :size="15" />批量查额度<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="runSelectedPipelineTask('remove')"><Unplug :size="15" />批量移出<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button><button class="btn danger" type="button" :disabled="!!busy || !selectedPipelineAccounts.length" @click="removeSelectedRecords"><Trash2 :size="15" />批量删除<span v-if="selectedPipelineAccounts.length">（{{ selectedPipelineAccounts.length }}）</span></button></div></div>
       <div v-if="activeActivities.length" class="execution-list" aria-live="polite">
         <div v-for="activity in activeActivities" :key="activity.id" class="execution-item">
           <LoaderCircle class="spin" :size="18" />
@@ -993,8 +1059,8 @@ onBeforeUnmount(closeLifecycle)
         <button type="button" :class="{ active: teamSpaceFilter === 'removed' }" @click="setTeamSpaceFilter('removed')">已使用过 <span>{{ accountSummary.removed }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'dead' }" @click="setTeamSpaceFilter('dead')">死号 <span>{{ accountSummary.dead || 0 }}</span></button>
       </div>
-      <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>消耗额度</th><th>5小时</th><th>7天</th><th>移出策略</th><th>重登成功 / 连续失败</th><th>进入母号数</th><th class="actions-column">操作</th></tr></thead><tbody>
-        <tr v-if="!displayedAccounts.length"><td colspan="11" class="empty-cell">暂无 Free 账号</td></tr>
+      <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>消耗额度</th><th>5小时</th><th>7天</th><th>智商情况</th><th>移出策略</th><th>重登成功 / 连续失败</th><th>进入母号数</th><th class="actions-column">操作</th></tr></thead><tbody>
+        <tr v-if="!displayedAccounts.length"><td colspan="12" class="empty-cell">暂无 Free 账号</td></tr>
         <tr v-for="account in displayedAccounts" :key="account.id" :class="{ 'row-running': activityFor(account), 'row-highlighted': entryEmail && account.email === entryEmail }">
           <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="account.dead" class="danger-text" :title="account.dead_reason">死号{{ account.remove_status === 'completed' ? ' · 已自动移出空间' : ' · 自动移出失败' }}</small><small v-else-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>
           <td><small class="table-note">{{ account.imported_at ? formatTime(account.imported_at) : '未知' }}</small></td>
@@ -1002,6 +1068,14 @@ onBeforeUnmount(closeLifecycle)
           <td class="cost-cell"><strong>{{ costText(account) }}</strong><small v-if="String(account.push_provider || '').toLowerCase() !== 'cpa'" class="table-note user-cost" title="当前用户消耗额度">{{ userCostText(account) }}</small><small v-if="account.cost_checked_at && account.push_provider !== 'cpa'" class="table-note">{{ formatTime(account.cost_checked_at) }}</small><small v-else-if="account.push_provider === 'cpa'" class="table-note">CPA 不统计</small></td>
           <td><strong>{{ quotaText(account.quota_5h) }}</strong><small v-if="account.quota_5h" class="table-note">剩余</small></td>
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>
+          <td class="quality-cell">
+            <strong :class="{ 'danger-text': account.quality?.question_degraded }" :title="account.quality?.answer">题目：{{ qualityStatus?.runtime?.active?.[account.id] ? '检测中' : qualityText(account) }}</strong>
+            <small v-if="account.quality?.checked_at && qualityStatus?.settings?.question_enabled" class="table-note">{{ account.quality.question_name }} · {{ account.quality.duration_ms }} ms · 异常 {{ account.quality.failures || 0 }}/{{ qualityStatus?.settings?.failure_limit || 2 }}</small>
+            <strong class="quality-model-line" :class="{ 'danger-text': account.quality?.model_audit?.failures > 0 }" :title="qualityModelTitle(account)">模型：{{ qualityModelText(account) }}</strong>
+            <small v-if="qualityStatus?.settings?.model_audit_enabled" class="table-note" :title="qualityModelTitle(account)">{{ qualityStatus.settings.model_audit_model }} · 异常 {{ account.quality?.model_audit?.failures || 0 }}/{{ qualityStatus.settings.failure_limit }}<template v-if="account.quality?.model_audit?.no_new_samples"> · 无新样本</template></small>
+            <small v-if="account.quality?.excluded" class="danger-text">降智停用</small><small v-else-if="account.quality?.routed" class="table-note">降智分组</small>
+            <small v-if="account.quality?.action_status === 'failed'" class="danger-text">处理失败，等待重试</small><small v-if="account.quality?.error" class="table-note" :title="account.quality.error">{{ account.quality.error }}</small>
+          </td>
           <td><div class="policy-control"><select :value="account.exhaustion_policy || '7d'" :disabled="isAccountBusy(account)" @change="savePolicy(account, { policy: $event.target.value })"><option value="5h">5小时耗尽</option><option value="7d">7天耗尽</option></select><label class="mini-toggle" title="自动移出"><input type="checkbox" :checked="account.auto_remove" :disabled="isAccountBusy(account) || account.remove_status === 'completed'" @change="savePolicy(account, { autoRemove: $event.target.checked })" /><i></i><span>自动</span></label></div><small class="table-note">{{ removeMethodText(account) }}</small><small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td>
           <td><strong>{{ account.relogin_count || 0 }} / {{ account.relogin_failure_count || 0 }}</strong><small class="table-note">成功 / 失败阈值 {{ activeReloginFailureLimit }}</small></td>
           <td><TeamVisitCount :email="account.email" :count="account.visited_team_count" :uncertain="account.history_uncertain" /></td>
@@ -1013,6 +1087,9 @@ onBeforeUnmount(closeLifecycle)
     <Teleport to="body">
       <div v-if="pipelineMenu.open && pipelineMenu.account" class="pipeline-action-menu" :style="{ top: `${pipelineMenu.top}px`, left: `${pipelineMenu.left}px` }" @mouseenter="keepPipelineMenuOpen" @mouseleave="closePipelineMenu()">
         <button type="button" @click="runPipelineMenuAction('lifecycle')"><History :size="14" />查看账号全流程</button>
+        <button type="button" @click="openLifecycle(pipelineMenu.account, true); pipelineMenu.open = false"><History :size="14" />查看降智检测记录</button>
+        <button type="button" :disabled="!qualityStatus?.settings?.enabled || pushProvider !== 'sub2' || qualityStatus?.runtime?.running || qualityStatus?.model_runtime?.running || pipelineMenu.account.accept_status !== 'completed' || pipelineMenu.account.push_status !== 'completed' || pipelineMenu.account.remove_status === 'completed' || pipelineMenu.account.dead" @click="probeQuality(pipelineMenu.account); pipelineMenu.open = false"><Gauge :size="14" />检测智商</button>
+        <button v-if="pipelineMenu.account.quality?.degraded || pipelineMenu.account.quality?.excluded" type="button" @click="restoreQuality(pipelineMenu.account); pipelineMenu.open = false"><RefreshCw :size="14" />恢复降智状态 / 分组</button>
         <button v-if="pipelineMenu.account.history_uncertain" type="button" @click="openHistoryReview(pipelineMenu.account); pipelineMenu.open = false"><History :size="14" />核对历史空间</button>
         <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || joinCapacityRefreshing || !adminAccounts.length" @click="runPipelineMenuAction('join')"><DoorOpen :size="14" />{{ joinActionLabel(pipelineMenu.account) }}</button>
         <button type="button" :disabled="pipelineMenu.account.dead || isAccountBusy(pipelineMenu.account) || pipelineMenu.account.accept_status !== 'completed' || pipelineMenu.account.remove_status === 'completed'" @click="runPipelineMenuAction('oauth')"><KeyRound :size="14" />获取 Codex AT / RT</button>
@@ -1028,7 +1105,7 @@ onBeforeUnmount(closeLifecycle)
 
     <div v-if="lifecycleView.account" class="modal-backdrop" @click.self="closeLifecycle" @keydown.esc="closeLifecycle">
       <section ref="lifecycleScrollRoot" class="modal lifecycle-modal" role="dialog" aria-modal="true" aria-label="账号执行日志" tabindex="-1">
-        <div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>{{ lifecycleView.hasMore ? '已加载' : '共' }} {{ lifecycleView.events.length }} 条记录</p></div><div class="heading-actions"><IconButton label="刷新账号日志" :disabled="lifecycleView.loading || lifecycleView.loadingMore" @click="openLifecycle(lifecycleView.account)"><RefreshCw :size="15" /></IconButton><button class="btn ghost" type="button" @click="exportAccountLogs()"><Download :size="15" />导出账号日志</button><IconButton label="关闭" @click="closeLifecycle"><X :size="16" /></IconButton></div></div>
+        <div class="modal-heading"><div><span class="overline">ACCOUNT LIFECYCLE</span><h2>{{ lifecycleView.account.email }}</h2><p>{{ lifecycleView.hasMore ? '已加载' : '共' }} {{ lifecycleView.events.length }} 条记录</p></div><div class="heading-actions"><IconButton label="刷新账号日志" :disabled="lifecycleView.loading || lifecycleView.loadingMore" @click="openLifecycle(lifecycleView.account, qualityHistoryOnly)"><RefreshCw :size="15" /></IconButton><button class="btn ghost" type="button" @click="exportAccountLogs()"><Download :size="15" />导出账号日志</button><IconButton label="关闭" @click="closeLifecycle"><X :size="16" /></IconButton></div></div>
         <div v-if="lifecycleView.loading" class="lifecycle-loading">正在加载执行记录…</div>
         <template v-else>
           <div class="lifecycle-summary"><span>进入时间：{{ formatTime(lifecycleView.account.imported_at) }}</span><span>当前状态：{{ lifecycleView.account.status || '-' }}</span><span>当前线路：{{ lifecycleView.account.push_provider || activeProviderLabel }}</span><span>重登成功：{{ lifecycleView.account.relogin_count || 0 }} 次</span><span>连续失败：{{ lifecycleView.account.relogin_failure_count || 0 }} / {{ activeReloginFailureLimit }}</span><span>最近 OAuth 登录：{{ lifecycleLoginSummary }}</span></div>
@@ -1064,8 +1141,11 @@ onBeforeUnmount(closeLifecycle)
 .metric-refresh-button:hover:not(:disabled) { border-color: var(--green); color: var(--green-strong); }
 .metric-refresh-button:disabled { cursor: wait; opacity: .6; }
 .free-config-grid { display: grid; grid-template-columns: minmax(360px, .9fr) minmax(560px, 1.1fr); gap: 16px; align-items: stretch; }
-.team-subnav { display: flex; align-items: center; gap: 6px; padding: 4px; border-bottom: 1px solid var(--line); }
-.team-subnav button { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 12px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; }
+.view-stack { grid-template-columns: minmax(0, 1fr); }
+.view-stack > *, .page-heading > div { min-width: 0; }
+.page-heading p { white-space: normal; overflow-wrap: anywhere; }
+.team-subnav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px; border-bottom: 1px solid var(--line); }
+.team-subnav button { display: inline-flex; flex-shrink: 0; white-space: nowrap; align-items: center; gap: 7px; min-height: 34px; padding: 0 12px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; }
 .team-subnav button:hover { background: var(--surface-2); color: var(--text-2); }
 .team-subnav button.active { border-color: rgba(37, 143, 97, .25); background: var(--green-bg); color: var(--green-strong); }
 .push-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
@@ -1105,7 +1185,12 @@ onBeforeUnmount(closeLifecycle)
 .group-picker label small, .group-picker > p { color: var(--muted); font-size: 10px; }
 .group-picker > p { grid-column: 1 / -1; padding: 9px; }
 .free-list { overflow: hidden; contain: layout paint; }
-.free-list table { min-width: 1280px; }
+.free-list table { min-width: 1440px; }
+.quality-cell { min-width: 140px; max-width: 220px; }
+.quality-cell small { overflow-wrap: anywhere; white-space: normal; }
+.quality-cell strong { display: block; font-size: 12px; }
+.quality-model-line { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+.quality-countdown strong { color: var(--green, #32856b); }
 .cost-cell { font-variant-numeric: tabular-nums; }
 .cost-cell .user-cost { color: var(--text-2); font-size: 10px; }
 .pipeline-action-menu { position: fixed; z-index: 1000; display: grid; width: 218px; gap: 2px; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-elevated); box-shadow: 0 12px 30px rgba(0, 0, 0, .18); }

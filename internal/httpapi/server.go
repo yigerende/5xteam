@@ -24,62 +24,73 @@ import (
 )
 
 type Server struct {
-	mailInfoMu        sync.Mutex
-	mailInfoWG        sync.WaitGroup
-	mailInfoJobs      map[string]*mailInfoJob
-	mailInfoActive    map[string]*mailInfoTask
-	mailInfoSlots     chan struct{}
-	mailInfoClosed    bool
-	mailInfoRefresh   func(context.Context, model.Settings, string) model.MailGPTInfoResult
-	store             *store.Store
-	jobs              *workflow.Manager
-	static            fs.FS
-	refreshMu         sync.Mutex
-	freeLocks         sync.Map
-	freeRemoveLocks   sync.Map
-	teamRemoveLocks   sync.Map
-	sub2              *sub2.Client
-	cpa               *cpa.Client
-	registrationMu    sync.RWMutex
-	registrationJobs  map[string]map[string]any
-	mailFetchMu       sync.RWMutex
-	mailFetchJobs     map[string]map[string]any
-	oauthMu           sync.RWMutex
-	oauthJobs         map[string]map[string]any
-	oauthProxyMu      sync.Mutex
-	heroAccountLocks  sync.Map
-	oauthProxyActive  map[string]int
-	oauthProxyCursor  uint64
-	planCheckMu       sync.Mutex
-	planCheckNext     time.Time
-	proLocks          sync.Map
-	proMergeMu        sync.Mutex
-	proMergeWG        sync.WaitGroup
-	proMergeJobs      map[string]context.CancelFunc
-	proMergeClosed    bool
-	proMergeRunning   int
-	proMonitorMu      sync.Mutex
-	proMonitorRunning bool
-	mail              *mailbridge.Client // retained for API compatibility; local mail flows never call it
-	authMu            sync.Mutex
-	sessions          map[string]time.Time
-	autoMu            sync.Mutex
-	autoAdminLocks    sync.Map
-	seatAssignmentMu  sync.Mutex
-	accountCycles     sync.Map
-	autoRunning       bool
-	auditQueue        chan model.AutoRotationEvent
-	auditWG           sync.WaitGroup
-	auditStop         chan struct{}
-	auditCloseOnce    sync.Once
-	auditFlush        chan chan error
-	auditDone         chan struct{}
-	auditStartedAt    time.Time
-	auditDropped      atomic.Uint64
-	auditWriteErrors  atomic.Uint64
-	auditErrorMu      sync.Mutex
-	auditLastError    string
-	auditShutdownErr  error
+	qualityRunMu              sync.Mutex
+	qualityModelRunMu         sync.Mutex
+	qualityModelLastRequest   time.Time
+	qualityModelRuntime       qualityRuntime
+	qualityMu                 sync.Mutex
+	qualityRuntime            qualityRuntime
+	qualityClosed             bool
+	qualityCancel             context.CancelFunc
+	qualityMonitorCancel      context.CancelFunc
+	qualityModelMonitorCancel context.CancelFunc
+	qualityWG                 sync.WaitGroup
+	mailInfoMu                sync.Mutex
+	mailInfoWG                sync.WaitGroup
+	mailInfoJobs              map[string]*mailInfoJob
+	mailInfoActive            map[string]*mailInfoTask
+	mailInfoSlots             chan struct{}
+	mailInfoClosed            bool
+	mailInfoRefresh           func(context.Context, model.Settings, string) model.MailGPTInfoResult
+	store                     *store.Store
+	jobs                      *workflow.Manager
+	static                    fs.FS
+	refreshMu                 sync.Mutex
+	freeLocks                 sync.Map
+	freeRemoveLocks           sync.Map
+	teamRemoveLocks           sync.Map
+	sub2                      *sub2.Client
+	cpa                       *cpa.Client
+	registrationMu            sync.RWMutex
+	registrationJobs          map[string]map[string]any
+	mailFetchMu               sync.RWMutex
+	mailFetchJobs             map[string]map[string]any
+	oauthMu                   sync.RWMutex
+	oauthJobs                 map[string]map[string]any
+	oauthProxyMu              sync.Mutex
+	heroAccountLocks          sync.Map
+	oauthProxyActive          map[string]int
+	oauthProxyCursor          uint64
+	planCheckMu               sync.Mutex
+	planCheckNext             time.Time
+	proLocks                  sync.Map
+	proMergeMu                sync.Mutex
+	proMergeWG                sync.WaitGroup
+	proMergeJobs              map[string]context.CancelFunc
+	proMergeClosed            bool
+	proMergeRunning           int
+	proMonitorMu              sync.Mutex
+	proMonitorRunning         bool
+	mail                      *mailbridge.Client // retained for API compatibility; local mail flows never call it
+	authMu                    sync.Mutex
+	sessions                  map[string]time.Time
+	autoMu                    sync.Mutex
+	autoAdminLocks            sync.Map
+	seatAssignmentMu          sync.Mutex
+	accountCycles             sync.Map
+	autoRunning               bool
+	auditQueue                chan model.AutoRotationEvent
+	auditWG                   sync.WaitGroup
+	auditStop                 chan struct{}
+	auditCloseOnce            sync.Once
+	auditFlush                chan chan error
+	auditDone                 chan struct{}
+	auditStartedAt            time.Time
+	auditDropped              atomic.Uint64
+	auditWriteErrors          atomic.Uint64
+	auditErrorMu              sync.Mutex
+	auditLastError            string
+	auditShutdownErr          error
 }
 
 const (
@@ -127,6 +138,19 @@ func (s *Server) Close() {
 		return
 	}
 	s.auditCloseOnce.Do(func() {
+		s.qualityMu.Lock()
+		s.qualityClosed = true
+		if s.qualityCancel != nil {
+			s.qualityCancel()
+		}
+		if s.qualityMonitorCancel != nil {
+			s.qualityMonitorCancel()
+		}
+		if s.qualityModelMonitorCancel != nil {
+			s.qualityModelMonitorCancel()
+		}
+		s.qualityMu.Unlock()
+		s.qualityWG.Wait()
 		s.stopProMergeJobs()
 		close(s.auditStop)
 		s.stopMailInfoJobs()
@@ -208,6 +232,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/free-accounts/{id}/stage", s.updateFreeAccountStage)
 	mux.HandleFunc("PUT /api/free-accounts/{id}/policy", s.updateFreeAccountPolicy)
 	mux.HandleFunc("GET /api/sub2-settings", s.getSub2Settings)
+	mux.HandleFunc("GET /api/quality/settings", s.getQualitySettings)
+	mux.HandleFunc("PUT /api/quality/settings", s.saveQualitySettings)
+	mux.HandleFunc("POST /api/quality/run", s.triggerQuality)
+	mux.HandleFunc("POST /api/free-accounts/{id}/quality/probe", s.triggerQuality)
+	mux.HandleFunc("GET /api/free-accounts/{id}/quality/history", s.getQualityHistory)
+	mux.HandleFunc("POST /api/free-accounts/{id}/quality/restore", s.restoreQualityAccount)
 	mux.HandleFunc("PUT /api/sub2-settings", s.saveSub2Settings)
 	mux.HandleFunc("POST /api/sub2-settings/test", s.testSub2Settings)
 	mux.HandleFunc("GET /api/push-settings", s.getPushSettings)
@@ -290,6 +320,8 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) StartBackground(ctx context.Context) {
 	go s.monitorHeroActivations(ctx)
 	go s.monitorFreeAccounts(ctx)
+	go s.monitorQuality(ctx)
+	go s.monitorQualityModels(ctx)
 	go s.autoRotationLoop(ctx)
 	go s.autoRotationHistoryCleanup(ctx)
 	go s.monitorProAccounts(ctx)

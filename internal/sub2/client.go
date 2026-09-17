@@ -499,7 +499,13 @@ func (c *Client) request(ctx context.Context, settings model.Sub2Settings, passw
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	response, err := c.http.Do(req)
+	client := c.http
+	if strings.HasPrefix(path, "/api/v1/admin/accounts/") && strings.HasSuffix(path, "/test") {
+		copy := *c.http
+		copy.Timeout = 0 // The caller supplies a bounded per-probe context.
+		client = &copy
+	}
+	response, err := client.Do(req)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, errors.New("Sub2 请求超时")

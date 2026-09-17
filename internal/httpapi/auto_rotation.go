@@ -557,7 +557,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 }
 
 func eligibleAutoRotationAccount(account model.FreeAccountProfile) bool {
-	return !account.Dead && !account.HistoryUncertain && (account.VisitedTeamCount == 0 || account.ReusePending) && account.ImportMode != "pure" && account.AcceptStatus != "completed" && account.RemoveStatus != "completed"
+	return !account.Dead && !account.Quality.Excluded && !account.HistoryUncertain && (account.VisitedTeamCount == 0 || account.ReusePending) && account.ImportMode != "pure" && account.AcceptStatus != "completed" && account.RemoveStatus != "completed"
 }
 
 func eligibleAutoRotationMail(account model.MailAccountProfile) bool {
