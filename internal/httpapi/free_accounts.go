@@ -1383,6 +1383,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		accountName = profile.Label
 	}
 	accountName += "--" + beijingNow().Format("15:04")
+	accountName = s.sub2NameWithMother(accountName, profile.AdminAccountID, profile.AdminEmail)
 	createInput := sub2.CreateAccountInput{
 		Name:        accountName,
 		Credentials: buildSub2OAuthCredentialsWithModels(profile, credentials, settings.Models, settings.PushPlanType),
@@ -2087,6 +2088,7 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 		name = profile.Label
 	}
 	name += "--" + beijingNow().Format("15:04") + "-重登"
+	name = s.sub2NameWithMother(name, profile.AdminAccountID, profile.AdminEmail)
 	// Sub2 supports in-place OAuth reauthorization. Keep the original account
 	// ID and let Sub2 clear its error state/invalidate its token cache.
 	if _, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentialsWithModels(profile, credentials, settings.Models, settings.PushPlanType)); err != nil {

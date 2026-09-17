@@ -689,6 +689,8 @@ func (s *Server) performProPush(ctx context.Context, email string) (out model.Ma
 		return profile, errors.New("请选择 Pro 的 Sub2 OpenAI 分组")
 	}
 	input := sub2.CreateAccountInput{Name: name, Credentials: buildProCredentials(profile, credentials), GroupIDs: v.Sub2.GroupIDs, Models: v.Sub2.Models, Concurrency: v.Sub2.AccountConcurrency, Priority: v.Sub2.Priority, CpaWS: v.Sub2.CpaWS}
+	name = s.sub2NameWithMother(name, profile.TargetAdminID, "")
+	input.Name = name
 	fingerprint := sha256.Sum256([]byte(email + "|" + name + "|" + credentials.AccessToken))
 	created, err := s.sub2.CreateAccount(ctx, v.Sub2, subPassword, input, "pro-"+profile.ID+"-"+fmt.Sprintf("%x", fingerprint[:8]))
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "idempotency") {

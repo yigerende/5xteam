@@ -258,6 +258,13 @@ func TestSub2PushUsesSelectedPlan(t *testing.T) {
 			if _, err := st.SaveFreeAccountOAuth(child.ID, "oauth-at", "oauth-rt", "team-policy"); err != nil {
 				t.Fatal(err)
 			}
+			mother, err := st.SaveAdminAccount(model.AdminAccountProfile{Label: "Mother Push", TeamAccountID: "team-policy"}, "mother-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.UpdateFreeAccount(child.ID, func(p *model.FreeAccountProfile) { p.AdminAccountID = mother.ID }); err != nil {
+				t.Fatal(err)
+			}
 			s, err := New(st, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -271,6 +278,9 @@ func TestSub2PushUsesSelectedPlan(t *testing.T) {
 				t.Fatalf("push failed: %s", rec.Body.String())
 			}
 			credentials, ok := sent["credentials"].(map[string]any)
+			if name, _ := sent["name"].(string); !strings.HasPrefix(name, "Mother Push|child@example.com--") {
+				t.Fatalf("missing mother prefix in Sub2 request: %q", name)
+			}
 			if !ok || credentials["plan_type"] != plan || credentials["chatgpt_plan_type"] != plan {
 				t.Fatalf("wrong pushed plan: %+v", sent)
 			}
