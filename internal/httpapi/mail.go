@@ -107,7 +107,7 @@ func (s *Server) listMailAccounts(w http.ResponseWriter, r *http.Request) {
 		// the requested page instead of scanning both complete account tables.
 		for index, item := range result.Items {
 			pipeline, ok := pipelines[strings.ToLower(strings.TrimSpace(item.Email))]
-			if !ok || item.RefreshTokenPresent || !pipeline.OAuthRefreshTokenPresent {
+			if !ok || item.RefreshTokenPresent || item.RefreshTokenEdited || !pipeline.OAuthRefreshTokenPresent {
 				continue
 			}
 			if _, credentials, credentialErr := s.store.FreeAccountCredential(pipeline.ID); credentialErr == nil && strings.TrimSpace(credentials.OAuthRefreshToken) != "" {
@@ -555,7 +555,7 @@ func (s *Server) exportMailAccountCredentials(w http.ResponseWriter, r *http.Req
 		credentials := mailGPTCredentials{
 			Email: profile.Email, GPTPassword: strings.TrimSpace(local.GptPassword),
 			AccessToken: strings.TrimSpace(local.AccessToken), RefreshToken: strings.TrimSpace(local.RefreshToken),
-			ChatGPTSession: strings.TrimSpace(local.ChatGPTSession),
+			ChatGPTSession: strings.TrimSpace(local.ChatGPTSession), AccountID: profile.OAuthAccountID,
 		}
 		// Keep legacy RT/account-ID enrichment without requiring AT to view 2FA.
 		if credentials.AccessToken != "" {
@@ -567,6 +567,7 @@ func (s *Server) exportMailAccountCredentials(w http.ResponseWriter, r *http.Req
 		}
 		writeAPI(w, http.StatusOK, map[string]any{
 			"email":              credentials.Email,
+			"revision":           s.store.MailCredentialsRevision(profile, local),
 			"gpt_password":       credentials.GPTPassword,
 			"totp_secret":        strings.TrimSpace(local.TotpSecret),
 			"access_token":       credentials.AccessToken,
@@ -1047,11 +1048,12 @@ func chatGPTSessionValue(raw string) any {
 func (s *Server) loadMailGPTCredentials(ctx context.Context, email string) (mailGPTCredentials, error) {
 	// Prefer credentials owned by this application. This keeps Team import and
 	// credential export functional when the standalone mail manager is absent.
-	if _, local, localErr := s.store.MailAccountCredential(email); localErr == nil && strings.TrimSpace(local.AccessToken) != "" {
+	if profile, local, localErr := s.store.MailAccountCredential(email); localErr == nil && strings.TrimSpace(local.AccessToken) != "" {
 		result := mailGPTCredentials{Email: strings.TrimSpace(local.Email), GPTPassword: strings.TrimSpace(local.GptPassword), AccessToken: strings.TrimSpace(local.AccessToken), RefreshToken: strings.TrimSpace(local.RefreshToken), ChatGPTSession: strings.TrimSpace(local.ChatGPTSession)}
+		result.AccountID = profile.OAuthAccountID
 		// Older records may have OAuth RT only in free_accounts. Fall back to
 		// that projection so export remains usable after an upgrade.
-		if result.RefreshToken == "" {
+		if result.RefreshToken == "" && !profile.RefreshTokenEdited {
 			for _, profile := range s.store.FreeAccounts() {
 				if strings.EqualFold(strings.TrimSpace(profile.Email), email) {
 					if _, oauth, oauthErr := s.store.FreeAccountCredential(profile.ID); oauthErr == nil {

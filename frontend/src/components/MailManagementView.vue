@@ -16,7 +16,6 @@ import {
   CheckCircle2,
   ChevronDown,
   Circle,
-  Copy,
   Crown,
   Download,
   Eye,
@@ -39,6 +38,8 @@ import {
   XCircle,
 } from "lucide-vue-next";
 import { api } from "../api";
+import { runMailAccountTask } from "../mailAccountTask";
+import { copyText } from "../clipboard";
 import { downloadMailExport } from "../mailExport.js";
 import { parseMailAccountText } from "../mailImport.js";
 import { formatTime } from "../utils";
@@ -48,6 +49,7 @@ import StatusPill from "./StatusPill.vue";
 import Pagination from "./Pagination.vue";
 import TeamVisitCount from "./TeamVisitCount.vue";
 import MailGPTInfoProgress from "./MailGPTInfoProgress.vue";
+import AccountCredentialsDialog from "./AccountCredentialsDialog.vue";
 import { gptPlanLabel, gptCreatedTime, gptInfoTitle } from "../mailGPTInfo";
 
 const gptInfoProgress = ref(null);
@@ -126,24 +128,7 @@ const atCheckDialog = reactive({
   failed: 0,
   items: [],
 });
-const credentialDialog = reactive({
-  open: false,
-  email: "",
-  gptPassword: "",
-  totpSecret: "",
-  accessToken: "",
-  refreshToken: "",
-  chatgptSession: "",
-  accountID: "",
-  loading: false,
-  exporting: "",
-  copied: "",
-  error: "",
-});
-const totpCode = reactive({ value: "", loading: false, error: "", remaining: 0 });
-let credentialRequestID = 0;
-let totpTimer;
-let totpDeadline = 0;
+const credentialViewer = ref(null);
 const timers = new Set();
 const accountPage = ref(1);
 const accountPageSize = ref(props.defaultPageSize);
@@ -835,101 +820,8 @@ async function exportSelectedText() {
   }
 }
 
-async function openCredentialDialog(account) {
-  const requestID = ++credentialRequestID;
-  resetTotpCode();
-  Object.assign(credentialDialog, {
-    open: true,
-    email: account.email,
-    gptPassword: "",
-    totpSecret: "",
-    accessToken: "",
-    refreshToken: "",
-    chatgptSession: "",
-    accountID: "",
-    loading: true,
-    exporting: "",
-    copied: "",
-    error: "",
-  });
-  try {
-    const credentials = await api(
-      `/api/mail/accounts/${encodeURIComponent(account.email)}/credentials`,
-    );
-    if (requestID !== credentialRequestID) return;
-    Object.assign(credentialDialog, {
-      gptPassword: credentials.gpt_password || "",
-      totpSecret: credentials.totp_secret || "",
-      accessToken: credentials.access_token || "",
-      refreshToken: credentials.refresh_token || "",
-      chatgptSession: formatChatGPTSession(credentials.chatgpt_session),
-      accountID: credentials.chatgpt_account_id || "",
-    });
-  } catch (error) {
-    if (requestID === credentialRequestID) credentialDialog.error = error.message;
-  } finally {
-    if (requestID === credentialRequestID) credentialDialog.loading = false;
-  }
-}
-function closeCredentialDialog() {
-  credentialRequestID++;
-  resetTotpCode();
-  Object.assign(credentialDialog, {
-    open: false,
-    email: "",
-    gptPassword: "",
-    totpSecret: "",
-    accessToken: "",
-    refreshToken: "",
-    chatgptSession: "",
-    accountID: "",
-    loading: false,
-    exporting: "",
-    copied: "",
-    error: "",
-  });
-}
-function resetTotpCode() {
-  window.clearInterval(totpTimer);
-  if (credentialDialog.copied === "totp-code") credentialDialog.copied = "";
-  totpDeadline = 0;
-  Object.assign(totpCode, { value: "", loading: false, error: "", remaining: 0 });
-}
-function updateTotpRemaining() {
-  totpCode.remaining = Math.max(0, Math.ceil((totpDeadline - performance.now()) / 1000));
-  if (!totpCode.remaining) window.clearInterval(totpTimer);
-}
-async function showTotpCode() {
-  if (!credentialDialog.totpSecret || totpCode.loading) return;
-  resetTotpCode();
-  totpCode.loading = true;
-  const requestID = credentialRequestID;
-  const started = performance.now();
-  try {
-    const result = await api(`/api/mail/accounts/${encodeURIComponent(credentialDialog.email)}/totp`, { cache: "no-store" });
-    if (requestID !== credentialRequestID) return;
-    if (!/^\d{6}$/.test(result.code) || !Number.isFinite(result.valid_for_ms)) throw new Error("验证码响应异常，请重试");
-    totpCode.value = result.code;
-    // Use server validity and monotonic elapsed time, not the PC's wall clock.
-    totpDeadline = started + result.valid_for_ms;
-    updateTotpRemaining();
-    if (totpCode.remaining) totpTimer = window.setInterval(updateTotpRemaining, 250);
-  } catch (error) {
-    if (requestID === credentialRequestID) totpCode.error = error.message;
-  } finally {
-    if (requestID === credentialRequestID) totpCode.loading = false;
-  }
-}
-function formatChatGPTSession(value) {
-  if (!value) return "";
-  if (typeof value === "string") {
-    try {
-      return JSON.stringify(JSON.parse(value), null, 2);
-    } catch {
-      return value;
-    }
-  }
-  return JSON.stringify(value, null, 2);
+function openCredentialDialog(account) {
+  credentialViewer.value?.open(account);
 }
 async function copyAccountForImport(account) {
   if (!account?.access_token_present) {
@@ -943,69 +835,12 @@ async function copyAccountForImport(account) {
     );
     const accessToken = String(credentials.access_token || "").trim();
     if (!accessToken) throw new Error("该账号没有可复制的 AT");
-    await navigator.clipboard.writeText(accessToken);
+    await copyText(accessToken);
     setMessage(`${account.email} 的 AT 已复制，可直接粘贴到 Team 轮转导入`, "success");
   } catch (error) {
     setMessage(`${account.email}：${error.message}`, "error");
   } finally {
     busy.value = "";
-  }
-}
-async function copyCredential(kind) {
-  if (kind === "totp-code") {
-    updateTotpRemaining();
-    if (!totpCode.remaining) return;
-  }
-  const value = {
-    at: credentialDialog.accessToken,
-    rt: credentialDialog.refreshToken,
-    password: credentialDialog.gptPassword,
-    totp: credentialDialog.totpSecret,
-    "totp-code": totpCode.value,
-    session: credentialDialog.chatgptSession,
-  }[kind];
-  if (!value) return;
-  try {
-    await navigator.clipboard.writeText(value);
-    credentialDialog.copied = kind;
-    window.setTimeout(() => {
-      if (credentialDialog.copied === kind) credentialDialog.copied = "";
-    }, 1600);
-  } catch {
-    credentialDialog.error = "复制失败，请选中凭证后手动复制";
-  }
-}
-function downloadJSON(filename, value) {
-  const blob = new Blob([`${JSON.stringify(value, null, 2)}\n`], {
-    type: "application/json;charset=utf-8",
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-async function exportCredentialFormat(format) {
-  credentialDialog.exporting = format;
-  credentialDialog.error = "";
-  try {
-    const credentials = await api(
-      `/api/mail/accounts/${encodeURIComponent(credentialDialog.email)}/credentials?format=${format}`,
-    );
-    const safeEmail = credentialDialog.email.replace(/[^a-z0-9@._-]+/gi, "_");
-    const suffix = format === "cpa" ? "cpa-auth" : "sub2api-account";
-    downloadJSON(`${safeEmail}-${suffix}.json`, credentials);
-    setMessage(
-      `${credentialDialog.email}：${format === "cpa" ? "CPA" : "Sub2"} JSON 已导出`,
-      "success",
-    );
-  } catch (error) {
-    credentialDialog.error = error.message;
-  } finally {
-    credentialDialog.exporting = "";
   }
 }
 
@@ -1199,25 +1034,7 @@ async function startAccountOAuthTask(account) {
   }
 }
 async function runMailTaskSilently(account, mode, onUpdate = () => {}) {
-  const endpoint = mode === 'oauth'
-    ? `/api/mail/accounts/${encodeURIComponent(account.email)}/oauth`
-    : `/api/mail/accounts/${encodeURIComponent(account.email)}/login`;
-  const started = await api(endpoint, { method: 'POST', body: {} });
-  const first = started.job || started;
-  if (!first.job_id) throw new Error('任务没有返回任务 ID');
-  onUpdate(first);
-  const statusURL = mode === 'oauth'
-    ? `/api/mail/oauth/${encodeURIComponent(first.job_id)}`
-    : `/api/mail/login/${encodeURIComponent(first.job_id)}`;
-  let job = first;
-  while (!["success", "failed", "cancelled", "challenge"].includes(job.status) && !["success", "failed", "cancelled", "challenge"].includes(job.state)) {
-    await new Promise((resolve) => window.setTimeout(resolve, 1800));
-    const result = await api(statusURL);
-    job = result.job || result;
-    onUpdate(job);
-  }
-  if (job.status !== 'success') throw new Error(job.error || job.error_hint || '任务执行失败');
-  return job;
+  return runMailAccountTask(account, mode, onUpdate);
 }
 async function runSelectedMailTask(mode) {
   const targets = [...selectedAccounts.value];
@@ -1360,7 +1177,6 @@ function closeTeamReuseProgress() {
 }
 
 async function moveToPro(account) {
-  if (!account.access_token_present) return setMessage('该账号尚未保存 AT，不能进入 Pro 管理', 'error');
   if (!window.confirm(`确认将“${account.email}”移入 Pro 管理？移入后将不再显示在邮件账号列表。`)) return;
   busy.value = account.email;
   try {
@@ -1401,7 +1217,6 @@ onMounted(() => {
 });
 onBeforeUnmount(() => [...timers].forEach(stopTimer));
 onBeforeUnmount(() => exportController?.abort());
-onBeforeUnmount(() => { credentialRequestID++; resetTotpCode(); });
 onBeforeUnmount(() => window.clearTimeout(accountSearchTimer));
 onBeforeUnmount(() => window.clearTimeout(actionMenuCloseTimer));
 onBeforeUnmount(() => window.clearInterval(teamReuseTimer));
@@ -1683,8 +1498,8 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                     <button
                       class="btn ghost compact"
                       type="button"
-                      :disabled="!!busy || !account.access_token_present"
-                      :title="account.access_token_present ? '移入 Pro 管理' : '请先获取 AT'"
+                      :disabled="!!busy"
+                      title="移入 Pro 管理"
                       @click="moveToPro(account)"
                     >
                       <Crown :size="14" />Pro 管理
@@ -2046,168 +1861,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
       </section>
     </div>
 
-    <div
-      v-if="credentialDialog.open"
-      class="modal-backdrop credential-dialog-backdrop"
-      @click.self="closeCredentialDialog"
-    >
-      <section
-        class="modal credential-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="credential-dialog-title"
-      >
-        <header class="credential-dialog-header">
-          <div>
-            <span class="overline">OPENAI OAUTH CREDENTIALS</span>
-            <h2 id="credential-dialog-title">查看与导出凭证</h2>
-            <p>{{ credentialDialog.email }}</p>
-          </div>
-          <IconButton label="关闭凭证窗口" @click="closeCredentialDialog"
-            ><X :size="16"
-          /></IconButton>
-        </header>
-        <div v-if="credentialDialog.loading" class="credential-loading">
-          <LoaderCircle class="spin" :size="20" /><span>正在读取加密凭证</span>
-        </div>
-        <template v-else>
-          <div v-if="credentialDialog.error" class="credential-error">
-            {{ credentialDialog.error }}
-          </div>
-          <label class="credential-token-field"
-            ><span
-              ><strong>ChatGPT 密码</strong
-              ><button
-                type="button"
-                :disabled="!credentialDialog.gptPassword"
-                @click="copyCredential('password')"
-              >
-                <Check
-                  v-if="credentialDialog.copied === 'password'"
-                  :size="14"
-                /><Copy v-else :size="14" />{{
-                  credentialDialog.copied === "password" ? "已复制" : "复制密码"
-                }}
-              </button></span
-            ><input :value="credentialDialog.gptPassword || '未设置'" readonly
-          /></label>
-          <div class="credential-token-field">
-            <span><strong>OpenAI 2FA 密钥</strong><button type="button" :disabled="!credentialDialog.totpSecret" @click="copyCredential('totp')"><Check v-if="credentialDialog.copied === 'totp'" :size="14" /><Copy v-else :size="14" />{{ credentialDialog.copied === 'totp' ? '已复制' : '复制 2FA' }}</button></span>
-            <input :value="credentialDialog.totpSecret || '未配置'" aria-label="OpenAI 2FA 密钥" readonly spellcheck="false" @focus="$event.target.select()" />
-            <div v-if="credentialDialog.totpSecret" class="credential-totp-code">
-              <code v-if="totpCode.value">{{ totpCode.remaining ? totpCode.value : '------' }}</code>
-              <small v-if="totpCode.value">{{ totpCode.remaining ? `${totpCode.remaining} 秒后过期` : '已过期' }}</small>
-              <button type="button" :disabled="totpCode.loading" @click="showTotpCode"><LoaderCircle v-if="totpCode.loading" class="spin" :size="14" /><RefreshCw v-else-if="totpCode.value" :size="14" /><KeyRound v-else :size="14" />{{ totpCode.value ? '刷新' : '查看验证码' }}</button>
-              <button v-if="totpCode.value" type="button" :disabled="!totpCode.remaining || totpCode.loading" @click="copyCredential('totp-code')"><Check v-if="credentialDialog.copied === 'totp-code'" :size="14" /><Copy v-else :size="14" />{{ credentialDialog.copied === 'totp-code' ? '已复制' : '复制验证码' }}</button>
-            </div>
-            <p v-if="totpCode.error" class="danger-text" role="alert">{{ totpCode.error }}</p>
-          </div>
-          <label class="credential-token-field"
-            ><span
-              ><strong>Access Token (AT)</strong
-              ><button
-                type="button"
-                :disabled="!credentialDialog.accessToken"
-                @click="copyCredential('at')"
-              >
-                <Check
-                  v-if="credentialDialog.copied === 'at'"
-                  :size="14"
-                /><Copy v-else :size="14" />{{
-                  credentialDialog.copied === "at" ? "已复制" : "复制 AT"
-                }}
-              </button></span
-            ><textarea
-              :value="credentialDialog.accessToken || '未获取'"
-              readonly
-              rows="5"
-              spellcheck="false"
-              @focus="$event.target.select()"
-            ></textarea>
-          </label>
-          <label class="credential-token-field"
-            ><span
-              ><strong>Refresh Token (RT)</strong
-              ><button
-                type="button"
-                :disabled="!credentialDialog.refreshToken"
-                @click="copyCredential('rt')"
-              >
-                <Check
-                  v-if="credentialDialog.copied === 'rt'"
-                  :size="14"
-                /><Copy v-else :size="14" />{{
-                  credentialDialog.copied === "rt" ? "已复制" : "复制 RT"
-                }}
-              </button></span
-            ><textarea
-              :value="credentialDialog.refreshToken || '未获取'"
-              readonly
-              rows="4"
-              spellcheck="false"
-              @focus="$event.target.select()"
-            ></textarea>
-          </label>
-          <label class="credential-token-field"
-            ><span
-              ><strong>完整 ChatGPT Session</strong
-              ><button
-                type="button"
-                :disabled="!credentialDialog.chatgptSession"
-                @click="copyCredential('session')"
-              >
-                <Check
-                  v-if="credentialDialog.copied === 'session'"
-                  :size="14"
-                /><Copy v-else :size="14" />{{
-                  credentialDialog.copied === "session" ? "已复制" : "复制 Session"
-                }}
-              </button></span
-            ><textarea
-              :value="credentialDialog.chatgptSession || '未保存'"
-              readonly
-              rows="8"
-              spellcheck="false"
-              @focus="$event.target.select()"
-            ></textarea>
-          </label>
-          <small
-            v-if="credentialDialog.accountID"
-            class="credential-account-id mono"
-            >Account ID: {{ credentialDialog.accountID }}</small
-          >
-          <footer class="credential-export-actions">
-            <button
-              class="btn ghost"
-              type="button"
-              :disabled="
-                !!credentialDialog.exporting || !credentialDialog.accessToken || !credentialDialog.refreshToken
-              "
-              @click="exportCredentialFormat('cpa')"
-            >
-              <LoaderCircle
-                v-if="credentialDialog.exporting === 'cpa'"
-                class="spin"
-                :size="15"
-              /><Download v-else :size="15" />导出 CPA JSON</button
-            ><button
-              class="btn primary"
-              type="button"
-              :disabled="
-                !!credentialDialog.exporting || !credentialDialog.accessToken || !credentialDialog.refreshToken
-              "
-              @click="exportCredentialFormat('sub2')"
-            >
-              <LoaderCircle
-                v-if="credentialDialog.exporting === 'sub2'"
-                class="spin"
-                :size="15"
-              /><Download v-else :size="15" />导出 Sub2 JSON
-            </button>
-          </footer>
-        </template>
-      </section>
-    </div>
+    <AccountCredentialsDialog ref="credentialViewer" @exported="setMessage($event, 'success')" @saved="loadAccountsHandled" />
 
     <div v-if="atCheckDialog.open" class="modal-backdrop login-dialog-backdrop">
       <section
@@ -3336,138 +2990,6 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
 .login-dialog-actions {
   margin-top: 0;
   padding: 16px 22px 20px;
-}
-.credential-dialog-backdrop {
-  z-index: 130;
-}
-.credential-dialog {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  width: min(720px, 100%);
-  max-height: calc(100vh - 40px);
-  gap: 16px;
-  overflow: auto;
-}
-.credential-dialog-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-.credential-dialog-header h2 {
-  margin-top: 4px;
-}
-.credential-dialog-header > div {
-  min-width: 0;
-}
-.credential-dialog-header p {
-  overflow: hidden;
-  margin-top: 5px;
-  color: var(--muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.credential-loading {
-  display: flex;
-  min-height: 190px;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  color: var(--muted);
-  font-size: 11px;
-}
-.credential-error {
-  padding: 9px 11px;
-  border: 1px solid rgba(219, 112, 112, 0.3);
-  border-radius: 4px;
-  background: var(--red-bg);
-  color: var(--red);
-  font-size: 11px;
-}
-.credential-token-field {
-  display: grid;
-  min-width: 0;
-  gap: 7px;
-}
-.credential-token-field input {
-  width: 100%;
-  min-width: 0;
-}
-.credential-totp-code {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.credential-totp-code code {
-  min-width: 72px;
-  color: var(--blue);
-  font-size: 18px;
-  font-variant-numeric: tabular-nums;
-}
-.credential-totp-code small {
-  min-width: 70px;
-  color: var(--muted);
-  font-size: 11px;
-}
-.credential-token-field > span {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.credential-token-field strong {
-  color: var(--text-2);
-  font-size: 11px;
-}
-.credential-token-field button {
-  display: inline-flex;
-  min-height: 28px;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--surface-2);
-  color: var(--text-2);
-  font-size: 10px;
-}
-.credential-token-field button:hover:not(:disabled) {
-  border-color: var(--green);
-  color: var(--green-strong);
-}
-.credential-token-field textarea {
-  width: 100%;
-  min-height: 88px;
-  resize: none;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  outline: 0;
-  background: var(--bg-elevated);
-  color: var(--text-2);
-  padding: 10px;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 10px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-.credential-token-field textarea:focus {
-  border-color: var(--green);
-  box-shadow: 0 0 0 2px var(--green-bg);
-}
-.credential-account-id {
-  overflow: hidden;
-  color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.credential-export-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-top: 2px;
 }
 .spin {
   animation: spin 0.9s linear infinite;

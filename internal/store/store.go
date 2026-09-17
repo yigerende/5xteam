@@ -474,6 +474,7 @@ func preserveMailPlanCheck(profile *model.MailAccountProfile, old model.MailAcco
 }
 
 func preserveProProfile(profile *model.MailAccountProfile, old model.MailAccountProfile) {
+	profile.RefreshTokenEdited = old.RefreshTokenEdited
 	profile.OAuthStatus, profile.OAuthAccountID, profile.OAuthUserID = old.OAuthStatus, old.OAuthAccountID, old.OAuthUserID
 	profile.OAuthExpiresAt, profile.OAuthAuthorizedAt = old.OAuthExpiresAt, old.OAuthAuthorizedAt
 	profile.PushProvider, profile.PushStatus = old.PushProvider, old.PushStatus

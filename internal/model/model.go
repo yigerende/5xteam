@@ -42,6 +42,7 @@ type MailAccountProfile struct {
 	TotpSecretPresent     bool             `json:"totp_secret_present"`
 	AccessTokenPresent    bool             `json:"access_token_present"`
 	RefreshTokenPresent   bool             `json:"refresh_token_present"`
+	RefreshTokenEdited    bool             `json:"refresh_token_edited,omitempty"`
 	IDTokenPresent        bool             `json:"id_token_present"`
 	OAuthStatus           string           `json:"oauth_status,omitempty"`
 	OAuthAccountID        string           `json:"oauth_account_id,omitempty"`

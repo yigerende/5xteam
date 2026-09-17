@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-vue-next";
 import { api } from "../api";
+import { copyText } from "../clipboard";
 import MessageBar from "./MessageBar.vue";
 import StatusPill from "./StatusPill.vue";
 import Pagination from "./Pagination.vue";
@@ -378,7 +379,7 @@ async function testPlatform() {
 async function copy(value) {
   if (!value) return;
   try {
-    await navigator.clipboard.writeText(value);
+    await copyText(value);
     setMessage("已复制", "success");
   } catch {
     setMessage("复制失败", "error");

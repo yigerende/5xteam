@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { CalendarClock, Check, CheckCircle2, Copy, Ellipsis, FileJson, FileKey2, Network, Pencil, RefreshCw, Save, ToggleLeft, ToggleRight, Trash2, X } from 'lucide-vue-next'
 import { api } from '../api'
+import { copyText } from '../clipboard'
 import { decodeJWTPayload, findAccessToken, findRefreshToken, formatTime, shortID } from '../utils'
 import IconButton from './IconButton.vue'
 import MessageBar from './MessageBar.vue'
@@ -310,7 +311,7 @@ async function copyCredential(kind) {
   const value = kind === 'at' ? credentialDialog.accessToken : credentialDialog.refreshToken
   if (!value) return
   try {
-    await navigator.clipboard.writeText(value)
+    await copyText(value)
     credentialDialog.copied = kind
     window.setTimeout(() => { if (credentialDialog.copied === kind) credentialDialog.copied = '' }, 1600)
   } catch { credentialDialog.error = '复制失败，请选中凭证后手动复制' }

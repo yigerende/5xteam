@@ -1,11 +1,15 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { BadgeCheck, CirclePlus, Clock3, Gauge, KeyRound, LoaderCircle, LogIn, RefreshCw, Rocket, RotateCcw, Search, Settings2, ShieldCheck, UsersRound, X } from 'lucide-vue-next'
+import { BadgeCheck, CirclePlus, Clock3, FileKey2, Gauge, KeyRound, LoaderCircle, LogIn, RefreshCw, Rocket, RotateCcw, Search, Settings2, ShieldCheck, UsersRound, X } from 'lucide-vue-next'
 import { api } from '../api'
+import { copyText } from '../clipboard'
 import { formatTime } from '../utils'
 import MessageBar from './MessageBar.vue'
 import Pagination from './Pagination.vue'
 import StatusPill from './StatusPill.vue'
+import IconButton from './IconButton.vue'
+import AccountCredentialsDialog from './AccountCredentialsDialog.vue'
+import TemporaryATDialog from './TemporaryATDialog.vue'
 
 const props = defineProps({ accounts: { type: Array, default: () => [] }, adminAccounts: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
 const emit = defineEmits(['reload'])
@@ -19,6 +23,8 @@ const total = ref(0)
 const listSummary = reactive({ all: 0, oauth_ready: 0, pushed: 0, merged: 0 })
 const selectedEmails = ref(new Set())
 const busy = ref('')
+const credentialViewer = ref(null)
+const temporaryAT = ref(null)
 const message = reactive({ text: '', type: '' })
 const oauth = reactive({ open: false, loading: false, sessionID: '', authURL: '', callbackURL: '', expiresAt: '', targetEmail: '' })
 const sub2Groups = ref([])
@@ -26,6 +32,10 @@ const cpaGroups = ref([])
 const countdown = ref(0)
 let countdownTimer
 let searchTimer
+let pollTimer
+let disposed = false
+let listRequestID = 0
+let pendingPageLoads = 0
 
 const defaults = () => ({
   provider: 'sub2', quota_enabled: false, quota_check_interval_seconds: 120,
@@ -46,13 +56,45 @@ const merged = computed(() => Number(listSummary.merged || 0))
 const selectedAdmin = computed(() => props.adminAccounts.find((a) => a.id === settings.target_admin_id))
 
 async function loadPage() {
-  const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value), query: query.value.trim(), merge_state: spaceFilter.value === 'all' ? '' : spaceFilter.value })
-  const data = await api(`/api/pro-accounts?${params}`)
-  rows.value = data.items || []; total.value = Number(data.total || 0); Object.assign(listSummary, data.summary || {})
-  const lastPage = Math.max(1, Math.ceil(total.value / pageSize.value))
-  if (page.value > lastPage) { page.value = lastPage; return loadPage() }
-  const visible = new Set(rows.value.map((account) => account.email.toLowerCase()))
-  selectedEmails.value = new Set([...selectedEmails.value].filter((email) => visible.has(email)))
+  const requestID = ++listRequestID
+  pendingPageLoads++
+  try {
+    const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value), query: query.value.trim(), merge_state: spaceFilter.value === 'all' ? '' : spaceFilter.value })
+    const data = await api(`/api/pro-accounts?${params}`)
+    if (disposed || requestID !== listRequestID) return
+    rows.value = data.items || []; total.value = Number(data.total || 0); Object.assign(listSummary, data.summary || {})
+    const lastPage = Math.max(1, Math.ceil(total.value / pageSize.value))
+    if (page.value > lastPage) { page.value = lastPage; return loadPage() }
+    const visible = new Set(rows.value.map((account) => account.email.toLowerCase()))
+    selectedEmails.value = new Set([...selectedEmails.value].filter((email) => visible.has(email)))
+  } finally { pendingPageLoads-- }
+}
+function schedulePoll(delay = 1500) {
+  window.clearTimeout(pollTimer)
+  if (disposed) return
+  pollTimer = window.setTimeout(async () => {
+    try {
+      if (activeTab.value === 'accounts' && !document.hidden && !pendingPageLoads) await loadPage()
+    } catch { /* Keep last known states and retry; do not mask a business error. */ }
+    finally {
+      schedulePoll(busy.value || rows.value.some(account => account.pro_workflow_running) ? 1500 : 5000)
+    }
+  }, delay)
+}
+watch(activeTab, tab => { if (tab === 'accounts') schedulePoll(0) })
+function mergeStages(account) {
+  const labels = { invite: '邀请空间', accept: '进入空间', transfer: '合并空间', remove: '移出空间' }
+  const states = { pending: '待处理', running: '执行中', completed: '成功', failed: '失败', team_removed: '已移出' }
+  return Object.entries(labels).map(([key, label]) => {
+    const status = account['pro_' + key + '_status'] || 'pending'
+    return { key, label, status, text: states[status] || '待处理' }
+  })
+}
+function mergeActivity(account) {
+  const step = mergeStages(account).find(item => item.status === 'running')
+  if (step) return step.label + '中'
+  if (busy.value === 'merge:' + account.email) return '正在启动或续跑'
+  return account.pro_workflow_running ? '流程执行中' : ''
 }
 function setPage(value) { page.value = value; selectedEmails.value = new Set(); loadPage() }
 function setPageSize(value) { pageSize.value = value; page.value = 1; selectedEmails.value = new Set(); loadPage() }
@@ -92,14 +134,28 @@ async function finishOAuth() {
   finally { oauth.loading = false }
 }
 async function copyOAuthURL() {
-  try { await navigator.clipboard.writeText(oauth.authURL); setMessage('授权链接已复制', 'success') }
+  try { await copyText(oauth.authURL); setMessage('授权链接已复制', 'success') }
   catch { setMessage('复制失败，请手动选择授权链接', 'error') }
 }
+function requestTemporaryAT(accounts, batch = false) {
+  if (busy.value) return
+  if (!accounts.length) return setMessage('请先选择账号', 'error')
+  if (accounts.some(account => account.pro_workflow_running)) return setMessage('选中的账号正在执行空间合并，请完成后再获取临时 AT', 'error')
+  temporaryAT.value?.start(accounts, batch)
+}
+function temporaryATBusy(running) { busy.value = running ? 'temporary-at' : '' }
+async function temporaryATFinished(result) {
+  await reload().catch(error => setMessage(error.message, 'error'))
+  setMessage(`临时 AT 获取完成：成功 ${result.ok}，失败 ${result.fail}`, result.fail ? 'error' : 'success')
+}
 async function runOne(account, action) {
+  if (busy.value || account.pro_workflow_running) return
   busy.value = `${action}:${account.email}`
+  setMessage()
+  schedulePoll(0)
   const paths = { refresh: 'oauth/refresh', push: 'push', quota: 'quota', merge: 'merge' }
   try { await api(`/api/pro-accounts/${encodeURIComponent(account.email)}/${paths[action]}`, { method: 'POST' }); await reload(); setMessage(`${account.email} 操作完成`, 'success') }
-  catch (error) { await reload(); setMessage(error.message, 'error') }
+  catch (error) { await loadPage().catch(() => {}); setMessage(error.message, 'error') }
   finally { busy.value = '' }
 }
 async function runBatch(action) {
@@ -156,8 +212,13 @@ async function saveSettings() {
   finally { busy.value = '' }
 }
 
-onMounted(async () => { await Promise.all([loadSettings(), loadPage()]); countdownTimer = window.setInterval(updateCountdown, 1000) })
-onBeforeUnmount(() => { window.clearInterval(countdownTimer); window.clearTimeout(searchTimer) })
+onMounted(async () => {
+  countdownTimer = window.setInterval(updateCountdown, 1000)
+  try { await Promise.all([loadSettings(), loadPage()]) }
+  catch (error) { setMessage(error.message, 'error') }
+  finally { schedulePoll() }
+})
+onBeforeUnmount(() => { disposed = true; listRequestID++; window.clearInterval(countdownTimer); window.clearTimeout(searchTimer); window.clearTimeout(pollTimer) })
 </script>
 
 <template>
@@ -181,10 +242,10 @@ onBeforeUnmount(() => { window.clearInterval(countdownTimer); window.clearTimeou
         <article class="metric-card slate"><BadgeCheck :size="17" /><div><span>已空间合并</span><strong>{{ merged }}</strong><small>永久成功标记</small></div></article>
       </div>
       <section class="panel list-panel">
-        <div class="account-toolbar"><div class="space-filter-tabs"><button :class="{ active: spaceFilter === 'all' }" @click="setSpaceFilter('all')">全部 <span>{{ listSummary.all }}</span></button><button :class="{ active: spaceFilter === 'unmerged' }" @click="setSpaceFilter('unmerged')">未空间合并 <span>{{ Math.max(0, listSummary.all - merged) }}</span></button><button :class="{ active: spaceFilter === 'merged' }" @click="setSpaceFilter('merged')">已空间合并 <span>{{ merged }}</span></button></div><div class="heading-actions"><label class="compact-search"><Search :size="14" /><input v-model="query" placeholder="搜索账号" /></label><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="checkPlans"><RefreshCw :size="14" />识别套餐</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('push')"><Rocket :size="14" />批量推送</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('quota')"><Gauge :size="14" />批量查额度</button></div></div>
+        <div class="account-toolbar"><div class="space-filter-tabs"><button :class="{ active: spaceFilter === 'all' }" @click="setSpaceFilter('all')">全部 <span>{{ listSummary.all }}</span></button><button :class="{ active: spaceFilter === 'unmerged' }" @click="setSpaceFilter('unmerged')">未空间合并 <span>{{ Math.max(0, listSummary.all - merged) }}</span></button><button :class="{ active: spaceFilter === 'merged' }" @click="setSpaceFilter('merged')">已空间合并 <span>{{ merged }}</span></button></div><div class="heading-actions"><label class="compact-search"><Search :size="14" /><input v-model="query" placeholder="搜索账号" /></label><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length || selectedAccounts.some(account => account.pro_workflow_running)" @click="requestTemporaryAT(selectedAccounts, true)"><KeyRound :size="14" />批量获取临时 AT</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="checkPlans"><RefreshCw :size="14" />识别套餐</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('push')"><Rocket :size="14" />批量推送</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('quota')"><Gauge :size="14" />批量查额度</button></div></div>
         <div class="table-shell"><table class="pro-table"><thead><tr><th><input type="checkbox" :checked="allVisibleSelected" @change="toggleVisible" /></th><th>账号</th><th>OAuth</th><th>套餐</th><th>推送</th><th>5小时</th><th>7天</th><th>空间合并</th><th>四步状态</th><th class="actions-column">操作</th></tr></thead><tbody>
           <tr v-if="!displayedAccounts.length"><td colspan="10" class="empty-cell">暂无符合条件的 Pro 账号</td></tr>
-          <tr v-for="account in displayedAccounts" :key="account.email"><td><input type="checkbox" :checked="selectedEmails.has(account.email.toLowerCase())" @change="toggle(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ formatTime(account.pro_managed_at || account.updated_at) }}</small><small v-if="account.pro_last_error" class="danger-text" :title="account.pro_last_error">{{ account.pro_last_error }}</small></td><td><StatusPill :tone="statusTone(account.oauth_status)">{{ account.access_token_present && account.refresh_token_present ? 'AT / RT 完整' : '待授权' }}</StatusPill><small v-if="account.oauth_expires_at" class="table-note">{{ formatTime(account.oauth_expires_at) }}</small></td><td><StatusPill :tone="account.current_plan_type === 'pro' ? 'success' : 'pending'">{{ account.current_plan_type || '未识别' }}</StatusPill></td><td><StatusPill :tone="statusTone(account.push_status)">{{ account.push_status === 'completed' ? (account.push_provider || '-').toUpperCase() : account.push_status || '未推送' }}</StatusPill></td><td>{{ quotaLabel(account.quota_5h) }}</td><td>{{ quotaLabel(account.quota_7d) }}<small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td><td><StatusPill :tone="account.space_merged_once ? 'success' : 'pending'">{{ account.space_merged_once ? '已成功' : '未合并' }}</StatusPill></td><td class="flow-state"><span v-for="(item, index) in [account.invite_status, account.accept_status, account.transfer_status, account.remove_status]" :key="index" :class="item">{{ ['邀', '进', '合', '移'][index] }}</span></td><td><div class="row-actions"><button class="icon-button" title="重新授权" :disabled="!!busy" @click="beginOAuth(account)"><LogIn :size="15" /></button><button class="icon-button" title="刷新 AT" :disabled="!!busy || !account.refresh_token_present" @click="runOne(account, 'refresh')"><RefreshCw :size="15" /></button><button class="icon-button" title="推送当前下游" :disabled="!!busy || !account.refresh_token_present" @click="runOne(account, 'push')"><Rocket :size="15" /></button><button class="icon-button" title="查询额度" :disabled="!!busy || account.push_status !== 'completed'" @click="runOne(account, 'quota')"><Gauge :size="15" /></button><button class="icon-button" title="执行或续跑空间合并" :disabled="!!busy || !account.refresh_token_present || account.remove_status === 'completed'" @click="runOne(account, 'merge')"><ShieldCheck :size="15" /></button><button class="icon-button" title="移回邮件管理" :disabled="!!busy" @click="returnOne(account)"><RotateCcw :size="15" /></button></div></td></tr>
+<tr v-for="account in displayedAccounts" :key="account.email"><td><input type="checkbox" :checked="selectedEmails.has(account.email.toLowerCase())" @change="toggle(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ formatTime(account.pro_managed_at || account.updated_at) }}</small><small v-if="account.pro_last_error" class="danger-text" :title="account.pro_last_error">{{ account.pro_last_error }}</small></td><td><StatusPill :tone="statusTone(account.oauth_status)">{{ account.access_token_present && account.refresh_token_present ? 'AT / RT 完整' : '待授权' }}</StatusPill><small v-if="account.oauth_expires_at" class="table-note">{{ formatTime(account.oauth_expires_at) }}</small></td><td><StatusPill :tone="account.current_plan_type === 'pro' ? 'success' : 'pending'">{{ account.current_plan_type || '未识别' }}</StatusPill></td><td><StatusPill :tone="statusTone(account.push_status)">{{ account.push_status === 'completed' ? (account.push_provider || '-').toUpperCase() : account.push_status || '未推送' }}</StatusPill></td><td>{{ quotaLabel(account.quota_5h) }}</td><td>{{ quotaLabel(account.quota_7d) }}<small v-if="account.quota_checked_at" class="table-note">{{ formatTime(account.quota_checked_at) }}</small></td><td><StatusPill :tone="account.space_merged_once ? 'success' : 'pending'">{{ account.space_merged_once ? '已成功' : '未合并' }}</StatusPill></td><td class="flow-state"><div class="merge-stage-strip"><span v-for="step in mergeStages(account)" :key="step.key" class="merge-stage" :class="step.status" :data-stage="step.key" :title="`${step.label}：${step.text}`"><LoaderCircle v-if="step.status === 'running'" class="spin" :size="11" /><b>{{ { invite: '邀', accept: '进', transfer: '合', remove: '移' }[step.key] }}</b><small>{{ step.text }}</small></span></div><small v-if="mergeActivity(account)" class="merge-activity"><LoaderCircle class="spin" :size="11" />{{ mergeActivity(account) }}</small></td><td><div class="row-actions"><IconButton label="查看、复制和导出 AT / RT" @click="credentialViewer?.open(account)"><FileKey2 :size="15" /></IconButton><button class="icon-button" title="重新授权" :disabled="!!busy || account.pro_workflow_running" @click="beginOAuth(account)"><LogIn :size="15" /></button><button class="icon-button" title="获取临时 AT" :disabled="!!busy || account.pro_workflow_running" @click="requestTemporaryAT([account])"><KeyRound :size="15" /></button><button class="icon-button" title="刷新 AT" :disabled="!!busy || account.pro_workflow_running || !account.refresh_token_present" @click="runOne(account, 'refresh')"><RefreshCw :size="15" /></button><button class="icon-button" title="推送当前下游" :disabled="!!busy || account.pro_workflow_running || !account.refresh_token_present" @click="runOne(account, 'push')"><Rocket :size="15" /></button><button class="icon-button" title="查询额度" :disabled="!!busy || account.pro_workflow_running || account.push_status !== 'completed'" @click="runOne(account, 'quota')"><Gauge :size="15" /></button><button class="icon-button" title="执行或续跑空间合并" :disabled="!!busy || account.pro_workflow_running || !account.refresh_token_present || account.pro_remove_status === 'completed'" @click="runOne(account, 'merge')"><LoaderCircle v-if="busy === `merge:${account.email}` || account.pro_workflow_running" class="spin" :size="15" /><ShieldCheck v-else :size="15" /></button><button class="icon-button" title="移回邮件管理" :disabled="!!busy || account.pro_workflow_running" @click="returnOne(account)"><RotateCcw :size="15" /></button></div></td></tr>
         </tbody></table></div>
         <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="setPage" @update:page-size="setPageSize" />
       </section>
@@ -203,6 +264,8 @@ onBeforeUnmount(() => { window.clearInterval(countdownTimer); window.clearTimeou
     </form>
 
     <div v-if="oauth.open" class="modal-backdrop" @click.self="oauth.open = false"><form class="modal oauth-modal" @submit.prevent="finishOAuth"><div class="modal-heading"><div><span class="overline">OPENAI CODEX OAUTH</span><h2>{{ oauth.targetEmail ? '重新授权 Pro 账号' : '添加 Pro 账号' }}</h2></div><button class="icon-button" type="button" title="关闭" @click="oauth.open = false"><X :size="17" /></button></div><p>复制授权链接到需要登录的浏览器。完成 Google/OpenAI 登录后，页面会停在无法访问的 localhost，把地址栏中的完整 URL 粘贴到下方。</p><label class="field"><span>授权链接</span><div class="url-row"><input :value="oauth.authURL" readonly /><button class="btn ghost" type="button" @click="copyOAuthURL">复制链接</button></div></label><label class="field"><span>完整回调 URL</span><textarea v-model="oauth.callbackURL" rows="4" required placeholder="http://localhost:1455/auth/callback?code=...&state=..." /></label><small>会话有效期至 {{ formatTime(oauth.expiresAt) }}，成功后本地加密保存 AT、RT 与 ID Token。</small><div class="panel-actions"><button class="btn ghost" type="button" @click="oauth.open = false">取消</button><button class="btn primary" type="submit" :disabled="oauth.loading"><LoaderCircle v-if="oauth.loading" class="spin" :size="15" /><LogIn v-else :size="15" />完成授权</button></div></form></div>
+    <TemporaryATDialog ref="temporaryAT" @busy="temporaryATBusy" @finished="temporaryATFinished" />
+    <AccountCredentialsDialog ref="credentialViewer" @exported="setMessage($event, 'success')" @saved="loadPage" />
   </section>
 </template>
 
@@ -216,9 +279,13 @@ onBeforeUnmount(() => { window.clearInterval(countdownTimer); window.clearTimeou
 .pro-table th:first-child, .pro-table td:first-child { width: 42px; text-align: center; }
 .pro-table th:nth-child(2), .pro-table td:nth-child(2) { width: 240px; }
 .flow-state { white-space: nowrap; }
-.flow-state span { display: inline-grid; width: 23px; height: 23px; margin-right: 3px; place-items: center; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 9px; }
-.flow-state span.completed { border-color: rgba(37,143,97,.35); background: var(--green-bg); color: var(--green-strong); }
-.flow-state span.running { color: var(--amber); } .flow-state span.failed { color: var(--danger); }
+.merge-stage-strip { display: flex; gap: 5px; }
+.merge-stage { display: inline-flex; gap: 4px; align-items: center; padding: 5px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 10px; }
+.merge-stage small { font-size: 9px; }
+.merge-stage.completed, .merge-stage.team_removed { border-color: rgba(37,143,97,.35); background: var(--green-bg); color: var(--green-strong); }
+.merge-stage.running { border-color: var(--amber); background: var(--amber-bg); color: var(--amber); }
+.merge-stage.failed { border-color: var(--red); background: var(--red-bg); color: var(--red); }
+.merge-activity { display: flex; gap: 5px; align-items: center; margin-top: 6px; color: var(--amber); font-size: 10px; }
 .push-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .provider-panel { border-top: 2px solid transparent; } .provider-panel.selected { border-top-color: var(--green); }
 .provider-choice { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 11px; }

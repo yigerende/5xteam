@@ -202,13 +202,9 @@ func (s *Server) updateMailAccountManagementScope(w http.ResponseWriter, r *http
 		return
 	}
 	if input.Scope == "pro" {
-		_, credentials, err := s.store.MailAccountCredential(email)
+		_, _, err := s.store.MailAccountCredential(email)
 		if err != nil {
 			writeAPI(w, http.StatusNotFound, nil, err.Error())
-			return
-		}
-		if strings.TrimSpace(credentials.AccessToken) == "" {
-			writeAPI(w, http.StatusConflict, nil, "该账号尚未保存 AT，不能进入 Pro 管理")
 			return
 		}
 	}
@@ -907,7 +903,7 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if profile.SpaceMergedOnce && profile.RemoveStatus == "completed" {
 		return profile, nil
 	}
-	v, subPassword, cpaKey, err := s.store.ProSettings()
+	v, _, _, err := s.store.ProSettings()
 	if err != nil {
 		return profile, err
 	}
@@ -1022,25 +1018,11 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 			}
 			profile, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "team_removed" })
 		}
-		if err = s.deleteProDownstream(ctx, profile, v, subPassword, cpaKey); err != nil {
-			return fail("remove", err)
-		}
+		// Pro leaves the Team after merging, but keeps its pushed Sub2/CPA account.
+		// Also finish legacy team_removed records without kicking or deleting again.
 		profile, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "completed" })
 	}
 	return s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.ProWorkflowRunning = false; p.ProLastError = "" })
-}
-
-func (s *Server) deleteProDownstream(ctx context.Context, profile model.MailAccountProfile, settings model.ProSettings, subPassword, cpaKey string) error {
-	if settings.Provider == "cpa" {
-		if profile.CPAAuthFileName == "" {
-			return nil
-		}
-		return s.cpa.Delete(ctx, settings.CPA, cpaKey, profile.CPAAuthFileName)
-	}
-	if profile.Sub2AccountID < 1 {
-		return nil
-	}
-	return s.sub2.DeleteAccount(ctx, settings.Sub2, subPassword, profile.Sub2AccountID)
 }
 
 func (s *Server) mergeProAccount(w http.ResponseWriter, r *http.Request) {

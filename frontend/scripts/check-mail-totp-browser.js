@@ -53,7 +53,7 @@
   await close()
   await open(1)
   await pause(350)
-  assert(document.querySelector('[aria-label="OpenAI 2FA 密钥"]').value === '未配置', 'Wrong account secret')
+  assert(document.querySelector('[aria-label="OpenAI 2FA 密钥"]').value === '', 'Wrong account secret')
   assert(!document.querySelector('.credential-totp-code') && !document.querySelector('.credential-dialog [role=alert]'), 'Late TOTP response leaked into another account')
   await close()
   fixture.totpDelay = 0

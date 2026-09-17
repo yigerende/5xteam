@@ -42,7 +42,7 @@ func TestRetryProStepRetriesAndStops(t *testing.T) {
 	}
 }
 
-func TestProManagementRequiresATAndSuppliesSelectedTokens(t *testing.T) {
+func TestProManagementAllowsMissingATAndSuppliesSelectedTokens(t *testing.T) {
 	dataStore, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestProManagementRequiresATAndSuppliesSelectedTokens(t *testing.T) {
 	missingRequest.SetPathValue("email", "missing-at@example.com")
 	missingResponse := httptest.NewRecorder()
 	server.updateMailAccountManagementScope(missingResponse, missingRequest)
-	if missingResponse.Code != http.StatusConflict || !strings.Contains(missingResponse.Body.String(), "尚未保存 AT") {
+	if missingResponse.Code != http.StatusOK {
 		t.Fatalf("missing AT response: status=%d body=%s", missingResponse.Code, missingResponse.Body.String())
 	}
 
@@ -81,13 +81,21 @@ func TestProManagementRequiresATAndSuppliesSelectedTokens(t *testing.T) {
 
 	mailResponse := httptest.NewRecorder()
 	server.listMailAccounts(mailResponse, httptest.NewRequest(http.MethodGet, "/api/mail/accounts", nil))
-	if strings.Contains(mailResponse.Body.String(), "ready-pro@example.com") || !strings.Contains(mailResponse.Body.String(), "missing-at@example.com") {
+	if strings.Contains(mailResponse.Body.String(), "ready-pro@example.com") || strings.Contains(mailResponse.Body.String(), "missing-at@example.com") {
 		t.Fatalf("mail list scope mismatch: %s", mailResponse.Body.String())
 	}
 	proResponse := httptest.NewRecorder()
 	server.listProAccounts(proResponse, httptest.NewRequest(http.MethodGet, "/api/pro-accounts", nil))
 	if proResponse.Code != http.StatusOK || !strings.Contains(proResponse.Body.String(), "ready-pro@example.com") || strings.Contains(proResponse.Body.String(), "ready-access-token") {
 		t.Fatalf("Pro list response leaked or omitted data: status=%d body=%s", proResponse.Code, proResponse.Body.String())
+	}
+	if !strings.Contains(proResponse.Body.String(), "missing-at@example.com") {
+		t.Fatal("Pro list omitted account without AT")
+	}
+	emptyTokens := httptest.NewRecorder()
+	server.proAccountAccessTokens(emptyTokens, httptest.NewRequest(http.MethodPost, "/api/pro-accounts/access-tokens", strings.NewReader(`{"emails":["missing-at@example.com"]}`)))
+	if emptyTokens.Code != http.StatusConflict {
+		t.Fatal("moving without AT must not bypass operation credential requirements")
 	}
 
 	tokenRequest := httptest.NewRequest(http.MethodPost, "/api/pro-accounts/access-tokens", strings.NewReader(`{"emails":["ready-pro@example.com"]}`))

@@ -1,11 +1,14 @@
 import { createApp } from 'vue'
 import MailManagementView from '../src/components/MailManagementView.vue'
+import ProManagementView from '../src/components/ProManagementView.vue'
 import '../src/styles.css'
 
 // Isolated UI fixture: all requests are handled here, never by the real backend.
+const proPreview = new URLSearchParams(location.search).has('pro')
 const items = Array.from({ length: 24 }, (_, i) => ({
   email: `fixture-${String(i + 1).padStart(2, '0')}@example.com`,
-  management_scope: 'mail',
+  management_scope: proPreview ? 'pro' : 'mail',
+  current_plan_type: proPreview ? 'pro' : 'free',
   login_method: 'directurl',
   entered_at: '2026-09-12T08:00:00Z',
   created_at: '2026-09-12T08:00:00Z',
@@ -20,6 +23,15 @@ const items = Array.from({ length: 24 }, (_, i) => ({
 if (new URLSearchParams(location.search).has('totp-no-at')) items[0].access_token_present = false
 window.mailExportFixture = { requests: [], fail: false, delay: 350, totpValue: '012345', totpValidity: 30000, totpFail: false, totpDelay: 0 }
 const fixture = window.mailExportFixture
+fixture.mergeStepDelay = 1800
+fixture.mergeFailStage = ''
+fixture.mergeCalls = []
+const savedCredentials = new Map()
+const loginJobs = new Map()
+fixture.loginFailEmails = []
+fixture.loginDelay = 2200
+fixture.loginMissingJob = false
+fixture.loginStatusMissing = false
 const infoJobs = new Map()
 fixture.infoDelay = 1500
 fixture.infoMissing = false
@@ -29,6 +41,53 @@ window.fetch = async (path, options = {}) => {
   const url = new URL(path, location.origin)
   const body = options.body ? JSON.parse(options.body) : {}
   fixture.requests.push({ path: url.pathname, body })
+  if (url.pathname.startsWith('/api/mail/accounts/') && url.pathname.endsWith('/login')) {
+    const email = decodeURIComponent(url.pathname.split('/')[4])
+    const jobID = 'temporary-at-' + (loginJobs.size + 1)
+    loginJobs.set(jobID, { email, started: Date.now() })
+    return json({ job: fixture.loginMissingJob ? {} : { job_id: jobID, status: 'queued', logs: [{ time: new Date().toISOString(), message: '等待登录' }] } })
+  }
+  if (url.pathname.startsWith('/api/mail/login/')) {
+    const job = loginJobs.get(decodeURIComponent(url.pathname.split('/')[4]))
+    if (!job || fixture.loginStatusMissing) return new Response(JSON.stringify({ ok: false, error: '模拟服务重启，任务不存在' }), { status: 404 })
+    const done = Date.now() - job.started >= fixture.loginDelay
+    const failed = fixture.loginFailEmails.includes(job.email)
+    if (done && !failed) {
+      const item = items.find(item => item.email === job.email)
+      const stored = savedCredentials.get(job.email) || { email: job.email, refresh_token: item.refresh_token_present ? 'fixture-rt' : '' }
+      Object.assign(stored, { revision: 'logged-in', access_token: 'fixture-temporary-at', chatgpt_session: JSON.stringify({ accessToken: 'fixture-temporary-at', user: { email: job.email } }) })
+      savedCredentials.set(job.email, stored)
+      Object.assign(item, { access_token_present: true, at_valid: true })
+    }
+    return json({ job: { status: done ? (failed ? 'failed' : 'success') : 'running', error: done && failed ? '模拟验证失败' : '', logs: [{ time: new Date().toISOString(), message: '正在登录并验证' }, ...(done ? [{ time: new Date().toISOString(), message: failed ? '模拟验证失败' : 'AT 与 Session 已保存' }] : [])] } })
+  }
+  if (url.pathname.startsWith('/api/pro-accounts/') && url.pathname.endsWith('/merge')) {
+    const item = items.find(item => item.email === decodeURIComponent(url.pathname.split('/')[3]))
+    item.pro_workflow_running = true
+    item.pro_last_error = ''
+    for (const step of ['invite', 'accept', 'transfer', 'remove']) {
+      if (item['pro_' + step + '_status'] === 'completed') continue
+      item['pro_' + step + '_status'] = 'running'
+      fixture.mergeCalls.push(step)
+      await new Promise(resolve => setTimeout(resolve, fixture.mergeStepDelay))
+      if (fixture.mergeFailStage === step) {
+        item['pro_' + step + '_status'] = 'failed'
+        item.pro_last_error = '模拟步骤失败，可续跑'
+        item.pro_workflow_running = false
+        return new Response(JSON.stringify({ ok: false, error: item.pro_last_error }), { status: 400 })
+      }
+      item['pro_' + step + '_status'] = 'completed'
+      if (step === 'transfer') item.space_merged_once = true
+    }
+    item.pro_workflow_running = false
+    return json(item)
+  }
+  if (url.pathname === '/api/pro-settings') return json({ provider: 'sub2', quota_enabled: false })
+  if (url.pathname === '/api/pro-accounts') {
+    const page = Number(url.searchParams.get('page') || 1), size = Number(url.searchParams.get('page_size') || 10)
+    const pro = items.filter(item => item.management_scope === 'pro')
+    return json({ items: pro.slice((page - 1) * size, page * size), total: pro.length, summary: { all: pro.length } })
+  }
   if (url.pathname === '/api/mail/status') return json({ available: true })
   if (url.pathname === '/api/mail/accounts/refresh-info') {
     const id = `fixture-job-${infoJobs.size + 1}`
@@ -57,12 +116,30 @@ window.fetch = async (path, options = {}) => {
   if (url.pathname.startsWith('/api/mail/accounts/') && url.pathname.endsWith('/credentials')) {
     const item = items.find(item => item.email === decodeURIComponent(url.pathname.split('/')[4]))
     if (!item) throw new Error('Missing credential fixture')
-    return json({ email: item.email, gpt_password: item.gpt_password_present ? 'fixture-password' : '', totp_secret: item.totp_secret_present ? 'JBSWY3DPEHPK3PXP' : '', access_token: item.access_token_present ? 'fixture-at' : '', refresh_token: item.refresh_token_present ? 'fixture-rt' : '' })
+    const stored = savedCredentials.get(item.email) || { revision: 'fixture-revision', email: item.email, gpt_password: item.gpt_password_present ? 'fixture-password' : '', totp_secret: item.totp_secret_present ? 'JBSWY3DPEHPK3PXP' : '', access_token: item.access_token_present ? 'fixture-at' : '', refresh_token: item.refresh_token_present ? 'fixture-rt' : '', chatgpt_session: '', chatgpt_account_id: '' }
+    if (options.method === 'PATCH') {
+      Object.assign(stored, body, { revision: 'updated-' + fixture.requests.length })
+      savedCredentials.set(item.email, stored)
+      for (const field of ['access_token', 'refresh_token', 'gpt_password', 'totp_secret']) item[field + '_present'] = !!stored[field]
+      return json(item)
+    }
+    const format = url.searchParams.get('format')
+    if (format) {
+      const credentials = { access_token: stored.access_token, refresh_token: stored.refresh_token, plan_type: item.current_plan_type }
+      return json(format === 'cpa' ? { type: 'codex', email: item.email, ...credentials } : { accounts: [{ name: item.email, credentials }] })
+    }
+    return json(stored)
+  }
+  if (url.pathname.startsWith('/api/mail/accounts/') && url.pathname.endsWith('/management-scope')) {
+    const item = items.find(item => item.email === decodeURIComponent(url.pathname.split('/')[4]))
+    item.management_scope = body.scope
+    return json(item)
   }
   if (url.pathname === '/api/mail/accounts') {
     const page = Number(url.searchParams.get('page') || 1)
     const size = Number(url.searchParams.get('page_size') || 10)
-    return json({ items: items.slice((page - 1) * size, page * size), total: items.length, pipelines: [], counts: { all: items.length }, space_counts: { outside: items.length, inside: 0, removed: 0 } })
+    const mail = items.filter(item => item.management_scope === 'mail')
+    return json({ items: mail.slice((page - 1) * size, page * size), total: mail.length, pipelines: [], counts: { all: mail.length }, space_counts: { outside: mail.length, inside: 0, removed: 0 } })
   }
   if (url.pathname === '/api/mail/accounts/select') {
     const matched = items.filter(item =>
@@ -101,4 +178,4 @@ window.fetch = async (path, options = {}) => {
   }
   throw new Error(`Unmocked fixture request: ${url.pathname}`)
 }
-createApp(MailManagementView).mount('#app')
+createApp(proPreview ? ProManagementView : MailManagementView).mount('#app')
