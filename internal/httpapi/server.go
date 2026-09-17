@@ -152,6 +152,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/admin-accounts/{id}", s.updateAdminAccount)
 	mux.HandleFunc("DELETE /api/admin-accounts/{id}", s.deleteAdminAccount)
 	mux.HandleFunc("PUT /api/admin-accounts/{id}/proxy", s.updateAdminAccountProxy)
+	mux.HandleFunc("PUT /api/admin-accounts/{id}/rotation", s.updateAdminRotation)
 	mux.HandleFunc("POST /api/admin-accounts/{id}/refresh", s.refreshAdminAccount)
 	mux.HandleFunc("POST /api/admin-accounts/{id}/check-plan", s.checkAdminAccountPlan)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/credentials", s.adminAccountCredentials)

@@ -1091,6 +1091,8 @@ func (s *Store) SaveAdminAccountCredentials(profile model.AdminAccountProfile, a
 		}
 		profile.CreatedAt, profile.UpdatedAt = existing.CreatedAt, now
 		profile.TeamRotationChildCount = existing.TeamRotationChildCount
+		// Scheduling is changed separately; credential refreshes may hold a stale profile.
+		profile.RotationDisabled = existing.RotationDisabled
 		profile.TeamSubscriptionExpiresAt = existing.TeamSubscriptionExpiresAt
 		profile.TeamSubscriptionCheckedAt = existing.TeamSubscriptionCheckedAt
 		if profile.ProxyID == "" {

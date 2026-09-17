@@ -6,6 +6,7 @@ import {
   Waypoints, X,
 } from 'lucide-vue-next'
 import { api, downloadFile } from '../api'
+import { canJoinAdmin } from '../adminRotation'
 import { extractAccessTokens, extractTokensFromFiles, formatTime, shortID } from '../utils'
 import { latestOAuthLoginSummary, oauthLoginSummary } from '../oauthLoginLog'
 import IconButton from './IconButton.vue'
@@ -35,10 +36,11 @@ const activeProviderLabel = computed(() => pushProvider.value === 'cpa' ? 'CPA' 
 const activeReloginFailureLimit = computed(() => pushProvider.value === 'cpa' ? cpaForm.reloginFailureLimit : sub2Form.reloginFailureLimit)
 const joinForm = reactive({ account: null, adminAccountID: '', seatType: 'default' })
 const joinVisits = ref([])
-const joinAdmins = computed(() => props.adminAccounts.filter((admin) => {
+const joinAdminAccounts = ref(null)
+const joinAdmins = computed(() => (joinAdminAccounts.value || props.adminAccounts).filter((admin) => {
   const account = joinForm.account
-  if (!account) return false
-  if (account.remove_status !== 'completed' && account.accept_status === 'completed') return admin.team_account_id === account.team_account_id
+  if (!account || !canJoinAdmin(account, admin)) return false
+  if (account.remove_status !== 'completed' && !account.remote_removed_at && account.team_account_id && account.admin_account_id && ['running', 'completed'].some(status => account.invite_status === status || account.accept_status === status)) return admin.id === account.admin_account_id && admin.team_account_id === account.team_account_id
   return !joinVisits.value.some((visit) => visit.team_account_id === admin.team_account_id)
 }))
 const historyReview = reactive({ account: null, teamIDs: [], extraIDs: '', confirmed: false })
@@ -697,11 +699,12 @@ async function openJoin(account) {
   await Promise.all([refreshLiveAccounts().catch(() => {}), loadCapacitySnapshots().catch(() => {})])
   joinForm.account = account
   try {
-    const [visits, settings] = await Promise.all([api(`/api/team-visits?email=${encodeURIComponent(account.email)}`), api('/api/auto-rotation/settings')])
+    const [visits, settings, admins] = await Promise.all([api(`/api/team-visits?email=${encodeURIComponent(account.email)}`), api('/api/auto-rotation/settings'), api('/api/admin-accounts')])
+    joinAdminAccounts.value = admins
     joinVisits.value = visits || []
     if (account.remove_status === 'completed' && !settings.allow_multi_mother_reuse) return setMessage('请先开启允许一子多母复用', 'error')
     if (account.history_uncertain) return openHistoryReview(account)
-    if (!joinAdmins.value.length) return setMessage('没有尚未使用的母号，等待新增空间', 'error')
+    if (!joinAdmins.value.length) return setMessage('没有已启用且尚未使用的母号，等待启用或新增空间', 'error')
   } catch (e) { return setMessage(e.message, 'error') }
   joinForm.adminAccountID = joinAdmins.value.find((a) => a.id === account.admin_account_id)?.id || joinAdmins.value[0]?.id || ''
   joinForm.seatType = account.seat_type || 'default'

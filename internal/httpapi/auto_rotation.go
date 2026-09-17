@@ -206,6 +206,15 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 		return run, true, nil
 	}
 	availableSeats := availablePremiumFromSnapshot(seatTotal, insidePremium, reserved)
+	// Disabled mothers remain in statistics but cannot supply new rotation work.
+	for _, admin := range admins {
+		if admin.RotationDisabled {
+			if schedulable := s.availablePremiumSlots(ctx, admins); schedulable < availableSeats {
+				availableSeats = schedulable
+			}
+			break
+		}
+	}
 	shouldRun, decisionReason := autoRotationDecision(avg, settings.ThresholdPercent, availableSeats)
 	if !shouldRun {
 		run.Reason = decisionReason
@@ -570,11 +579,15 @@ func autoRotationPlan(maxPerRun, remoteRemaining, reserved, candidates int) int 
 	return planned
 }
 func (s *Server) availablePremiumSlots(ctx context.Context, admins []model.AdminAccountProfile, runID ...string) int {
+	admins = s.currentRotationAdmins(admins)
 	total := 0
 	accounts := s.store.FreeAccounts()
 	tasks := s.store.AutoRotationTasks("")
 	snapshots := s.store.AdminCapacitySnapshots()
 	for _, a := range admins {
+		if a.RotationDisabled {
+			continue
+		}
 		cap, ok := snapshots[a.ID]
 		if !ok {
 			continue
@@ -592,6 +605,7 @@ func (s *Server) availablePremiumSlots(ctx context.Context, admins []model.Admin
 }
 func (s *Server) selectPremiumAdmin(ctx context.Context, admins []model.AdminAccountProfile, accountID, runID string) (string, error) {
 	_ = ctx
+	admins = s.currentRotationAdmins(admins)
 	snapshots := s.store.AdminCapacitySnapshots()
 	accounts := s.store.FreeAccounts()
 	tasks := s.store.AutoRotationTasks("")
@@ -600,6 +614,9 @@ func (s *Server) selectPremiumAdmin(ctx context.Context, admins []model.AdminAcc
 		return "", err
 	}
 	for _, a := range admins {
+		if !rotationAdminAllowed(a, account, tasks) {
+			continue
+		}
 		if err := s.checkUnusedTeam(account, a.TeamAccountID); err != nil {
 			continue
 		}

@@ -196,6 +196,7 @@ type AdminAccountProfile struct {
 	AccountID                 string     `json:"account_id"`
 	TeamAccountID             string     `json:"team_account_id"`
 	ProxyID                   string     `json:"proxy_id,omitempty"`
+	RotationDisabled          bool       `json:"rotation_disabled"`
 	CurrentSpaceCount         int        `json:"current_space_count"`
 	CurrentSpaceEmails        []string   `json:"current_space_emails,omitempty"`
 	PlanType                  string     `json:"plan_type"`

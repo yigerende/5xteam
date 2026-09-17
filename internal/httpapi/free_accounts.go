@@ -286,6 +286,15 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		"invite_status": profile.InviteStatus, "accept_status": profile.AcceptStatus,
 		"remove_status": profile.RemoveStatus,
 	})
+	admin, _, err := s.store.AdminAccountCredential(input.AdminAccountID)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, nil, err.Error())
+		return
+	}
+	if !rotationAdminAllowed(admin, profile, s.store.AutoRotationTasks("")) {
+		writeAPI(w, http.StatusConflict, nil, "该母号已禁用 Team 轮转，不能发起新的邀请或申请")
+		return
+	}
 	admin, adminCredentials, err := s.currentAdminCredential(r.Context(), input.AdminAccountID)
 	if err != nil {
 		s.failFreeAccount(profile.ID, "invite", err)
@@ -323,6 +332,13 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	runInvite, runAccept := freeAccountJoinSteps(profile)
 	s.seatAssignmentMu.Lock()
+	// Recheck under the same lock as the toggle before admitting new work.
+	latestAdmin, _, admissionErr := s.store.AdminAccountCredential(admin.ID)
+	if admissionErr != nil || !rotationAdminAllowed(latestAdmin, profile, s.store.AutoRotationTasks("")) {
+		s.seatAssignmentMu.Unlock()
+		writeAPI(w, http.StatusConflict, nil, "该母号已禁用或不存在，不能发起新的邀请或申请")
+		return
+	}
 	if runInvite {
 		if capacity, ok := s.store.AdminCapacitySnapshots()[admin.ID]; ok {
 			accounts := s.store.FreeAccounts()
