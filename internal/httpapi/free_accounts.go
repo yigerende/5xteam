@@ -29,12 +29,15 @@ const downstreamProlitePlanType = model.Sub2DefaultPushPlanType
 func (s *Server) listFreeAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
 		page := s.parsePagination(r)
-		accounts, total, summary, err := s.store.FreeAccountsPage(r.URL.Query().Get("space_state"), page.Limit, page.Offset)
+		accounts, total, summary, err := s.store.FreeAccountsPageContext(r.Context(), r.URL.Query().Get("space_state"), page.Limit, page.Offset)
 		if err != nil {
 			writeAPI(w, http.StatusInternalServerError, nil, "读取 Team 轮转账号失败: "+err.Error())
 			return
 		}
 		for _, account := range accounts {
+			if r.Context().Err() != nil {
+				return
+			}
 			_, _ = s.store.EnsureFreeAccountLifecycleTask(account)
 		}
 		s.decorateFreeAccountSummary(&summary)
@@ -2096,13 +2099,19 @@ func (s *Server) reloginAndRepush(ctx context.Context, accountID string) error {
 	name = s.sub2NameWithMother(name, profile.AdminAccountID, profile.AdminEmail)
 	// Sub2 supports in-place OAuth reauthorization. Keep the original account
 	// ID and let Sub2 clear its error state/invalidate its token cache.
-	if _, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentialsWithModels(profile, credentials, settings.Models, settings.PushPlanType)); err != nil {
+	reauthorized, err := s.sub2.ApplyOAuthCredentials(ctx, settings, password, oldAccountID, buildSub2OAuthCredentialsWithModels(profile, credentials, settings.Models, settings.PushPlanType))
+	if err != nil {
 		return err
 	}
-	if _, err := s.sub2.RestoreScheduling(ctx, settings, password, oldAccountID); err != nil {
+	restored, err := s.sub2.RestoreScheduling(ctx, settings, password, reauthorized)
+	if err != nil {
 		return err
 	}
-	s.auditAccountEvent(ctx, accountID, "relogin", "push", "relogin", "sub2", "Sub2 原账号凭据已更新并恢复调度", map[string]any{"account_id": oldAccountID})
+	message := "Sub2 原账号凭据已更新并恢复调度"
+	if !restored.Schedulable {
+		message = "Sub2 原账号凭据已更新，保留 Sub 调度暂停状态"
+	}
+	s.auditAccountEvent(ctx, accountID, "relogin", "push", "relogin", "sub2", message, map[string]any{"account_id": oldAccountID})
 	updatedName := profile.Sub2AccountName
 	// Preserve the existing display convention (time + -重登) without changing
 	// the account identity. A name update is cosmetic; if this optional request

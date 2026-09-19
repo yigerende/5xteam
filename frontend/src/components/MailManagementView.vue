@@ -38,6 +38,7 @@ import {
   XCircle,
 } from "lucide-vue-next";
 import { api } from "../api";
+import { createLatestRequest } from "../latestRequest";
 import { runMailAccountTask } from "../mailAccountTask";
 import { copyText } from "../clipboard";
 import { downloadMailExport } from "../mailExport.js";
@@ -58,6 +59,9 @@ const emit = defineEmits(["open-team", "pro-changed"]);
 const props = defineProps({ defaultPageSize: { type: Number, default: 10 } });
 const activeTab = ref("accounts");
 const accounts = ref([]);
+const accountsLoading = ref(false);
+const renderedAccountPage = ref("");
+const accountsRequest = createLatestRequest((loading) => { accountsLoading.value = loading; });
 const pipelineAccounts = ref([]);
 const messages = ref([]);
 const counts = ref({
@@ -547,17 +551,22 @@ async function loadAccounts() {
     query: accountQuery.value.trim(),
     space_state: spaceFilter.value === "all" ? "" : spaceFilter.value,
   });
-  const data = await api(`/api/mail/accounts?${query}`);
-  accounts.value = data.items || [];
-  pipelineAccounts.value = data.pipelines || [];
-  accountTotal.value = Number(data.total || 0);
-  const lastPage = Math.max(1, Math.ceil(accountTotal.value / accountPageSize.value));
-  if (accountPage.value > lastPage) {
-    accountPage.value = lastPage;
-    return loadAccounts();
-  }
-  counts.value = { ...counts.value, ...(data.counts || {}) };
-  Object.assign(spaceFilterCounts, data.space_counts || {});
+  return accountsRequest.run(
+    (signal) => api(`/api/mail/accounts?${query}`, { signal }),
+    (data) => {
+      renderedAccountPage.value = query.toString();
+      accounts.value = data.items || [];
+      pipelineAccounts.value = data.pipelines || [];
+      accountTotal.value = Number(data.total || 0);
+      const lastPage = Math.max(1, Math.ceil(accountTotal.value / accountPageSize.value));
+      if (accountPage.value > lastPage) {
+        accountPage.value = lastPage;
+        return loadAccounts();
+      }
+      counts.value = { ...counts.value, ...(data.counts || {}) };
+      Object.assign(spaceFilterCounts, data.space_counts || {});
+    },
+  );
 }
 function loadAccountsHandled() {
   loadAccounts().catch((error) => setMessage(error.message, "error"));
@@ -1218,6 +1227,7 @@ onMounted(() => {
 onBeforeUnmount(() => [...timers].forEach(stopTimer));
 onBeforeUnmount(() => exportController?.abort());
 onBeforeUnmount(() => window.clearTimeout(accountSearchTimer));
+onBeforeUnmount(() => accountsRequest.dispose());
 onBeforeUnmount(() => window.clearTimeout(actionMenuCloseTimer));
 onBeforeUnmount(() => window.clearInterval(teamReuseTimer));
 onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
@@ -1332,6 +1342,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           <button type="button" :class="{ active: spaceFilter === 'inside' }" @click="setSpaceFilter('inside')">在空间里面 <span>{{ spaceFilterCounts.inside }}</span></button>
           <button type="button" :class="{ active: spaceFilter === 'removed' }" @click="setSpaceFilter('removed')">已使用过 <span>{{ spaceFilterCounts.removed }}</span></button>
           <button type="button" :class="{ active: spaceFilter === 'dead' }" @click="setSpaceFilter('dead')">死号 <span>{{ spaceFilterCounts.dead }}</span></button>
+          <LoaderCircle v-if="accountsLoading" class="spin" :size="16" aria-label="加载中" />
         </div>
         <div class="mail-method-summary">
           <span v-if="selectedAccounts.length">已选 {{ selectedAccounts.length }}</span>
@@ -1345,7 +1356,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           ><span>待补凭证 {{ counts.none || 0 }}</span>
         </div>
         <div class="table-shell">
-          <table class="mail-account-table">
+          <table class="mail-account-table" :aria-busy="accountsLoading">
             <thead>
               <tr>
                 <th class="select-column"><input type="checkbox" :checked="allVisibleSelected" :disabled="!pagedFilteredAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllVisible" /></th>
@@ -1360,7 +1371,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
                 <th class="actions-column">操作</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody :key="renderedAccountPage">
                         <tr v-if="!pagedFilteredAccounts.length">
                 <td colspan="10" class="empty-cell">暂无邮件账号</td>
               </tr>

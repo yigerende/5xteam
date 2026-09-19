@@ -273,11 +273,13 @@ func (s *Store) EnsureFreeAccountLifecycleTask(account model.FreeAccountProfile)
 		return model.AutoRotationTask{}, err
 	}
 	var existing *model.AutoRotationTask
+	var existingRaw string
 	for rows.Next() {
 		var raw string
 		var task model.AutoRotationTask
 		if rows.Scan(&raw) == nil && json.Unmarshal([]byte(raw), &task) == nil && task.Lifecycle {
 			existing = &task
+			existingRaw = raw
 			break
 		}
 	}
@@ -317,6 +319,9 @@ func (s *Store) EnsureFreeAccountLifecycleTask(account model.FreeAccountProfile)
 		}
 		task.Steps = ordered
 		if updated, marshalErr := json.Marshal(task); marshalErr == nil {
+			if string(updated) == existingRaw {
+				return task, nil
+			}
 			if _, updateErr := s.db.Exec("UPDATE auto_rotation_tasks SET payload=?, updated_at=? WHERE id=?", string(updated), formatTime(time.Now()), task.ID); updateErr != nil {
 				return task, updateErr
 			}

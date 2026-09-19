@@ -179,6 +179,7 @@ func (s *Store) initSchema() error {
 		CREATE TABLE IF NOT EXISTS auto_rotation_tasks (
 			id TEXT PRIMARY KEY, run_id TEXT NOT NULL, account_id TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL
 		);
+		CREATE INDEX IF NOT EXISTS auto_rotation_tasks_account_idx ON auto_rotation_tasks(account_id);
 		CREATE TABLE IF NOT EXISTS auto_rotation_seat_reservations (
 			id TEXT PRIMARY KEY, admin_account_id TEXT NOT NULL, account_id TEXT NOT NULL UNIQUE, seat_type TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 		);
@@ -205,6 +206,7 @@ func (s *Store) initSchema() error {
 			COALESCE(NULLIF(json_extract(profile, '$.created_at'), ''), updated_at) DESC
 		);
 		CREATE INDEX IF NOT EXISTS free_accounts_email_idx ON free_accounts(LOWER(COALESCE(json_extract(profile, '$.email'), '')));
+		CREATE INDEX IF NOT EXISTS free_accounts_email_latest_idx ON free_accounts(LOWER(COALESCE(json_extract(profile, '$.email'), '')), updated_at DESC, id DESC);
 		CREATE INDEX IF NOT EXISTS mail_accounts_email_idx ON mail_accounts(LOWER(email));
 	`)
 	return err

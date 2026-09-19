@@ -180,7 +180,7 @@ func TestRestoreSchedulingClearsTemporaryBlockAndVerifiesAccount(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	account, err := New().RestoreScheduling(context.Background(), model.Sub2Settings{URL: ts.URL, Email: "admin@example.com"}, "secret", 42)
+	account, err := New().RestoreScheduling(context.Background(), model.Sub2Settings{URL: ts.URL, Email: "admin@example.com"}, "secret", Account{ID: 42})
 	if err != nil {
 		t.Fatal(err)
 	}

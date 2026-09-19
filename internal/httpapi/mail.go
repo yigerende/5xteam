@@ -94,7 +94,7 @@ func (s *Server) listOutsideInvalidATMailEmails(w http.ResponseWriter, r *http.R
 func (s *Server) listMailAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
 		page := s.parsePagination(r)
-		result, err := s.store.MailAccountsPage("mail", r.URL.Query().Get("query"), r.URL.Query().Get("space_state"), page.Limit, page.Offset)
+		result, err := s.store.MailAccountsPageContext(r.Context(), "mail", r.URL.Query().Get("query"), r.URL.Query().Get("space_state"), page.Limit, page.Offset)
 		if err != nil {
 			writeAPI(w, http.StatusInternalServerError, nil, "读取邮件账号失败: "+err.Error())
 			return

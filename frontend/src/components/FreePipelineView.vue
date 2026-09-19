@@ -6,6 +6,7 @@ import {
   Waypoints, X,
 } from 'lucide-vue-next'
 import { api, downloadFile } from '../api'
+import { createLatestRequest } from '../latestRequest'
 import { canJoinAdmin, rotationSeatSummary } from '../adminRotation'
 import { extractAccessTokens, extractTokensFromFiles, formatTime, shortID } from '../utils'
 import { latestOAuthLoginSummary, oauthLoginSummary } from '../oauthLoginLog'
@@ -64,6 +65,11 @@ const groups = ref([])
 const message = reactive({ text: '', type: '' })
 const busy = ref('')
 const liveAccounts = ref([])
+const accountsLoading = ref(false)
+const renderedAccountPage = ref('')
+const accountsRequest = createLatestRequest(loading => { accountsLoading.value = loading })
+let activityRefreshTimer
+let viewDisposed = false
 const activities = reactive({})
 const clock = ref(Date.now())
 const serverClockOffset = ref(0)
@@ -488,25 +494,31 @@ function syncActivityStage(account) {
   }
   if (activity.stage !== previousStage) setMessage(`${account.email}：${activityText(activity)}`)
 }
-async function refreshLiveAccounts() {
+async function refreshLiveAccounts(options = {}) {
   const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value), space_state: teamSpaceFilter.value })
-  const data = await api(`/api/free-accounts?${params}`)
-  liveAccounts.value = data.items || []
-  accountTotal.value = Number(data.total || 0)
-  Object.assign(accountSummary, data.summary || {})
-  const serverNow = Date.parse(accountSummary.server_now || '')
-  if (Number.isFinite(serverNow)) serverClockOffset.value = serverNow - Date.now()
-  const lastPage = Math.max(1, Math.ceil(accountTotal.value / pageSize.value))
-  if (page.value > lastPage) {
-    page.value = lastPage
-    return refreshLiveAccounts()
-  }
-  liveAccounts.value.forEach(syncActivityStage)
-  return liveAccounts.value
+  return accountsRequest.run(
+    signal => api(`/api/free-accounts?${params}`, { signal }),
+    data => {
+      renderedAccountPage.value = params.toString()
+      liveAccounts.value = data.items || []
+      accountTotal.value = Number(data.total || 0)
+      Object.assign(accountSummary, data.summary || {})
+      const serverNow = Date.parse(accountSummary.server_now || '')
+      if (Number.isFinite(serverNow)) serverClockOffset.value = serverNow - Date.now()
+      const lastPage = Math.max(1, Math.ceil(accountTotal.value / pageSize.value))
+      if (page.value > lastPage) {
+        page.value = lastPage
+        return refreshLiveAccounts()
+      }
+      liveAccounts.value.forEach(syncActivityStage)
+      return liveAccounts.value
+    },
+    options,
+  )
 }
-function setAccountPage(value) { page.value = value; refreshLiveAccounts() }
-function setAccountPageSize(value) { pageSize.value = value; page.value = 1; refreshLiveAccounts() }
-function setTeamSpaceFilter(value) { teamSpaceFilter.value = teamSpaceFilter.value === value ? '' : value; page.value = 1; clearPipelineSelection(); refreshLiveAccounts() }
+function setAccountPage(value) { page.value = value; refreshLiveAccounts().catch(error => setMessage(error.message, 'error')) }
+function setAccountPageSize(value) { pageSize.value = value; page.value = 1; refreshLiveAccounts().catch(error => setMessage(error.message, 'error')) }
+function setTeamSpaceFilter(value) { teamSpaceFilter.value = teamSpaceFilter.value === value ? '' : value; page.value = 1; clearPipelineSelection(); refreshLiveAccounts().catch(error => setMessage(error.message, 'error')) }
 async function openLifecycle(account, qualityOnly = false) {
   closeLifecycle()
   qualityHistoryOnly.value = qualityOnly
@@ -586,14 +598,19 @@ async function runTracked(account, action, request) {
   const initialStage = action === 'join' && account.invite_status === 'completed' ? 'accept' : meta.stage
   activities[account.id] = { id: account.id, email: account.email, action, stage: initialStage, startedAt: Date.now() }
   setMessage(`${account.email}：${activityText(activities[account.id])}`)
-  const pollTimer = window.setInterval(() => refreshLiveAccounts().catch(() => {}), 800)
+  if (!activityRefreshTimer && !viewDisposed) {
+    activityRefreshTimer = window.setInterval(() => refreshLiveAccounts({ background: true }).catch(() => {}), 800)
+  }
   try {
     const result = await request()
     await refreshLiveAccounts().catch(() => {})
     return result
   } finally {
-    window.clearInterval(pollTimer)
     delete activities[account.id]
+    if (!Object.keys(activities).length) {
+      window.clearInterval(activityRefreshTimer)
+      activityRefreshTimer = null
+    }
     emit('reload')
   }
 }
@@ -996,8 +1013,14 @@ let clockTimer
 let liveRefreshTimer
 onMounted(async () => {
   await Promise.all([loadPushSettings(), loadSub2(), refreshLiveAccounts(), loadQualityStatus()])
+  if (viewDisposed) return
   clockTimer = window.setInterval(() => { clock.value = Date.now() }, 1000)
-  liveRefreshTimer = window.setInterval(() => { if (props.active) { refreshLiveAccounts().catch(() => {}); loadQualityStatus() } }, 10000)
+  liveRefreshTimer = window.setInterval(() => { if (props.active) { refreshLiveAccounts({ background: true }).catch(() => {}); loadQualityStatus() } }, 10000)
+})
+onBeforeUnmount(() => {
+  viewDisposed = true
+  accountsRequest.dispose()
+  window.clearInterval(activityRefreshTimer)
 })
 onBeforeUnmount(() => window.clearInterval(clockTimer))
 onBeforeUnmount(() => window.clearInterval(liveRefreshTimer))
@@ -1112,8 +1135,9 @@ onBeforeUnmount(() => motherSelectionController?.abort())
         <button type="button" :class="{ active: teamSpaceFilter === 'inside' }" @click="setTeamSpaceFilter('inside')">在空间里面 <span>{{ accountSummary.inside }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'removed' }" @click="setTeamSpaceFilter('removed')">已使用过 <span>{{ accountSummary.removed }}</span></button>
         <button type="button" :class="{ active: teamSpaceFilter === 'dead' }" @click="setTeamSpaceFilter('dead')">死号 <span>{{ accountSummary.dead || 0 }}</span></button>
+        <LoaderCircle v-if="accountsLoading" class="spin" :size="16" aria-label="加载中" />
       </div>
-      <div class="table-shell"><table><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>消耗额度</th><th>5小时</th><th>7天</th><th>智商情况</th><th>移出策略</th><th>重登成功 / 连续失败</th><th>进入母号数</th><th class="actions-column">操作</th></tr></thead><tbody>
+      <div class="table-shell"><table :aria-busy="accountsLoading"><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>消耗额度</th><th>5小时</th><th>7天</th><th>智商情况</th><th>移出策略</th><th>重登成功 / 连续失败</th><th>进入母号数</th><th class="actions-column">操作</th></tr></thead><tbody :key="renderedAccountPage">
         <tr v-if="!displayedAccounts.length"><td colspan="12" class="empty-cell">暂无 Free 账号</td></tr>
         <tr v-for="account in displayedAccounts" :key="account.id" :class="{ 'row-running': activityFor(account), 'row-highlighted': entryEmail && account.email === entryEmail }">
           <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="account.dead" class="danger-text" :title="account.dead_reason">死号{{ account.remove_status === 'completed' ? ' · 已自动移出空间' : ' · 自动移出失败' }}</small><small v-else-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>

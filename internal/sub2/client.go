@@ -27,10 +27,11 @@ type Group struct {
 }
 
 type Account struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Status      string `json:"status"`
-	Schedulable bool   `json:"schedulable"`
+	ID          int64          `json:"id"`
+	Name        string         `json:"name"`
+	Status      string         `json:"status"`
+	Schedulable bool           `json:"schedulable"`
+	Extra       map[string]any `json:"extra"`
 }
 
 type RateLimitWindow struct {
@@ -228,11 +229,21 @@ func (c *Client) RenameAccount(ctx context.Context, settings model.Sub2Settings,
 }
 
 // RestoreScheduling clears both persistent and temporary scheduler blocks
-// left by a downstream 401, then verifies that the original account can be
-// selected again.
-func (c *Client) RestoreScheduling(ctx context.Context, settings model.Sub2Settings, password string, accountID int64) (Account, error) {
+// left by a downstream 401. An explicit State recovery hold remains paused;
+// successful reauthorization does not bypass Sub2's scheduling policy.
+func (c *Client) RestoreScheduling(ctx context.Context, settings model.Sub2Settings, password string, reauthorized Account) (Account, error) {
+	accountID := reauthorized.ID
 	if accountID < 1 {
 		return Account{}, errors.New("Sub2 账号 ID 无效")
+	}
+	// Sub2 owns State/quality recovery and manual pauses. Its reauthorization
+	// endpoint already clears 401 and temporary errors without opening this switch.
+	if !reauthorized.Schedulable && (reauthorized.Extra["state_scheduling_pending"] == true ||
+		reauthorized.Extra["quality_schedulable_restore"] == true || reauthorized.Extra["state_scheduling_manual"] == true) {
+		if !strings.EqualFold(strings.TrimSpace(reauthorized.Status), "active") {
+			return reauthorized, fmt.Errorf("Sub2 账号状态仍为 %s", reauthorized.Status)
+		}
+		return reauthorized, nil
 	}
 	path := "/api/v1/admin/accounts/" + strconv.FormatInt(accountID, 10)
 	if _, err := c.doJSON(ctx, settings, password, http.MethodPost, path+"/schedulable", map[string]any{"schedulable": true}, nil); err != nil {
