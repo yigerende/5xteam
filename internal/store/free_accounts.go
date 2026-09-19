@@ -407,6 +407,9 @@ func (s *Store) decryptOptional(value string) (string, error) {
 }
 
 func normalizeSub2Settings(settings *model.Sub2Settings) {
+	if settings.SchedulingPauseTimeoutSeconds < 0 {
+		settings.SchedulingPauseTimeoutSeconds = 0
+	}
 	if settings.PushPlanType != "pro" {
 		settings.PushPlanType = model.Sub2DefaultPushPlanType
 	}

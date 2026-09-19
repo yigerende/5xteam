@@ -1607,6 +1607,11 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	} else if profile.Sub2AccountID < 1 {
 		return profile, false, errors.New("账号尚未推送到当前 Sub2")
 	}
+	if allowAutoRemove {
+		if updated, handled, pauseErr := s.removeSchedulingPauseExpired(ctx, profile, settings, password); handled {
+			return updated, pauseErr == nil, pauseErr
+		}
+	}
 	_, _ = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
 		item.QuotaStatus, item.LastError = "running", ""
 	})
@@ -2162,6 +2167,10 @@ func (s *Server) performFreeAccountRemove(ctx context.Context, id string) (model
 // dead-account removal does. Keep the override local to this operation: failed
 // manual requests must not change the cycle policy or mark healthy accounts dead.
 func (s *Server) performFreeAccountRemoval(ctx context.Context, id string, forceMotherKick bool) (model.FreeAccountProfile, error) {
+	return s.performFreeAccountRemovalGuarded(ctx, id, forceMotherKick, nil)
+}
+
+func (s *Server) performFreeAccountRemovalGuarded(ctx context.Context, id string, forceMotherKick bool, guard func(model.FreeAccountProfile) error) (model.FreeAccountProfile, error) {
 	unlock := s.lockFreeAccountRemove(id)
 	defer unlock()
 	profile, _, err := s.store.FreeAccountCredential(id)
@@ -2183,6 +2192,12 @@ func (s *Server) performFreeAccountRemoval(ctx context.Context, id string, force
 	unlockTeam := s.lockTeamAccountRemove(profile.TeamAccountID)
 	defer unlockTeam()
 	profile = s.refreshSub2CostBeforeRemoval(ctx, profile)
+	// Recheck a conditional removal after waiting for the Team lock.
+	if guard != nil {
+		if err := guard(profile); err != nil {
+			return profile, err
+		}
+	}
 	removeMethod := removalMethodForCycle(profile, s.store.AutoRotationSettings())
 	if forceMotherKick {
 		removeMethod = "mother_kick"
@@ -2730,10 +2745,17 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.Enable401Check == nil {
 			v.Enable401Check = &sub.Enable401Check
 		}
+		if v.SchedulingPauseTimeoutSeconds == nil {
+			v.SchedulingPauseTimeoutSeconds = &sub.SchedulingPauseTimeoutSeconds
+		}
+		if *v.SchedulingPauseTimeoutSeconds < 0 {
+			writeAPI(w, http.StatusBadRequest, nil, "暂停调度移出秒数不能小于 0")
+			return
+		}
 		if v.CpaWS == nil {
 			v.CpaWS = &sub.CpaWS
 		}
-		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, PushPlanType: v.PushPlanType, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: *v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent}, v.Password)
+		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, PushPlanType: v.PushPlanType, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: *v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent, SchedulingPauseTimeoutSeconds: *v.SchedulingPauseTimeoutSeconds}, v.Password)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -2857,6 +2879,7 @@ func (s *Server) getCPAGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type sub2SettingsInput struct {
+	SchedulingPauseTimeoutSeconds  *int     `json:"scheduling_pause_timeout_seconds"`
 	PushPlanType                   string   `json:"push_plan_type"`
 	URL                            string   `json:"url"`
 	Email                          string   `json:"email"`
@@ -2951,6 +2974,14 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 		quotaEnabled = *input.QuotaEnabled
 	}
 	quotaRemainingThresholdPercent := current.QuotaRemainingThresholdPercent
+	pauseTimeout := current.SchedulingPauseTimeoutSeconds
+	if input.SchedulingPauseTimeoutSeconds != nil {
+		pauseTimeout = *input.SchedulingPauseTimeoutSeconds
+	}
+	if pauseTimeout < 0 {
+		writeAPI(w, http.StatusBadRequest, nil, "暂停调度移出秒数不能小于 0")
+		return
+	}
 	if input.QuotaRemainingThresholdPercent != nil {
 		quotaRemainingThresholdPercent = *input.QuotaRemainingThresholdPercent
 	}
@@ -2969,7 +3000,8 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 	input.Models = uniqueNonEmptyStrings(input.Models)
 	settings, err := s.store.SaveSub2Settings(model.Sub2Settings{
 		Provider: current.Provider, PushPlanType: input.PushPlanType, URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
-		GroupIDs: input.GroupIDs, GroupNames: input.GroupNames, Models: input.Models, AccountConcurrency: input.AccountConcurrency, Priority: input.Priority,
+		SchedulingPauseTimeoutSeconds: pauseTimeout,
+		GroupIDs:                      input.GroupIDs, GroupNames: input.GroupNames, Models: input.Models, AccountConcurrency: input.AccountConcurrency, Priority: input.Priority,
 		CpaWS: cpaWS, Enable401Check: enable401Check, StatusCheckIntervalSeconds: input.StatusCheckIntervalSeconds, ReloginFailureLimit: *input.ReloginFailureLimit, QuotaEnabled: quotaEnabled, QuotaCheckIntervalSeconds: input.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: quotaRemainingThresholdPercent,
 	}, input.Password)
 	if err != nil {

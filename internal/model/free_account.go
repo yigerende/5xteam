@@ -25,6 +25,7 @@ type Sub2Settings struct {
 	QuotaEnabled                   bool     `json:"quota_enabled"`
 	QuotaCheckIntervalSeconds      int      `json:"quota_check_interval_seconds"`
 	QuotaRemainingThresholdPercent float64  `json:"quota_remaining_threshold_percent"`
+	SchedulingPauseTimeoutSeconds  int      `json:"scheduling_pause_timeout_seconds"`
 }
 
 const Sub2DefaultPushPlanType = "self_serve_business_prolite"
