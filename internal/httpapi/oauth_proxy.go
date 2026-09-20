@@ -206,6 +206,8 @@ type oauthProxyProbeResult struct {
 	ExitIP        string         `json:"exit_ip"`
 	Location      string         `json:"loc"`
 	Colo          string         `json:"colo"`
+	IPCheckStatus string         `json:"ip_check_status"`
+	TraceError    string         `json:"trace_error"`
 	EgressFirst   map[string]any `json:"egress_first"`
 	EgressConfirm map[string]any `json:"egress_confirm"`
 	Proxy         map[string]any `json:"proxy"`

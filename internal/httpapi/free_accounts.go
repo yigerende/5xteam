@@ -1077,10 +1077,15 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 			if quality > 1 || round > 1 {
 				proxyURL = rotateOAuthProxySession(baseURL, round, quality)
 			}
+			proxyURL, err = workflow.PrepareIPRoyalOAuthProxy(proxyURL)
+			if err != nil {
+				lease.Release()
+				return nil, err
+			}
 			if progress != nil {
 				progress(fmt.Sprintf("OAuth 代理质检（第 %d/%d 轮，第 %d/%d 个出口）", round, oauthRoundAttempts, quality, oauthQualityAttempts))
 			}
-			probeCtx, cancelProbe := context.WithTimeout(context.Background(), 45*time.Second)
+			probeCtx, cancelProbe := context.WithTimeout(context.Background(), 55*time.Second)
 			probe, probeErr := s.probeOAuthProxy(probeCtx, proxyURL)
 			cancelProbe()
 			if diagnostic != nil {
@@ -1088,9 +1093,10 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 					SchemaVersion: 1, Stage: "proxy_check", Event: "quality_result",
 					Message: "OAuth 代理出口质检结果", HTTPStatus: probe.HTTPStatus,
 					Attempt: quality, Level: map[bool]string{true: "info", false: "warning"}[probe.OK],
-					Request:  map[string]any{"proxy": map[string]any{"configured": true, "name": lease.label, "endpoint": oauthProxyEndpoint(proxyURL)}, "round": round, "quality_attempt": quality},
-					Response: map[string]any{"ok": probe.OK, "auth_status": probe.AuthStatus, "exit_ip": probe.ExitIP, "loc": probe.Location, "colo": probe.Colo, "error_code": probe.ErrorCode},
-					Details:  map[string]any{"error": probe.Error, "proxy_name": lease.label, "proxy_endpoint": oauthProxyEndpoint(proxyURL)},
+					Request: map[string]any{"proxy": map[string]any{"configured": true, "name": lease.label, "endpoint": oauthProxyEndpoint(proxyURL)}, "round": round, "quality_attempt": quality},
+					Response: map[string]any{"ok": probe.OK, "auth_status": probe.AuthStatus, "exit_ip": probe.ExitIP, "loc": probe.Location, "colo": probe.Colo, "error_code": probe.ErrorCode,
+						"egress_first": probe.EgressFirst, "egress_confirm": probe.EgressConfirm, "ip_check_status": probe.IPCheckStatus},
+					Details: map[string]any{"error": probe.Error, "proxy_name": lease.label, "proxy_endpoint": oauthProxyEndpoint(proxyURL), "trace_error": probe.TraceError},
 				})
 			}
 			if probeErr != nil || !probe.OK {
@@ -1103,10 +1109,18 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 				if progress != nil {
 					progress(fmt.Sprintf("OAuth 代理质检未通过：%s", strings.TrimSpace(lastErr.Error())))
 				}
+				if probe.ErrorCode == "proxy_ip_unstable" {
+					break // Like the manager, IP drift starts a new complete round.
+				}
 				continue
 			}
 			if progress != nil {
 				progress(fmt.Sprintf("OAuth 出口质检通过：%s（HTTP %d，IP %s）", lease.label, probe.AuthStatus, probe.ExitIP))
+				if probe.IPCheckStatus == "consistent" {
+					progress("OAuth 两次出口 IP 一致，使用本轮代理会话继续登录")
+				} else {
+					progress("OAuth 出口 IP 检测未取得完整结果，按 gpt-manager 规则继续登录")
+				}
 			}
 			result, runErr := s.executeOpenAILoginWithProxy(email, proxyURL, lease.label, lease.activeCount, credentialMode, login, progress, diagnostic)
 			lease.Release()

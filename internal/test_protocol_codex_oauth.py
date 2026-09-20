@@ -286,6 +286,22 @@ class ProtocolFlowTests(unittest.TestCase):
                 if options.get("invalid_auth_step"):
                     self.assertEqual(s.identifiers, 2)
 
+    def test_iproyal_session_is_pinned_through_login_and_token_exchange(self):
+        proxy = "socks5h://user:secret_country-us_session-12345678@geo.iproyal.com:12321"
+        for options, payload in [
+            ({}, {}),
+            ({"password": True, "totp": True}, {"login_mode": "password_totp", "gpt_password": "private-password", "totp_secret": "JBSWY3DPEHPK3PXP"}),
+            ({"email_mfa": True}, {"totp_secret": "JBSWY3DPEHPK3PXP"}),
+            ({"invalid_auth_step": True, "token_failures": 1}, {}),
+        ]:
+            with self.subTest(options=options):
+                scenario = Scenario(**options)
+                self.success(scenario, proxy=proxy, **payload)
+                self.assertIn("/oauth/token", [call["path"] for call in scenario.calls])
+                for call in scenario.calls:
+                    self.assertEqual(call["proxies"], {"http": proxy, "https": proxy})
+                    self.assertEqual(call["impersonate"], "chrome131")
+
     def test_both_authorize_routes_blocked_do_not_send_otp(self):
         s = Scenario(both_blocked=True)
         r = s.run()

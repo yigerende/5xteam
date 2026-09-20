@@ -1,11 +1,21 @@
 import json
 import sys
-from urllib.parse import urlparse
+import time
+from urllib.parse import unquote, urlparse
 
 from curl_cffi import requests
 
 
 IMPERSONATE = "chrome131"
+
+
+def proxy_error(exc: Exception, proxy: str) -> str:
+    message = str(exc).replace(proxy, "[proxy]") if proxy else str(exc)
+    password = urlparse(proxy).password or ""
+    for value in (password, unquote(password)):
+        if value:
+            message = message.replace(value, "[redacted]")
+    return message[:300]
 
 
 def proxy_shape(proxy: str) -> dict:
@@ -17,8 +27,9 @@ def proxy_shape(proxy: str) -> dict:
     }
 
 
-def trace_ip(session: requests.Session, proxy: str) -> dict:
-    response = session.get(
+def trace_ip(proxy: str) -> dict:
+    # Independent requests match the manager and test stability across connections.
+    response = requests.get(
         "https://www.cloudflare.com/cdn-cgi/trace",
         proxies={"http": proxy, "https": proxy},
         impersonate=IMPERSONATE,
@@ -37,18 +48,19 @@ def trace_ip(session: requests.Session, proxy: str) -> dict:
     }
 
 
-def main() -> None:
-    proxy = str(sys.argv[1] if len(sys.argv) > 1 else "").strip()
+def probe_proxy(proxy: str) -> dict:
+    proxy = str(proxy or "").strip()
+    if proxy.lower().startswith("socks5://"):
+        proxy = "socks5h://" + proxy[len("socks5://"):]
     if not proxy:
-        print(json.dumps({
+        return {
             "ok": False,
             "retryable": False,
             "error_code": "proxy_required",
             "stage": "proxy_check",
             "error": "OAuth 代理不能为空",
             "proxy": proxy_shape(proxy),
-        }, ensure_ascii=False))
-        return
+        }
 
     result = {
         "ok": False,
@@ -57,6 +69,7 @@ def main() -> None:
         "stage": "proxy_check",
         "http_status": 0,
         "proxy": proxy_shape(proxy),
+        "ip_check_status": "not_checked",
     }
     try:
         probe = requests.get(
@@ -76,47 +89,53 @@ def main() -> None:
                 if status
                 else "auth.openai.com 连接失败"
             )
-            print(json.dumps(result, ensure_ascii=False))
-            return
+            return result
         result["auth_status"] = status
     except Exception as exc:
-        result["error"] = str(exc)[:300]
+        result["error"] = proxy_error(exc, proxy)
         error_text = str(exc).lower()
         result["error_code"] = (
             "proxy_dns_failed"
             if "resolve proxy" in error_text or "name or service not known" in error_text
             else "proxy_connection_failed"
         )
-        print(json.dumps(result, ensure_ascii=False))
-        return
+        return result
 
     try:
-        # A rotating proxy may legitimately return a different exit IP on
-        # separate requests. OAuth itself keeps one configured proxy/session
-        # for the protocol attempt, but a second Cloudflare trace must not
-        # reject that attempt as "IP unstable".
-        first = trace_ip(
-            requests.Session(impersonate=IMPERSONATE),
-            proxy,
-        )
+        first = trace_ip(proxy)
         first_ip = first["ip"]
         result["egress_first"] = first
+        result.update({"exit_ip": first_ip, "loc": first.get("loc", ""), "colo": first.get("colo", "")})
+        time.sleep(0.8)
+        confirm = trace_ip(proxy)
+        result["egress_confirm"] = confirm
+        confirm_ip = confirm["ip"]
+        if first_ip and confirm_ip and first_ip != confirm_ip:
+            result.update({
+                "error_code": "proxy_ip_unstable",
+                "ip_check_status": "unstable",
+                "error": f"代理出口不稳定：同一账号会话检测到 {first_ip} -> {confirm_ip}",
+            })
+            return result
         result.update({
             "ok": True,
             "retryable": False,
             "error_code": "",
             "error": "",
-            "exit_ip": first_ip,
-            "loc": first.get("loc", ""),
-            "colo": first.get("colo", ""),
+            "ip_check_status": "consistent" if first_ip and confirm_ip else "unavailable",
         })
-        print(json.dumps(result, ensure_ascii=False))
     except Exception as exc:
         # Match the manager: the optional IP trace is diagnostic only. An
         # unavailable trace must not reject an otherwise reachable auth route.
         result.update({"ok": True, "retryable": False, "error": "", "error_code": "",
-                       "trace_error": str(exc)[:300]})
-        print(json.dumps(result, ensure_ascii=False))
+                       "ip_check_status": "unavailable",
+                       "trace_error": proxy_error(exc, proxy)})
+    return result
+
+
+def main() -> None:
+    proxy = sys.argv[1] if len(sys.argv) > 1 else ""
+    print(json.dumps(probe_proxy(proxy), ensure_ascii=False))
 
 
 if __name__ == "__main__":

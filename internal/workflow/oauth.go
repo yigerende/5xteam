@@ -148,6 +148,11 @@ func requestOAuthTokenAt(ctx context.Context, endpoint string, form url.Values, 
 				roundSettings.ProxyURL = rotateOAuthProxyURL(settings.ProxyURL, (round-1)*4+quality)
 			}
 			if strings.EqualFold(parsed.Hostname(), "auth.openai.com") {
+				var proxyErr error
+				roundSettings.ProxyURL, proxyErr = PrepareIPRoyalOAuthProxy(roundSettings.ProxyURL)
+				if proxyErr != nil {
+					return OAuthTokenSet{}, proxyErr
+				}
 				if probeErr := probeOAuthProxyQuality(ctx, roundSettings.ProxyURL); probeErr != nil {
 					lastErr = probeErr
 					continue
@@ -384,7 +389,7 @@ func probeOAuthProxyQuality(ctx context.Context, proxyURL string) error {
 	if script == "" {
 		return errors.New("未找到 OAuth 代理质检脚本")
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(probeCtx, python, script, proxyURL)
 	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
