@@ -272,7 +272,7 @@ func TestProMergeQueuesAfterQuotaAccountLock(t *testing.T) {
 }
 
 func TestProQuotaTriggersDetachedMergeAndPreservesUncertainty(t *testing.T) {
-	for _, mode := range []string{"exhausted", "available", "uncertain", "legacy"} {
+	for _, mode := range []string{"exhausted", "available", "uncertain", "legacy", "custom_reached", "custom_below"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newProExecutionFixture(t)
 			downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -285,6 +285,12 @@ func TestProQuotaTriggersDetachedMergeAndPreservesUncertainty(t *testing.T) {
 					if mode == "available" {
 						used = 50
 					}
+					if mode == "custom_reached" {
+						used = 85
+					}
+					if mode == "custom_below" {
+						used = 84
+					}
 					fmt.Fprintf(w, `{"code":0,"data":{"rate_limit":{"secondary_window":{"used_percent":%d,"limit_window_seconds":604800}}}}`, used)
 				default:
 					t.Errorf("unexpected quota request: %s", r.URL.Path)
@@ -295,6 +301,9 @@ func TestProQuotaTriggersDetachedMergeAndPreservesUncertainty(t *testing.T) {
 			v, _, _, _ := f.s.store.ProSettings()
 			v.Provider = "sub2"
 			v.AutoMergeEnabled = true
+			if mode == "custom_reached" || mode == "custom_below" {
+				v.QuotaUsedThreshold = 85
+			}
 			v.Sub2.URL = downstream.URL
 			v.Sub2.Email = "admin@example.com"
 			if _, err := f.s.store.SaveProSettings(v, "fixture-password", ""); err != nil {
@@ -322,7 +331,7 @@ func TestProQuotaTriggersDetachedMergeAndPreservesUncertainty(t *testing.T) {
 			}
 			f.waitMerge(t)
 			p, _, _ := f.s.store.MailAccountCredential(f.email)
-			if mode == "exhausted" {
+			if mode == "exhausted" || mode == "custom_reached" {
 				if p.RemoveStatus != "completed" || f.calls["transfer"] != 1 {
 					t.Fatal("quota job cancelled with request", p.ProLastError, f.calls)
 				}
@@ -330,7 +339,7 @@ func TestProQuotaTriggersDetachedMergeAndPreservesUncertainty(t *testing.T) {
 				if len(f.calls) != 0 {
 					t.Fatal("unexpected merge", f.calls)
 				}
-				if mode != "available" && (p.TransferStatus != "unknown" || p.ProLastError == "") {
+				if mode != "available" && mode != "custom_below" && (p.TransferStatus != "unknown" || p.ProLastError == "") {
 					t.Fatal("quota refresh erased uncertainty")
 				}
 			}

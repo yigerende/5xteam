@@ -4,7 +4,7 @@ import { LoaderCircle, X } from 'lucide-vue-next'
 import { runMailAccountTask } from '../mailAccountTask'
 import { formatTime } from '../utils'
 
-const emit = defineEmits(['busy', 'finished'])
+const emit = defineEmits(['busy', 'finished', 'progress'])
 const open = ref(false)
 const phase = ref('confirm')
 const batch = ref(false)
@@ -39,6 +39,7 @@ async function confirm() {
   emit('busy', true)
   await Promise.all(tasks.value.map(async task => {
     task.status = 'running'
+    emit('progress', { email: task.email, mode: mode.value, running: true })
     try {
       await runMailAccountTask(task, mode.value, job => {
         if (disposed) return
@@ -48,7 +49,7 @@ async function confirm() {
       if (!disposed) { task.status = 'success'; counts.ok++ }
     } catch (error) {
       if (!disposed) { task.status = 'failed'; task.error = error.message; counts.fail++ }
-    } finally { if (!disposed) counts.done++ }
+    } finally { if (!disposed) { counts.done++; emit('progress', { email: task.email, mode: mode.value, running: false }) } }
   }))
   if (disposed) return
   phase.value = 'done'

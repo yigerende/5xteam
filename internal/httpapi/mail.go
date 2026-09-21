@@ -466,6 +466,7 @@ func (s *Server) startMailAccountOAuth(w http.ResponseWriter, r *http.Request) {
 	job := map[string]any{"job_id": jobID, "email": email, "trigger": "mail_oauth", "mail_only": true, "status": "queued", "state": "queued", "logs": []any{}, "error": "", "result": nil}
 	s.oauthJobs[jobID] = job
 	s.oauthMu.Unlock()
+	_ = s.store.StartProManualStage(email, "oauth", jobID)
 	go s.runMailAccountOAuth(jobID, email)
 	writeAPI(w, http.StatusAccepted, map[string]any{"success": true, "job": cloneRegistrationJob(job)}, "")
 }
@@ -509,6 +510,11 @@ func (s *Server) finishMailAccountOAuthJob(jobID, email string, result map[strin
 		job["status"], job["state"], job["error"], job["result"] = status, status, message, result
 	}
 	s.oauthMu.Unlock()
+	stageStatus := "failed"
+	if status == "success" {
+		stageStatus = "completed"
+	}
+	_ = s.store.FinishProManualStage(email, "oauth", jobID, stageStatus, message)
 }
 
 func (s *Server) startMailAccountRegistration(w http.ResponseWriter, r *http.Request) {

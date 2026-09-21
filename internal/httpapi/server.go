@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"chatgpt-space-merge/internal/cpa"
+	"chatgpt-space-merge/internal/gptpay"
 	"chatgpt-space-merge/internal/mailbridge"
 	"chatgpt-space-merge/internal/model"
 	"chatgpt-space-merge/internal/store"
@@ -64,6 +65,19 @@ type Server struct {
 	planCheckMu               sync.Mutex
 	planCheckNext             time.Time
 	proLocks                  sync.Map
+	gptpay                    *gptpay.Client
+	gptpayPollMu              sync.Mutex
+	gptpayMonitorMu           sync.Mutex
+	gptpayMonitorCancel       context.CancelFunc
+	gptpayMonitorWG           sync.WaitGroup
+	gptpayMonitorClosed       bool
+	proAutoMu                 sync.Mutex
+	proScheduleMu             sync.Mutex
+	proAutoWG                 sync.WaitGroup
+	proAutoJobs               map[string]context.CancelFunc
+	proAutoClosed             bool
+	proAutoCancel             context.CancelFunc
+	proAutoHooks              *proAutomationHooks
 	proMergeMu                sync.Mutex
 	proMergeWG                sync.WaitGroup
 	proMergeJobs              map[string]context.CancelFunc
@@ -112,6 +126,15 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 	_ = dataStore.RecoverAutoRotationClaims()
 	_ = dataStore.RecoverAutoRotationTasks()
 	_ = dataStore.RecoverProWorkflows()
+	if err := dataStore.RecoverProAutomations(); err != nil {
+		return nil, err
+	}
+	if err := dataStore.RecoverProSchedule(); err != nil {
+		return nil, err
+	}
+	if err := dataStore.RecoverProManualStages(); err != nil {
+		return nil, err
+	}
 	if err := dataStore.RecoverSMSActivations(); err != nil {
 		return nil, err
 	}
@@ -128,6 +151,7 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 		server.accountCycles.Store(account.ID, account.CycleID)
 	}
 	go server.auditWriter()
+	server.startProAutomationMonitor()
 	return server, nil
 }
 
@@ -151,6 +175,8 @@ func (s *Server) Close() {
 		}
 		s.qualityMu.Unlock()
 		s.qualityWG.Wait()
+		s.stopGPTPayOrderMonitor()
+		s.stopProAutomations()
 		s.stopProMergeJobs()
 		close(s.auditStop)
 		s.stopMailInfoJobs()
@@ -250,6 +276,28 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/mail/accounts/invalid-at-outside", s.listOutsideInvalidATMailEmails)
 	mux.HandleFunc("POST /api/mail/accounts/select", s.selectMailAccounts)
 	mux.HandleFunc("GET /api/pro-accounts", s.listProAccounts)
+	mux.HandleFunc("POST /api/pro-accounts/delete", s.deleteProAccounts)
+	mux.HandleFunc("POST /api/pro-accounts/export", s.exportProAccounts)
+	mux.HandleFunc("POST /api/pro-accounts/import", s.importProAccounts)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/resume-import", s.resumeImportedPro)
+	mux.HandleFunc("GET /api/gptpay/settings", s.getGPTPaySettings)
+	mux.HandleFunc("PUT /api/gptpay/settings", s.saveGPTPaySettings)
+	mux.HandleFunc("GET /api/gptpay/account", s.getGPTPayAccount)
+	mux.HandleFunc("GET /api/gptpay/cards", s.listGPTPayCards)
+	mux.HandleFunc("POST /api/gptpay/cards", s.saveGPTPayCard)
+	mux.HandleFunc("PUT /api/gptpay/cards/{id}", s.saveGPTPayCard)
+	mux.HandleFunc("DELETE /api/gptpay/cards/{id}", s.deleteGPTPayCard)
+	mux.HandleFunc("GET /api/gptpay/orders", s.listGPTPayOrders)
+	mux.HandleFunc("POST /api/gptpay/orders/query", s.queryGPTPayOrders)
+	mux.HandleFunc("POST /api/gptpay/orders/{id}/refresh", s.refreshGPTPayOrder)
+	mux.HandleFunc("POST /api/gptpay/orders/{id}/retry", s.retryGPTPayOrder)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/recharge", s.createGPTPayOrder)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/auto-pro", s.startProAutomation)
+	mux.HandleFunc("GET /api/pro-schedule", s.getProSchedule)
+	mux.HandleFunc("POST /api/pro-schedule/run", s.runProScheduleNow)
+	mux.HandleFunc("GET /api/pro-schedule/runs", s.listProScheduleRuns)
+	mux.HandleFunc("GET /api/pro-accounts/{email}/auto-pro", s.getProAutomation)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/auto-pro/stop", s.stopProAutomation)
 	mux.HandleFunc("POST /api/pro-accounts/access-tokens", s.proAccountAccessTokens)
 	mux.HandleFunc("POST /api/pro-accounts/check-plan", s.checkProAccountPlans)
 	mux.HandleFunc("POST /api/pro-accounts/{email}/check-plan", s.checkProAccountPlan)
@@ -266,6 +314,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/pro-accounts/{email}/events/export", s.exportProAccountEvents)
 	mux.HandleFunc("GET /api/pro-settings", s.getProSettings)
 	mux.HandleFunc("PUT /api/pro-settings", s.saveProSettings)
+	mux.HandleFunc("PUT /api/pro-settings/automation", s.saveProAutomationSettings)
 	mux.HandleFunc("POST /api/pro-settings/sub2/test", s.testProSub2)
 	mux.HandleFunc("GET /api/pro-settings/sub2/groups", s.getProSub2Groups)
 	mux.HandleFunc("POST /api/pro-settings/sub2/groups", s.getProSub2Groups)
@@ -314,11 +363,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sms/platform/activations", s.getSMSActiveActivations)
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(mustSub(s.static, "assets")))))
 	mux.HandleFunc("GET /", s.index)
-	return s.requestLog(s.securityHeaders(s.authMiddleware(mux)))
+	return s.requestLog(s.securityHeaders(s.authMiddleware(s.guardProAutomation(mux))))
 }
 
 // StartBackground runs periodic Free account quota checks until ctx is done.
 func (s *Server) StartBackground(ctx context.Context) {
+	s.startGPTPayOrderMonitor(ctx)
 	go s.monitorHeroActivations(ctx)
 	go s.monitorFreeAccounts(ctx)
 	go s.monitorQuality(ctx)

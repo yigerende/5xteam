@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -11,12 +12,21 @@ import (
 )
 
 func normalizeProSettings(v *model.ProSettings) {
+	if v.MaxUnmerged < 1 {
+		v.MaxUnmerged = 5
+	}
+	if v.ScheduleIntervalSeconds < 10 {
+		v.ScheduleIntervalSeconds = 120
+	}
 	v.Provider = strings.ToLower(strings.TrimSpace(v.Provider))
 	if v.Provider != "cpa" {
 		v.Provider = "sub2"
 	}
 	if v.QuotaCheckIntervalSeconds < 10 {
 		v.QuotaCheckIntervalSeconds = 120
+	}
+	if v.QuotaUsedThreshold <= 0 || v.QuotaUsedThreshold > 100 || math.IsNaN(v.QuotaUsedThreshold) || math.IsInf(v.QuotaUsedThreshold, 0) {
+		v.QuotaUsedThreshold = 100
 	}
 	if v.TargetSeatType != "prolite" {
 		v.TargetSeatType = "default"
@@ -158,6 +168,7 @@ func (s *Store) UpdateProAccount(email string, mutate func(*model.MailAccountPro
 		mutate(&p)
 	}
 	p.UpdatedAt = time.Now()
+	p.ReconcileProAutoMerge(p.UpdatedAt)
 	encoded, err := json.Marshal(p)
 	if err != nil {
 		return p, err

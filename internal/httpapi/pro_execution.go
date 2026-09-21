@@ -30,6 +30,22 @@ func proStageStatus(p model.MailAccountProfile, stage string) string {
 	return ""
 }
 
+// Preselected IDs alone do not pin a workflow. A fully reset, unstarted
+// account follows the current setting; in-flight steps keep their target.
+func proMergeTargetPinned(p model.MailAccountProfile) bool {
+	if p.SpaceMergedOnce || p.SpaceMergedAt != nil || (p.ProMigration != nil && p.ProMigration.TargetTeamID != "") {
+		return true
+	}
+	for _, status := range []string{p.InviteStatus, p.AcceptStatus, p.TransferStatus, p.RemoveStatus} {
+		switch status {
+		case "", "pending", "not_started":
+		default:
+			return true
+		}
+	}
+	return false
+}
+
 func setProStage(p *model.MailAccountProfile, stage, status string) {
 	switch stage {
 	case "invite":
@@ -91,6 +107,11 @@ func (s *Server) updateProAccountStage(w http.ResponseWriter, r *http.Request) {
 		if input.Status == "failed" {
 			p.ProLastError = "手动标记" + proStageLabel(input.Stage) + "失败"
 		}
+		if p.ProManualStages == nil {
+			p.ProManualStages = map[string]model.ProStageProgress{}
+		}
+		now := time.Now()
+		p.ProManualStages["merge"] = model.ProStageProgress{ID: randomRegistrationID(), Status: p.ProMergeProgress(), Error: p.ProLastError, StartedAt: now, UpdatedAt: now}
 	})
 	if err != nil {
 		writeAPI(w, 500, nil, err.Error())

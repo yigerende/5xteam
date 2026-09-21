@@ -50,6 +50,7 @@ func (s *Server) startProMergeJob(email string, unlock func()) (model.MailAccoun
 	if err != nil {
 		return p, err
 	}
+	finishStage := s.beginProManualStage(email, "merge")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	if s.proMergeJobs == nil {
 		s.proMergeJobs = make(map[string]context.CancelFunc)
@@ -69,6 +70,7 @@ func (s *Server) startProMergeJob(email string, unlock func()) (model.MailAccoun
 			s.proMergeMu.Unlock()
 		}()
 		var runErr error
+		defer func() { finishStage(runErr) }()
 		if unlock == nil {
 			value, _ := s.proLocks.LoadOrStore("account:"+strings.ToLower(email), &sync.Mutex{})
 			unlock, runErr = lockProMutex(ctx, value.(*sync.Mutex))
@@ -86,6 +88,16 @@ func (s *Server) startProMergeJob(email string, unlock func()) (model.MailAccoun
 			p.ProWorkflowRunning = false
 			if runErr != nil {
 				p.ProLastError = runErr.Error()
+			} else if p.ProMigration != nil {
+				p.ProMigration.Paused = false
+				p.ProMigration.Notice = "迁移流程已完成"
+				if p.ProAuto.ID != "" {
+					p.ProAuto.Status, p.ProAuto.Stage, p.ProAuto.Error = "completed", "merge", ""
+					if p.ProAuto.Steps == nil {
+						p.ProAuto.Steps = map[string]string{}
+					}
+					p.ProAuto.Steps["merge"] = "completed"
+				}
 			}
 		})
 	}()

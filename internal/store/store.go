@@ -88,6 +88,14 @@ func Open(dataDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.migrateProQuotaSettings(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.initializeProScheduler(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -160,6 +168,17 @@ func (s *Store) initSchema() error {
 			id INTEGER PRIMARY KEY CHECK (id = 1), profile TEXT NOT NULL,
 			encrypted_sub2_password TEXT NOT NULL DEFAULT '', encrypted_cpa_key TEXT NOT NULL DEFAULT ''
 		);
+		CREATE TABLE IF NOT EXISTS gptpay_settings (id INTEGER PRIMARY KEY CHECK(id=1), profile TEXT NOT NULL, encrypted_key TEXT NOT NULL DEFAULT '');
+		CREATE TABLE IF NOT EXISTS gptpay_cards (id TEXT PRIMARY KEY, profile TEXT NOT NULL, encrypted_secret TEXT NOT NULL, enabled INTEGER NOT NULL, created_at TEXT NOT NULL);
+		CREATE INDEX IF NOT EXISTS gptpay_cards_enabled_idx ON gptpay_cards(enabled,created_at DESC);
+		CREATE TABLE IF NOT EXISTS gptpay_orders (id TEXT PRIMARY KEY, email TEXT NOT NULL COLLATE NOCASE, profile TEXT NOT NULL, encrypted_snapshot TEXT NOT NULL, active INTEGER NOT NULL, created_at TEXT NOT NULL);
+		CREATE UNIQUE INDEX IF NOT EXISTS gptpay_orders_active_email_idx ON gptpay_orders(email) WHERE active=1;
+		CREATE INDEX IF NOT EXISTS gptpay_orders_created_idx ON gptpay_orders(created_at DESC,id DESC);
+		CREATE INDEX IF NOT EXISTS gptpay_orders_email_created_idx ON gptpay_orders(email,created_at DESC,id DESC);
+		CREATE INDEX IF NOT EXISTS gptpay_orders_poll_due_idx ON gptpay_orders(COALESCE(json_extract(profile,'$.next_status_check_at'),''),created_at)
+		WHERE COALESCE(json_extract(profile,'$.remote.id'),'')<>'' AND (active=1 OR json_extract(profile,'$.remote.cancellationStatus') IN ('waiting','pending'));
+		CREATE INDEX IF NOT EXISTS gptpay_orders_success_email_idx ON gptpay_orders(email,created_at DESC,id DESC) WHERE json_extract(profile,'$.status')='success';
+		CREATE INDEX IF NOT EXISTS mail_pro_auto_due_idx ON mail_accounts(json_extract(profile,'$.pro_auto.status'),json_extract(profile,'$.pro_auto.next_check_at')) WHERE json_extract(profile,'$.management_scope')='pro';
 		CREATE TABLE IF NOT EXISTS pro_oauth_sessions (
 			id TEXT PRIMARY KEY, profile TEXT NOT NULL, encrypted_verifier TEXT NOT NULL,
 			expires_at TEXT NOT NULL
@@ -478,6 +497,9 @@ func preserveMailPlanCheck(profile *model.MailAccountProfile, old model.MailAcco
 }
 
 func preserveProProfile(profile *model.MailAccountProfile, old model.MailAccountProfile) {
+	profile.ProAuto = old.ProAuto
+	profile.ProMigration = old.ProMigration
+	profile.ProManualStages = old.ProManualStages
 	profile.RefreshTokenEdited = old.RefreshTokenEdited
 	profile.OAuthStatus, profile.OAuthAccountID, profile.OAuthUserID = old.OAuthStatus, old.OAuthAccountID, old.OAuthUserID
 	profile.OAuthExpiresAt, profile.OAuthAuthorizedAt = old.OAuthExpiresAt, old.OAuthAuthorizedAt
@@ -571,6 +593,19 @@ func (s *Store) SaveMailAccountOAuth(email, accessToken, refreshToken string) er
 // SaveMailAccountOAuthBundle atomically stores a Codex OAuth token bundle and
 // its non-secret identity projection. A blank rotated RT keeps the old RT.
 func (s *Store) SaveMailAccountOAuthBundle(email, accessToken, refreshToken, idToken, accountID, userID string, expiresAt time.Time) error {
+	return s.saveMailAccountOAuthBundle(email, accessToken, refreshToken, idToken, accountID, userID, expiresAt, "")
+}
+
+// SaveMailAccountOAuthSessionBundle commits the post-purchase Web Session and
+// Codex credentials together. A missing new Session preserves the saved one.
+func (s *Store) SaveMailAccountOAuthSessionBundle(email, accessToken, refreshToken, idToken, accountID, userID string, expiresAt time.Time, chatGPTSession string) error {
+	if chatGPTSession != "" && !json.Valid([]byte(chatGPTSession)) {
+		return errors.New("ChatGPT Session 格式无效")
+	}
+	return s.saveMailAccountOAuthBundle(email, accessToken, refreshToken, idToken, accountID, userID, expiresAt, chatGPTSession)
+}
+
+func (s *Store) saveMailAccountOAuthBundle(email, accessToken, refreshToken, idToken, accountID, userID string, expiresAt time.Time, chatGPTSession string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -605,6 +640,9 @@ func (s *Store) SaveMailAccountOAuthBundle(email, accessToken, refreshToken, idT
 	}
 	if strings.TrimSpace(idToken) != "" {
 		credentials.IDToken = strings.TrimSpace(idToken)
+	}
+	if chatGPTSession != "" {
+		credentials.ChatGPTSession = chatGPTSession
 	}
 	profile = mailProfileWithCredentials(profile, credentials)
 	now := time.Now()
@@ -751,6 +789,10 @@ func (s *Store) UpdateMailAccountPlanCheck(email string, result model.AccountPla
 func (s *Store) DeleteMailAccount(email string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.deleteMailAccountLocked(email, false)
+}
+
+func (s *Store) deleteMailAccountLocked(email string, pro bool) error {
 	email = strings.ToLower(strings.TrimSpace(email))
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -794,6 +836,11 @@ func (s *Store) DeleteMailAccount(email string) error {
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		return errors.New("邮箱账号不存在")
+	}
+	if pro {
+		if _, err = tx.Exec(`DELETE FROM pro_oauth_sessions WHERE LOWER(json_extract(profile,'$.target_email'))=?`, email); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

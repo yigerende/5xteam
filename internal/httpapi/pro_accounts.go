@@ -17,9 +17,45 @@ import (
 	"time"
 
 	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/store"
 	"chatgpt-space-merge/internal/sub2"
 	"chatgpt-space-merge/internal/workflow"
 )
+
+type proAccountListItem struct {
+	model.MailAccountProfile
+	ActivationCard *store.ProActivationCard `json:"activation_card,omitempty"`
+	StageProgress  model.ProStageDisplay    `json:"pro_stage_progress"`
+}
+
+func (s *Server) proAccountListWithCards(items []model.MailAccountProfile) ([]proAccountListItem, error) {
+	emails := make([]string, 0, len(items))
+	for _, item := range items {
+		emails = append(emails, item.Email)
+	}
+	cards, err := s.store.ProActivationCards(emails)
+	if err != nil {
+		return nil, err
+	}
+	orders, err := s.store.ProLatestPaymentOrders(emails)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]proAccountListItem, 0, len(items))
+	for _, item := range items {
+		row := proAccountListItem{MailAccountProfile: item, StageProgress: item.ProStages()}
+		row.ProAuto.Error = row.ProAuto.DisplayError()
+		if order, ok := orders[strings.ToLower(item.Email)]; ok && item.ProAuto.ID == "" && item.ProManualStages["recharge"].ID == "" {
+			progress := proPaymentStage(order)
+			row.StageProgress.Steps["recharge"], row.StageProgress.Errors["recharge"] = progress.Status, progress.Error
+		}
+		if card, ok := cards[strings.ToLower(strings.TrimSpace(item.Email))]; ok {
+			row.ActivationCard = &card
+		}
+		result = append(result, row)
+	}
+	return result, nil
+}
 
 func (s *Server) listProAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
@@ -29,14 +65,24 @@ func (s *Server) listProAccounts(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusInternalServerError, nil, "读取 Pro 账号失败: "+err.Error())
 			return
 		}
-		writeAPI(w, http.StatusOK, paginatedData(items, total, page, map[string]any{"summary": summary}), "")
+		rows, err := s.proAccountListWithCards(items)
+		if err != nil {
+			writeAPI(w, 500, nil, "读取开通银行卡失败")
+			return
+		}
+		writeAPI(w, http.StatusOK, paginatedData(rows, total, page, map[string]any{"summary": summary}), "")
 		return
 	}
 	items := s.store.MailAccountsByManagementScope("pro")
 	if items == nil {
 		items = []model.MailAccountProfile{}
 	}
-	writeAPI(w, http.StatusOK, items, "")
+	rows, err := s.proAccountListWithCards(items)
+	if err != nil {
+		writeAPI(w, 500, nil, "读取开通银行卡失败")
+		return
+	}
+	writeAPI(w, http.StatusOK, rows, "")
 }
 
 func (s *Server) checkProAccountPlan(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +128,13 @@ func (s *Server) checkProAccountPlans(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			defer workers.Done()
 			for email := range jobs {
+				s.proAutoMu.Lock()
+				autoRunning := s.proAutoJobs[strings.ToLower(email)] != nil
+				s.proAutoMu.Unlock()
+				if autoRunning {
+					results <- itemResult{Email: email, Error: "Pro 全自动流程正在执行"}
+					continue
+				}
 				result, profile, checkErr := s.runProAccountPlanCheck(r.Context(), email)
 				item := itemResult{Email: email, Result: result, Account: profile}
 				if checkErr != nil {
@@ -332,6 +385,8 @@ func (s *Server) completeProOAuth(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 400, nil, err.Error())
 		return
 	}
+	w, finishStage := s.trackProStageResponse(w, session.TargetEmail, "oauth")
+	defer finishStage()
 	code, state, err := parseProOAuthCallback(input.CallbackURL, input.Code, input.State)
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
@@ -455,6 +510,8 @@ func (s *Server) currentProCredential(ctx context.Context, email string) (model.
 
 func (s *Server) refreshProOAuth(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
+	w, finishStage := s.trackProStageResponse(w, email, "oauth")
+	defer finishStage()
 	profile, credentials, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		writeAPI(w, 404, nil, err.Error())
@@ -549,6 +606,7 @@ func (s *Server) saveProSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	previousProvider := current.Provider
+	input.ScheduledEnabled, input.MaxUnmerged, input.ScheduleIntervalSeconds = current.ScheduledEnabled, current.MaxUnmerged, current.ScheduleIntervalSeconds
 	now := time.Now()
 	input.LastQuotaSweepAt = current.LastQuotaSweepAt
 	if input.QuotaEnabled {
@@ -644,6 +702,8 @@ func buildProCredentials(profile model.MailAccountProfile, credentials model.Mai
 }
 
 func (s *Server) performProPush(ctx context.Context, email string) (out model.MailAccountProfile, retErr error) {
+	finishStage := s.beginProManualStage(email, "push")
+	defer func() { finishStage(retErr) }()
 	profile, credentials, err := s.currentProCredential(ctx, email)
 	if err != nil {
 		return profile, err
@@ -680,6 +740,9 @@ func (s *Server) performProPush(ctx context.Context, email string) (out model.Ma
 		now := time.Now()
 		return s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 			p.PushProvider, p.PushStatus, p.CPAAuthFileName = "cpa", "completed", fileName
+			if p.ProMigration != nil {
+				p.ProMigration.Downstream = model.ProDownstream(v)
+			}
 			p.Sub2AccountID, p.Sub2AccountName, p.ProLastError = 0, name, ""
 			p.QuotaCheckedAt = nil
 			p.UpdatedAt = now
@@ -702,6 +765,9 @@ func (s *Server) performProPush(ctx context.Context, email string) (out model.Ma
 	}
 	return s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 		p.PushProvider, p.PushStatus = "sub2", "completed"
+		if p.ProMigration != nil {
+			p.ProMigration.Downstream = model.ProDownstream(v)
+		}
 		p.Sub2AccountID, p.Sub2AccountName = created.ID, created.Name
 		p.CPAAuthFileName, p.ProLastError = "", ""
 		p.QuotaCheckedAt = nil
@@ -738,6 +804,10 @@ func (s *Server) runProBatch(ctx context.Context, emails []string, operation fun
 		go func() {
 			defer wg.Done()
 			for email := range jobs {
+				if s.proAutomationRunning(email) {
+					results <- result{Email: email, Error: "Pro 全自动流程正在执行"}
+					continue
+				}
 				unlock := s.lockProAccount(email)
 				err := operation(ctx, email)
 				unlock()
@@ -792,6 +862,8 @@ func (s *Server) pushProAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) performProQuota(ctx context.Context, email string, auto bool) (out model.MailAccountProfile, retErr error) {
+	finishStage := s.beginProManualStage(email, "quota")
+	defer func() { finishStage(retErr) }()
 	profile, _, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return profile, err
@@ -802,6 +874,9 @@ func (s *Server) performProQuota(ctx context.Context, email string, auto bool) (
 	}
 	if profile.PushStatus != "completed" || profile.PushProvider != v.Provider {
 		return profile, errors.New("账号尚未推送到当前 Pro 下游")
+	}
+	if err = proImportedDownstreamOK(profile, v); err != nil {
+		return profile, err
 	}
 	s.auditProEvent(profile, "quota", "running", v.Provider, "开始检测 Pro 额度", map[string]any{"automatic": auto})
 	defer func() {
@@ -861,7 +936,7 @@ func (s *Server) performProQuota(ctx context.Context, email string, auto bool) (
 			p.ProLastError = ""
 		}
 	})
-	if err == nil && auto && v.AutoMergeEnabled && !profile.SpaceMergedOnce && seven.UsedPercent >= 100 && !proTransferNeedsConfirmation(profile) {
+	if err == nil && auto && v.AutoMergeEnabled && !profile.SpaceMergedOnce && seven.UsedPercent >= v.QuotaUsedThreshold && !proTransferNeedsConfirmation(profile) {
 		profile, err = s.startProMergeJob(email, nil)
 	}
 	return profile, err
@@ -947,8 +1022,14 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if profile.SpaceMergedOnce && profile.RemoveStatus == "completed" {
 		return profile, nil
 	}
-	// Resume against the original Team, even if the default target has changed.
-	if profile.TargetAdminID != "" {
+	// Only a started workflow is bound to its original Team. Preselected
+	// targets and fully reset workflows use the current Pro configuration.
+	profile, err = s.importedProTarget(profile)
+	if err != nil {
+		return profile, err
+	}
+	pinnedTarget := proMergeTargetPinned(profile)
+	if pinnedTarget && profile.TargetAdminID != "" {
 		v.TargetAdminID = profile.TargetAdminID
 		if profile.TargetSeatType != "" {
 			v.TargetSeatType = profile.TargetSeatType
@@ -964,7 +1045,7 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if admin.TeamAccountID == "" {
 		return profile, errors.New("目标母号缺少 Team ID")
 	}
-	if profile.TargetTeamID != "" && profile.TargetTeamID != admin.TeamAccountID {
+	if pinnedTarget && profile.TargetTeamID != "" && profile.TargetTeamID != admin.TeamAccountID {
 		return profile, errors.New("原流程空间与母号当前空间不一致，禁止向其他空间续跑")
 	}
 	needsChild := profile.AcceptStatus != "completed" || profile.TransferStatus != "completed"
@@ -1147,9 +1228,13 @@ func (s *Server) monitorProAccounts(ctx context.Context) {
 			last := now
 			next := now.Add(time.Duration(v.QuotaCheckIntervalSeconds) * time.Second)
 			v.LastQuotaSweepAt, v.NextQuotaSweepAt = &last, &next
-			_, _ = s.store.SaveProSettings(v, "", "")
+			_ = s.store.UpdateProQuotaSweep(last, next)
 			emails := []string{}
 			for _, p := range s.store.MailAccountsByManagementScope("pro") {
+				// The new full workflow owns its own quota threshold and due time.
+				if p.ProAuto.ID != "" || (p.ProMigration != nil && p.ProMigration.Paused) {
+					continue
+				}
 				needsQuota := !p.SpaceMergedOnce
 				needsCleanup := p.SpaceMergedOnce && p.RemoveStatus != "completed"
 				if p.PushStatus == "completed" && p.PushProvider == v.Provider && !p.ProWorkflowRunning && (needsQuota || needsCleanup) {
@@ -1162,6 +1247,9 @@ func (s *Server) monitorProAccounts(ctx context.Context) {
 					profile, _, readErr := s.store.MailAccountCredential(email)
 					if readErr != nil {
 						return readErr
+					}
+					if profile.ProAuto.ID != "" || (profile.ProMigration != nil && profile.ProMigration.Paused) {
+						return nil
 					}
 					if profile.SpaceMergedOnce && profile.RemoveStatus != "completed" {
 						_, e := s.performProMerge(jobCtx, email)

@@ -48,7 +48,8 @@ func (s *Server) startLocalRegistration(email string) map[string]any {
 // accessToken and that token was persisted to this application's mail account.
 func (s *Server) startLocalLogin(email string) map[string]any {
 	id := randomRegistrationID()
-	job := map[string]any{"job_id": id, "status": "queued", "state": "queued", "email": email, "logs": []any{}, "result": nil, "error": ""}
+	job := map[string]any{"job_id": id, "status": "queued", "state": "queued", "email": email, "logs": []any{}, "result": nil, "error": "", "pro_stage": "login"}
+	_ = s.store.StartProManualStage(email, "login", id)
 	s.registrationMu.Lock()
 	s.registrationJobs[id] = job
 	s.registrationMu.Unlock()
@@ -110,7 +111,19 @@ func (s *Server) appendRegistrationDiagnostic(id string, event protocolOAuthDiag
 
 func (s *Server) finishRegistration(id, state, message string) {
 	s.registrationMu.Lock()
-	defer s.registrationMu.Unlock()
+	defer func() {
+		job := s.registrationJobs[id]
+		email, _ := job["email"].(string)
+		stage, _ := job["pro_stage"].(string)
+		s.registrationMu.Unlock()
+		if stage == "login" {
+			status, detail := "failed", message
+			if state == "success" {
+				status, detail = "completed", ""
+			}
+			_ = s.store.FinishProManualStage(email, stage, id, status, detail)
+		}
+	}()
 	if j := s.registrationJobs[id]; j != nil {
 		j["status"], j["state"], j["error"] = state, state, func() string {
 			if state == "success" {
@@ -441,9 +454,12 @@ func (s *Server) runLocalLogin(id, email string) {
 	}
 	creds.Email = email
 	creds.AccessToken = strings.TrimSpace(at)
-	if encoded, encodeErr := json.Marshal(result); encodeErr == nil {
-		creds.ChatGPTSession = string(encoded)
+	encoded, encodeErr := json.Marshal(result)
+	if encodeErr != nil {
+		s.finishRegistration(id, "failed", "临时 AT 登录结果中的 Session 无法保存")
+		return
 	}
+	creds.ChatGPTSession = string(encoded)
 	profile.Email = email
 	if strings.TrimSpace(profile.Label) == "" {
 		profile.Label = email

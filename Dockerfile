@@ -22,6 +22,7 @@ COPY --from=builder /out/chatgpt-space-merge /app/chatgpt-space-merge
 # These scripts are invoked using paths relative to /app by the Go backend.
 COPY --from=builder /src/internal/protocol_login.py /app/internal/protocol_login.py
 COPY --from=builder /src/internal/protocol_codex_oauth.py /app/internal/protocol_codex_oauth.py
+COPY --from=builder /src/internal/protocol_pro_auto.py /app/internal/protocol_pro_auto.py
 COPY --from=builder /src/internal/protocol_proxy_probe.py /app/internal/protocol_proxy_probe.py
 COPY --from=builder /src/internal/protocol_oauth_token.py /app/internal/protocol_oauth_token.py
 # Bundle the local manager OAuth port and the runtime used by the other flows.
