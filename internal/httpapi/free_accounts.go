@@ -1414,10 +1414,10 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 	// a fresh key while keeping the same request body.
 	fingerprint := sha256.Sum256([]byte(profile.ID + "|" + accountName + "|" + credentials.OAuthAccessToken + "|" + credentials.OAuthRefreshToken + "|" + fmt.Sprint(settings.GroupIDs) + "|" + fmt.Sprint(settings.Models) + "|" + settings.PushPlanType))
 	idempotencyKey := "free-pipeline-" + profile.ID + "-" + fmt.Sprintf("%x", fingerprint[:8])
-	created, err := s.sub2.CreateAccount(r.Context(), settings, password, createInput, idempotencyKey)
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "idempotency") {
-		created, err = s.sub2.CreateAccount(r.Context(), settings, password, createInput, "free-pipeline-"+profile.ID+"-"+randomRegistrationID())
-	}
+	pushScope := "team:" + profile.ID + ":" + profile.CycleID
+	created, err := s.createSub2WithProxy(r.Context(), settings, password, createInput, pushScope, idempotencyKey, func(message string, details map[string]any) {
+		s.auditAccountEventWithIO(r.Context(), profile.ID, "push", "push", "manual_single", "sub2", message, details, nil, nil)
+	})
 	if err != nil {
 		s.failFreeAccount(profile.ID, "push", err)
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
@@ -1450,6 +1450,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPI(w, http.StatusOK, profile, "")
+	s.completeSub2Push(settings, pushScope)
 	s.auditAccountEventWithIO(r.Context(), profile.ID, "push", "push", "manual_single", "sub2", "Sub2 推送成功", map[string]any{"account_id": created.ID}, map[string]any{"name": accountName, "group_ids": settings.GroupIDs, "models": settings.Models, "priority": settings.Priority, "cpa_ws": settings.CpaWS}, map[string]any{"account_id": created.ID, "name": created.Name})
 }
 
@@ -2720,6 +2721,10 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Sub2 != nil {
 		v := input.Sub2
+		if err := resolveSub2ProxyInput(v, sub); err != nil && provider == "sub2" {
+			writeAPI(w, 400, nil, err.Error())
+			return
+		}
 		if provider == "sub2" && strings.TrimSpace(v.Password) == "" {
 			v.Password = subPassword
 		}
@@ -2778,7 +2783,7 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.CpaWS == nil {
 			v.CpaWS = &sub.CpaWS
 		}
-		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{Provider: provider, PushPlanType: v.PushPlanType, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: *v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent, SchedulingPauseTimeoutSeconds: *v.SchedulingPauseTimeoutSeconds}, v.Password)
+		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{BindProxy: boolValue(v.BindProxy), ProxyIDs: v.ProxyIDs, Provider: provider, PushPlanType: v.PushPlanType, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: *v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent, SchedulingPauseTimeoutSeconds: *v.SchedulingPauseTimeoutSeconds}, v.Password)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -2902,6 +2907,8 @@ func (s *Server) getCPAGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type sub2SettingsInput struct {
+	BindProxy                      *bool    `json:"bind_proxy"`
+	ProxyIDs                       []int64  `json:"proxy_ids"`
 	SchedulingPauseTimeoutSeconds  *int     `json:"scheduling_pause_timeout_seconds"`
 	PushPlanType                   string   `json:"push_plan_type"`
 	URL                            string   `json:"url"`
@@ -2931,6 +2938,10 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 	current, currentPassword, err := s.store.Sub2Settings()
 	if err != nil {
 		writeAPI(w, http.StatusInternalServerError, nil, err.Error())
+		return
+	}
+	if err := resolveSub2ProxyInput(&input, current); err != nil {
+		writeAPI(w, 400, nil, err.Error())
 		return
 	}
 	input.URL, input.Email = strings.TrimRight(strings.TrimSpace(input.URL), "/"), strings.TrimSpace(input.Email)
@@ -3022,6 +3033,7 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Models = uniqueNonEmptyStrings(input.Models)
 	settings, err := s.store.SaveSub2Settings(model.Sub2Settings{
+		BindProxy: boolValue(input.BindProxy), ProxyIDs: input.ProxyIDs,
 		Provider: current.Provider, PushPlanType: input.PushPlanType, URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
 		SchedulingPauseTimeoutSeconds: pauseTimeout,
 		GroupIDs:                      input.GroupIDs, GroupNames: input.GroupNames, Models: input.Models, AccountConcurrency: input.AccountConcurrency, Priority: input.Priority,

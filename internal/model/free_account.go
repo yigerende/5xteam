@@ -11,6 +11,8 @@ type Sub2Settings struct {
 	URL                            string   `json:"url"`
 	Email                          string   `json:"email"`
 	PasswordPresent                bool     `json:"password_present"`
+	BindProxy                      bool     `json:"bind_proxy"`
+	ProxyIDs                       []int64  `json:"proxy_ids"`
 	GroupID                        int64    `json:"group_id,omitempty"`
 	GroupName                      string   `json:"group_name,omitempty"`
 	GroupIDs                       []int64  `json:"group_ids,omitempty"`

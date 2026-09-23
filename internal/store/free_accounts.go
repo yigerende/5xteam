@@ -407,6 +407,7 @@ func (s *Store) decryptOptional(value string) (string, error) {
 }
 
 func normalizeSub2Settings(settings *model.Sub2Settings) {
+	settings.ProxyIDs = uniquePositiveInt64(settings.ProxyIDs)
 	if settings.SchedulingPauseTimeoutSeconds < 0 {
 		settings.SchedulingPauseTimeoutSeconds = 0
 	}

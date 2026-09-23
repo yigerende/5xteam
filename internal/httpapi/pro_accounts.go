@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -589,6 +588,10 @@ func (s *Server) saveProSettings(w http.ResponseWriter, r *http.Request) {
 		input.CPA.URL = current.CPA.URL
 	}
 	if input.Provider == "sub2" {
+		if err := sub2.ValidateProxySettings(input.Sub2); err != nil {
+			writeAPI(w, 400, nil, err.Error())
+			return
+		}
 		if err := validateSub2Connection(input.Sub2.URL, input.Sub2.Email, input.Sub2Password); err != nil {
 			writeAPI(w, 400, nil, err.Error())
 			return
@@ -755,15 +758,15 @@ func (s *Server) performProPush(ctx context.Context, email string) (out model.Ma
 	name = s.sub2NameWithMother(name, profile.TargetAdminID, "")
 	input.Name = name
 	fingerprint := sha256.Sum256([]byte(email + "|" + name + "|" + credentials.AccessToken))
-	created, err := s.sub2.CreateAccount(ctx, v.Sub2, subPassword, input, "pro-"+profile.ID+"-"+fmt.Sprintf("%x", fingerprint[:8]))
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "idempotency") {
-		created, err = s.sub2.CreateAccount(ctx, v.Sub2, subPassword, input, "pro-"+profile.ID+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-	}
+	pushScope := "pro:" + profile.ID
+	created, err := s.createSub2WithProxy(ctx, v.Sub2, subPassword, input, pushScope, "pro-"+profile.ID+"-"+fmt.Sprintf("%x", fingerprint[:8]), func(message string, details map[string]any) {
+		s.auditProEvent(profile, "push", "running", "sub2", message, details)
+	})
 	if err != nil {
 		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.PushStatus, p.ProLastError = "failed", err.Error() })
 		return profile, err
 	}
-	return s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+	out, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 		p.PushProvider, p.PushStatus = "sub2", "completed"
 		if p.ProMigration != nil {
 			p.ProMigration.Downstream = model.ProDownstream(v)
@@ -772,6 +775,10 @@ func (s *Server) performProPush(ctx context.Context, email string) (out model.Ma
 		p.CPAAuthFileName, p.ProLastError = "", ""
 		p.QuotaCheckedAt = nil
 	})
+	if err == nil {
+		s.completeSub2Push(v.Sub2, pushScope)
+	}
+	return out, err
 }
 
 func (s *Server) pushProAccount(w http.ResponseWriter, r *http.Request) {

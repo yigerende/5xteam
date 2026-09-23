@@ -90,6 +90,7 @@ type Server struct {
 	sessions                  map[string]time.Time
 	autoMu                    sync.Mutex
 	autoAdminLocks            sync.Map
+	sub2PushLocks             sync.Map
 	seatAssignmentMu          sync.Mutex
 	accountCycles             sync.Map
 	autoRunning               bool
@@ -267,6 +268,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/free-accounts/{id}/quality/restore", s.restoreQualityAccount)
 	mux.HandleFunc("PUT /api/sub2-settings", s.saveSub2Settings)
 	mux.HandleFunc("POST /api/sub2-settings/test", s.testSub2Settings)
+	mux.HandleFunc("POST /api/sub2-settings/proxies", s.getSub2Proxies)
 	mux.HandleFunc("GET /api/push-settings", s.getPushSettings)
 	mux.HandleFunc("PUT /api/push-settings", s.savePushSettings)
 	mux.HandleFunc("POST /api/push-settings/cpa/test", s.testCPASettings)
@@ -318,6 +320,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pro-settings/sub2/test", s.testProSub2)
 	mux.HandleFunc("GET /api/pro-settings/sub2/groups", s.getProSub2Groups)
 	mux.HandleFunc("POST /api/pro-settings/sub2/groups", s.getProSub2Groups)
+	mux.HandleFunc("POST /api/pro-settings/sub2/proxies", s.getProSub2Proxies)
 	mux.HandleFunc("POST /api/pro-settings/cpa/test", s.testProCPA)
 	mux.HandleFunc("GET /api/pro-settings/cpa/groups", s.getProCPAGroups)
 	mux.HandleFunc("POST /api/pro-settings/cpa/groups", s.getProCPAGroups)

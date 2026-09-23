@@ -67,6 +67,7 @@ func (q QuotaUsage) Windows() (window5H, window7D *model.FreeQuotaWindow) {
 }
 
 type CreateAccountInput struct {
+	ProxyID     *int64
 	Name        string
 	Credentials map[string]any
 	GroupIDs    []int64
@@ -151,6 +152,9 @@ func (c *Client) CreateAccount(ctx context.Context, settings model.Sub2Settings,
 	}
 	if input.CpaWS {
 		body["cpa_ws"] = 1
+	}
+	if input.ProxyID != nil {
+		body["proxy_id"] = *input.ProxyID
 	}
 	data, err := c.doJSON(ctx, settings, password, http.MethodPost, "/api/v1/admin/accounts", body, map[string]string{"Idempotency-Key": idempotencyKey})
 	if err != nil {
@@ -462,7 +466,7 @@ func (c *Client) doJSON(ctx context.Context, settings model.Sub2Settings, passwo
 			json.Unmarshal(data, &envelope) == nil && envelope.Reason == "OPENAI_QUOTA_UPSTREAM_ERROR" {
 			return nil, fmt.Errorf("%w: %s", ErrAccountUnauthorized, envelope.Message)
 		}
-		return nil, fmt.Errorf("Sub2 %s HTTP %d: %s", path, response.StatusCode, compact(data))
+		return nil, &HTTPError{Status: response.StatusCode, Path: path, Message: compact(data)}
 	}
 	var envelope apiEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
