@@ -132,6 +132,22 @@ func (s *Store) TeamVisits(email, userID string) ([]model.TeamVisit, error) {
 	return items, rows.Err()
 }
 
+func (s *Store) ArchivedTeamAccount(email, userID string) (model.FreeAccountProfile, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var raw string
+	err := s.db.QueryRow(`SELECT profile FROM team_cycles WHERE email=? OR (user_id=? AND user_id!='') ORDER BY updated_at DESC LIMIT 1`, strings.ToLower(strings.TrimSpace(email)), userID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.FreeAccountProfile{}, false, nil
+	}
+	if err != nil {
+		return model.FreeAccountProfile{}, false, err
+	}
+	var profile model.FreeAccountProfile
+	err = json.Unmarshal([]byte(raw), &profile)
+	return profile, err == nil, err
+}
+
 func (s *Store) HasVisitedTeam(p model.FreeAccountProfile, teamID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

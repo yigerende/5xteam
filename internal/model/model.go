@@ -389,7 +389,12 @@ type AutoRotationRun struct {
 	SeatTotal              int        `json:"seat_total"`
 	SeatRemaining          int        `json:"seat_remaining"`
 	ReservedSeats          int        `json:"reserved_seats"`
+	ReuseEnabled           bool       `json:"reuse_enabled,omitempty"`
 	Planned                int        `json:"planned"`
+	Prepared               int        `json:"prepared,omitempty"`
+	PreparationFailed      int        `json:"preparation_failed,omitempty"`
+	Started                int        `json:"started,omitempty"`
+	Unfilled               int        `json:"unfilled,omitempty"`
 	Succeeded              int        `json:"succeeded"`
 	Failed                 int        `json:"failed"`
 	Status                 string     `json:"status"`

@@ -186,9 +186,10 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 	// still cannot plan beyond the capacity already committed to invitations.
 	reserved := 0
 	tasks := s.store.AutoRotationTasks("")
+	usage := premiumUsageByAdmin(capacityAccounts, tasks)
 	for _, admin := range admins {
 		if !admin.RotationDisabled {
-			reserved += pendingAutoInviteCountForAdmin(tasks, capacityAccounts, admin.ID)
+			reserved += usage[admin.ID].inFlight
 		}
 	}
 	seatRemaining := seatTotal - insidePremium
@@ -205,7 +206,7 @@ func (s *Server) startAutoRotation(ctx context.Context, trigger string) (model.A
 			}
 		}
 	}
-	run := model.AutoRotationRun{ID: randomRegistrationID(), Trigger: trigger, AveragePercent: avg, SeatTotal: seatTotal, SeatRemaining: seatRemaining, ReservedSeats: reserved, SpaceAccountCount: spaceCount, QuotaAccountCount: quotaCount, StartedAt: time.Now(), Status: "skipped", Reason: "当前平均剩余额度未低于阈值", DecisionMaxPerRun: settings.MaxPerRun}
+	run := model.AutoRotationRun{ID: randomRegistrationID(), Trigger: trigger, AveragePercent: avg, SeatTotal: seatTotal, SeatRemaining: seatRemaining, ReservedSeats: reserved, ReuseEnabled: settings.AllowMultiMotherReuse, SpaceAccountCount: spaceCount, QuotaAccountCount: quotaCount, StartedAt: time.Now(), Status: "skipped", Reason: "当前平均剩余额度未低于阈值", DecisionMaxPerRun: settings.MaxPerRun}
 	if snapshotCount == 0 {
 		run.Reason = "没有可用的席位统计快照，请先在 Team 账号管理页面刷新 5x 席位"
 		enabled := 0
@@ -348,6 +349,10 @@ func (s *Server) capacityForAdmin(ctx context.Context, admin model.AdminAccountP
 
 func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotationRun, settings model.AutoRotationSettings) {
 	defer func() { s.autoMu.Lock(); s.autoRunning = false; s.autoMu.Unlock() }()
+	if settings.AllowMultiMotherReuse {
+		s.executeAutoRotationWithReuse(ctx, run, settings)
+		return
+	}
 	admins := s.store.AdminAccounts()
 	candidates := s.store.FreeAccounts()
 	proEmails := make(map[string]struct{})
@@ -611,6 +616,7 @@ func (s *Server) availablePremiumSlots(ctx context.Context, admins []model.Admin
 	accounts := s.store.FreeAccounts()
 	tasks := s.store.AutoRotationTasks("")
 	snapshots := s.store.AdminCapacitySnapshots()
+	usage := premiumUsageByAdmin(accounts, tasks)
 	for _, a := range admins {
 		if a.RotationDisabled {
 			continue
@@ -619,7 +625,7 @@ func (s *Server) availablePremiumSlots(ctx context.Context, admins []model.Admin
 		if !ok {
 			continue
 		}
-		inside, inFlight := s.premiumUsageForAdminWithTasks(a.ID, accounts, tasks)
+		inside, inFlight := usage[a.ID].inside, usage[a.ID].inFlight
 		available := maxInt(0, cap.Premium.Total-inside-inFlight)
 		total += available
 		event := model.AutoRotationEvent{Type: "seat_query", AdminAccountID: a.ID, Message: "按席位总数快照计算 5x 席位", Details: map[string]any{"snapshot_total": cap.Premium.Total, "inside_premium": inside, "in_flight_invites": inFlight, "available": available}}
@@ -636,6 +642,7 @@ func (s *Server) selectPremiumAdmin(ctx context.Context, admins []model.AdminAcc
 	snapshots := s.store.AdminCapacitySnapshots()
 	accounts := s.store.FreeAccounts()
 	tasks := s.store.AutoRotationTasks("")
+	usage := premiumUsageByAdmin(accounts, tasks)
 	account, _, err := s.store.FreeAccountCredential(accountID)
 	if err != nil {
 		return "", err
@@ -654,7 +661,7 @@ func (s *Server) selectPremiumAdmin(ctx context.Context, admins []model.AdminAcc
 		lock := v.(*sync.Mutex)
 		lock.Lock()
 		if cap, ok := snapshots[a.ID]; ok {
-			inside, inFlight := s.premiumUsageForAdminWithTasks(a.ID, accounts, tasks)
+			inside, inFlight := usage[a.ID].inside, usage[a.ID].inFlight
 			available := cap.Premium.Total - inside - inFlight
 			if available > 0 {
 				lock.Unlock()
@@ -683,6 +690,51 @@ func (s *Server) premiumUsageForAdminWithTasks(adminID string, accounts []model.
 	}
 	inFlight = pendingAutoInviteCountForAdmin(tasks, accounts, adminID)
 	return inside, inFlight
+}
+
+type premiumSeatUsage struct {
+	inside   int
+	inFlight int
+}
+
+// Aggregate the same account and task rules once for all mothers in a batch.
+func premiumUsageByAdmin(accounts []model.FreeAccountProfile, tasks []model.AutoRotationTask) map[string]premiumSeatUsage {
+	usage := make(map[string]premiumSeatUsage)
+	byID := make(map[string]*model.FreeAccountProfile, len(accounts))
+	type claimKey struct{ adminID, accountID string }
+	counted := make(map[claimKey]bool)
+	for i := range accounts {
+		account := &accounts[i]
+		byID[account.ID] = account
+		if !isPremiumSeatType(account.SeatType) || account.RemoveStatus == "completed" || account.RemoteRemovedAt != nil {
+			continue
+		}
+		item := usage[account.AdminAccountID]
+		if account.AcceptStatus == "completed" {
+			item.inside++
+		} else if account.InviteStatus == "running" || account.InviteStatus == "completed" {
+			item.inFlight++
+			counted[claimKey{account.AdminAccountID, account.ID}] = true
+		}
+		usage[account.AdminAccountID] = item
+	}
+	for i := range tasks {
+		task := &tasks[i]
+		if task.SeatType != "prolite" || (task.Status != "queued" && task.Status != "running") {
+			continue
+		}
+		account, ok := byID[task.AccountID]
+		key := claimKey{task.AdminAccountID, task.AccountID}
+		if !ok || counted[key] || (task.CycleID != "" && task.CycleID != account.CycleID) ||
+			account.AcceptStatus == "completed" || account.RemoveStatus == "completed" {
+			continue
+		}
+		item := usage[task.AdminAccountID]
+		item.inFlight++
+		usage[task.AdminAccountID] = item
+		counted[key] = true
+	}
+	return usage
 }
 
 func pendingAutoInviteCount(tasks []model.AutoRotationTask, accounts []model.FreeAccountProfile) int {

@@ -70,6 +70,9 @@ func TestAutoRotationImportBudgetSurvivesPreparationFailures(t *testing.T) {
 			for i := 0; i < 20; i++ {
 				email := fmt.Sprintf("mail-%02d@example.com", i)
 				token := saveImportLimitMail(t, st, email)
+				if tc.reuse && i >= 2 {
+					continue // fresh mailboxes follow the archived, uncertain identities
+				}
 				if tc.failure == "" {
 					continue
 				}
@@ -133,12 +136,16 @@ func TestAutoRotationImportBudgetSurvivesPreparationFailures(t *testing.T) {
 			}
 			for i := 0; i < 20; i++ {
 				email := fmt.Sprintf("mail-%02d@example.com", i)
-				if imported[email] != (i < tc.wantMail) {
+				firstEligible := 0
+				if tc.reuse {
+					firstEligible = 2
+				}
+				if imported[email] != (i >= firstEligible && i < firstEligible+tc.wantMail) {
 					t.Fatalf("oldest-first import mismatch for %s", email)
 				}
 			}
 			wantTasks := tc.waiting
-			if tc.failure == "" {
+			if tc.failure == "" || tc.reuse {
 				wantTasks += tc.wantMail
 			}
 			if wantTasks > tc.seats {
