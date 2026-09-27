@@ -51,6 +51,12 @@ class Scenario:
         return "http://localhost:1455/auth/callback?code=private-code&state=" + self.state
 
     def consent(self, url):
+        if self.o.get("response_session"):
+            session = {"workspaces": [{"id": "ws-1"}]}
+            if self.o["response_session"] == "encoded":
+                session = encoded(session) + ".private-signature"
+            return Response(url, body={"continue_url": "/sign-in-with-chatgpt/codex/consent",
+                                       "oai-client-auth-session": session})
         cookie = "oai-client-auth-session=" + encoded({"workspaces": [{"id": "ws-1"}]}) + "; Path=/; Secure"
         return Response(url, body={"continue_url": "/sign-in-with-chatgpt/codex/consent"}, cookies=[cookie])
 
@@ -84,10 +90,16 @@ class Scenario:
                 raise RuntimeError("curl: (56) Connection closed")
             if self.o.get("both_blocked") or (path == "/oauth/authorize" and self.o.get("first_blocked")):
                 return Response(url, 403, "<html>Access denied</html>")
+            if self.o.get("minimized_session"):
+                return Response(url, 302, location="https://auth.openai.com/log-in",
+                                cookies=["auth-session-minimized=private-minimized; Path=/; Secure",
+                                         "auth-session-minimized-client-checksum=private-checksum; Path=/; Secure"])
             if self.o.get("bootstrap_json"):
                 return Response(url, body={"continue_url": "/log-in"})
             return Response(url, cookies=["login_session=private-cookie; Path=/; Secure"])
         if path == "/log-in":
+            if self.o.get("minimized_session"):
+                return Response(url, body='<html>Welcome back<form action="/log-in" method="post"></form></html>')
             return Response(url, cookies=["login_session=private-cookie; Path=/; Secure"])
         if path == "/api/accounts/authorize/continue":
             self.identifiers += 1
@@ -301,6 +313,52 @@ class ProtocolFlowTests(unittest.TestCase):
                 for call in scenario.calls:
                     self.assertEqual(call["proxies"], {"http": proxy, "https": proxy})
                     self.assertEqual(call["impersonate"], "chrome131")
+
+    def test_minimized_login_session_reaches_tokens_without_bootstrap_retry(self):
+        for options, payload in [
+            ({}, {}),
+            ({"password": True, "totp": True}, {"login_mode": "password_totp", "gpt_password": "private-password", "totp_secret": "JBSWY3DPEHPK3PXP"}),
+            ({"email_mfa": True}, {"totp_secret": "JBSWY3DPEHPK3PXP"}),
+        ]:
+            with self.subTest(options=options):
+                s = Scenario(minimized_session=True, response_session="object", **options)
+                self.success(s, **payload)
+                paths = [c["path"] for c in s.calls]
+                self.assertEqual(paths.count("/oauth/authorize"), 1)
+                self.assertNotIn("/api/oauth/oauth2/auth", paths)
+                self.assertEqual(paths.count("/log-in"), 1)
+                identifier = next(c for c in s.calls if c["path"].endswith("authorize/continue"))
+                self.assertIn("auth-session-minimized=private-minimized", identifier["headers"]["Cookie"])
+                self.assertIn("已识别 OpenAI auth-session-minimized", s.logs.getvalue())
+                self.assertNotIn("private-minimized", s.logs.getvalue())
+
+    def test_response_auth_session_supports_encoded_format(self):
+        self.success(Scenario(minimized_session=True, response_session="encoded"))
+
+    def test_response_auth_session_is_private_and_isolated(self):
+        payload = {"proxy": "http://proxy.example:8080"}
+        flow, other = ProjectProtocolLogin("a", payload), ProjectProtocolLogin("b", payload)
+        session = {"workspaces": [{"id": "private-workspace"}], "token": "private-session-token"}
+        response = core.ProtocolResponse(200, "https://auth.openai.com/api/accounts/mfa/verify", {},
+                                         json.dumps({"oai-client-auth-session": session}))
+        flow.remember_response_auth_session(response)
+        self.assertEqual(flow.decode_oauth_session_cookie(), session)
+        self.assertEqual(other.decode_oauth_session_cookie(), {})
+        shape = json.dumps(response_shape(response, flow))
+        self.assertNotIn("private-workspace", shape)
+        self.assertNotIn("private-session-token", shape)
+        for url, status in [("https://chatgpt.com/api/auth/session", 200),
+                            ("https://auth.openai.com/api/accounts/mfa/verify", 403)]:
+            other.remember_response_auth_session(core.ProtocolResponse(status, url, {}, response.text))
+            self.assertEqual(other.decode_oauth_session_cookie(), {})
+
+    def test_minimized_session_requires_actual_cookie_on_auth_host(self):
+        flow = ProjectProtocolLogin("fixture", {"proxy": "http://proxy.example:8080"})
+        flow.set_cookie("auth-session-minimized-client-checksum", "checksum", "auth.openai.com")
+        flow.set_cookie("auth-session-minimized", "unrelated", "chatgpt.com")
+        self.assertFalse(flow.has_auth_session_cookie())
+        flow.set_cookie("auth-session-minimized", "session", ".auth.openai.com")
+        self.assertTrue(flow.has_auth_session_cookie())
 
     def test_both_authorize_routes_blocked_do_not_send_otp(self):
         s = Scenario(both_blocked=True)

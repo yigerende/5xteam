@@ -1,4 +1,5 @@
-"""Keep project diagnostics, dead-account handling and SMS persistence local."""
+"""Keep project diagnostics, protocol compatibility and persistence local."""
+import base64
 import json
 import math
 import random
@@ -7,7 +8,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlsplit
 
 from . import bridge, upstream
 
@@ -21,6 +22,7 @@ def response_shape(response, flow):
     data = response.json()
     page = data.get("page") if isinstance(data.get("page"), dict) else {}
     error = data.get("error") if isinstance(data.get("error"), dict) else {}
+    auth_session = data.get("oai-client-auth-session")
     cookies = cookie_snapshot(flow)
     headers = {key.lower(): bridge.redact(value)[:300] for key, value in response.headers.items()
                if key.lower() in {"content-type", "server", "cf-ray", "cf-mitigated", "x-request-id",
@@ -44,6 +46,9 @@ def response_shape(response, flow):
             "error_message": bridge.redact(error.get("message") or "")[:500],
             "cookie_jar": cookies,
             "auth_session_cookie_present": any(c["name"] == "oai-client-auth-session" for c in cookies),
+            "minimized_auth_session_cookie_present": flow.has_minimized_auth_session_cookie(),
+            "auth_session_response_kind": type(auth_session).__name__ if auth_session is not None else "",
+            "auth_session_response_keys": sorted(auth_session) if isinstance(auth_session, dict) else [],
             "login_session_cookie_present": any(c["name"] == "login_session" for c in cookies)}
 
 
@@ -61,6 +66,7 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         self.last_status = 0
         self.first_failed_request = None
         self.rate_limit_error = None
+        self.response_auth_session = {}
         self.login_details = {
             "configured_login_mode": payload.get("configured_login_mode", "email_otp"),
             "selected_login_mode": payload.get("selected_login_mode", "email_otp"),
@@ -245,10 +251,61 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         self.login_url = authorize_response.url
         return authorize_url
 
+    def has_minimized_auth_session_cookie(self):
+        # OpenAI's newer login page uses this cookie instead of login_session.
+        # The companion checksum alone is not an authorization session.
+        return any(c.name == "auth-session-minimized" and c.value and not c.is_expired()
+                   and c.domain.lstrip(".").lower() == "auth.openai.com"
+                   for c in self.cookie_jar)
+
+    def has_auth_session_cookie(self):
+        return super().has_auth_session_cookie() or self.has_minimized_auth_session_cookie()
+
+    def remember_response_auth_session(self, response):
+        if not 200 <= response.status < 300 or urlsplit(response.url).hostname != "auth.openai.com":
+            return
+        value = response.json().get("oai-client-auth-session")
+        if isinstance(value, str):
+            decoded = unquote(value).strip().strip("\"'")
+            candidates = [decoded]
+            for part in decoded.split(".")[:2]:
+                try:
+                    candidates.append(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)).decode("utf-8"))
+                except (ValueError, UnicodeError):
+                    pass
+            value = None
+            for candidate in candidates:
+                try:
+                    parsed = json.loads(candidate)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(parsed, dict):
+                    value = parsed
+                    break
+        if isinstance(value, dict):
+            # New auth responses carry the client session in JSON. Keep it
+            # local to this login; never synthesize a server session cookie.
+            self.response_auth_session = value
+
+    def decode_oauth_session_cookie(self):
+        if self.first_workspace_id(self.response_auth_session):
+            return self.response_auth_session
+        return super().decode_oauth_session_cookie()
+
+    def next_oauth_authorize_url(self, response, current_url):
+        next_url = super().next_oauth_authorize_url(response, current_url)
+        # A login form posting back to its own document is not another GET hop.
+        if 200 <= response.status < 300 and next_url == current_url:
+            return ""
+        return next_url
+
     def bootstrap_oauth_session(self, authorize_url):
         if self.is_chatgpt_at() and self.has_auth_session_cookie():
             return {"ok": True, "final_url": self.login_url or authorize_url}
-        return super().bootstrap_oauth_session(authorize_url)
+        state = super().bootstrap_oauth_session(authorize_url)
+        if state.get("ok") and self.has_minimized_auth_session_cookie():
+            self.log("authorize", "已识别 OpenAI auth-session-minimized 登录会话，继续账号验证")
+        return state
 
     def exchange_oauth_callback(self, callback_url):
         if not self.is_chatgpt_at():
@@ -433,6 +490,7 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
                         details={"request_id": request_id, "error": bridge.redact(exc)[:500], "error_type": type(exc).__name__}, level="error")
             raise
         self.last_status = response.status
+        self.remember_response_auth_session(response)
         shape = response_shape(response, self)
         if response.status >= 400 and self.first_failed_request is None:
             self.first_failed_request = {"request_id": request_id, "stage": stage,
