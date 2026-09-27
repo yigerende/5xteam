@@ -459,14 +459,33 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		var inviteID string
 		var approveResponse workflow.Response
 		var approveErr error
+		confirmedByMemberLookup := false
+		reconcile := func(cause error) error {
+			if err := s.reconcileApprovedMember(r.Context(), adminClient, adminCredentials.AccessToken, admin, profile, input.SeatType, inviteProxy, cause); err != nil {
+				return err
+			}
+			confirmedByMemberLookup = true
+			return nil
+		}
 		approveErr = func() error {
 			var findErr error
 			inviteID, findErr = adminClient.FindInviteByEmail(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, profile.Email)
 			if findErr != nil {
-				return findErr
+				if err := reconcile(findErr); err != nil {
+					return err
+				}
+				approveResponse = workflow.Response{StatusCode: http.StatusOK, Message: "成员查询确认已进入空间"}
+				return nil
 			}
 			approveResponse, approveErr = retryTeamRequest(r.Context(), s.store.Settings(), func() (workflow.Response, error) {
-				return adminClient.ApproveInvite(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, inviteID, input.SeatType)
+				response, err := adminClient.ApproveInvite(r.Context(), adminCredentials.AccessToken, admin.TeamAccountID, inviteID, input.SeatType)
+				if err == nil {
+					return response, nil
+				}
+				if err = reconcile(err); err != nil {
+					return response, err
+				}
+				return workflow.Response{StatusCode: http.StatusOK, Message: "成员查询确认已进入空间"}, nil
 			})
 			return approveErr
 		}()
@@ -476,7 +495,7 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusBadRequest, nil, approveErr.Error())
 			return
 		}
-		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "approve_request_success", map[string]any{"duration_ms": time.Since(approveStarted).Milliseconds(), "http_status": approveResponse.StatusCode, "invite_id": inviteID, "seat_type": input.SeatType, "proxy": inviteProxy})
+		s.recordJoinTrace(r.Context(), profile.ID, profile.Email, admin.ID, "approve_request_success", map[string]any{"duration_ms": time.Since(approveStarted).Milliseconds(), "http_status": approveResponse.StatusCode, "invite_id": inviteID, "seat_type": input.SeatType, "proxy": inviteProxy, "confirmed_by_member_lookup": confirmedByMemberLookup})
 	}
 	if joinMethod != "child_request" {
 		acceptStarted := time.Now()
