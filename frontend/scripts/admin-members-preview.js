@@ -4,8 +4,8 @@ import '../src/styles.css'
 
 // Local-only browser fixture. Every API call is intercepted; no real account is touched.
 const accounts = [0, 1].map(i => ({ id: `mother-${i}`, label: `测试母号 ${i + 1}`, email: `mother-${i}@example.com`, team_account_id: `team-${i}`, rotation_disabled: i === 1, proxy_id: 'dedicated', current_space_count: 0 }))
-const members = Array.from({ length: 27 }, (_, i) => ({ id: `child-${i}`, email: `child+${i}@example.com`, name: `成员 ${i}`, role: i ? 'standard-user' : 'account-owner', seat_type: i % 2 ? 'default' : 'prolite', created_time: '2026-09-27T09:47:53Z', active: i !== 3 }))
-window.membersFixture = { requests: [], aborted: 0 }
+const members = Array.from({ length: 27 }, (_, i) => ({ id: `child-${i}`, email: `child+${i}@example.com`, name: `成员 ${i}`, role: i ? 'standard-user' : 'account-owner', seat_type: i % 2 ? 'default' : 'prolite', created_time: '2026-09-27T09:47:53Z', active: i !== 3, can_kick: i > 0, can_leave: i > 0 && i !== 2, leave_reason: i === 2 ? '邮件管理中未保存该子号的 AT' : '' }))
+window.membersFixture = { requests: [], aborted: 0, removals: [], failRemoval: false }
 const json = data => new Response(JSON.stringify({ ok: true, data }), { headers: { 'Content-Type': 'application/json' } })
 window.fetch = async (path, options = {}) => {
   const url = new URL(path, location.origin)
@@ -13,6 +13,22 @@ window.fetch = async (path, options = {}) => {
   fixture.requests.push({ path: url.pathname, query: Object.fromEntries(url.searchParams), method: options.method || 'GET' })
   if (url.pathname === '/api/admin-accounts') return json({ items: accounts, total: accounts.length })
   if (url.pathname === '/api/admin-capacity-snapshots') return json({})
+  if (url.pathname.endsWith('/members/remove') && options.method === 'POST') {
+    const input = JSON.parse(options.body)
+    fixture.removals.push(input)
+    const encoder = new TextEncoder()
+    const body = new ReadableStream({ async start(stream) {
+      const send = event => stream.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
+      for (const [stage, message] of [['waiting', '等待母号前序操作'], ['removing', '正在请求 OpenAI'], ['syncing', '正在同步最后一步']]) {
+        send({ type: 'progress', stage, message })
+        await new Promise(resolve => setTimeout(resolve, 220))
+      }
+      if (fixture.failRemoval) send({ type: 'error', error: '模拟 OpenAI 429：请稍后再试' })
+      else { const index = members.findIndex(m => m.id === input.user_id); if (index >= 0) members.splice(index, 1); send({ type: 'done', message: '移出完成' }) }
+      stream.close()
+    } })
+    return new Response(body, { headers: { 'Content-Type': 'application/x-ndjson' } })
+  }
   const match = url.pathname.match(/^\/api\/admin-accounts\/(mother-[01])\/members$/)
   if (!match) throw new Error(`Unexpected fixture request: ${url.pathname}`)
   const query = url.searchParams.get('query') || ''

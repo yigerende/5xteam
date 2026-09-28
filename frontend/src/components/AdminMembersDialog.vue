@@ -1,13 +1,14 @@
 <script setup>
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { RefreshCw, Search, X } from 'lucide-vue-next'
 import { api } from '../api'
+import { removeAdminMember } from '../adminMemberRemove'
 import { formatTime } from '../utils'
 import IconButton from './IconButton.vue'
 import StatusPill from './StatusPill.vue'
 
 const props = defineProps({ account: { type: Object, required: true } })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'changed'])
 const search = ref('')
 const query = ref('')
 const offset = ref(0)
@@ -20,6 +21,26 @@ const error = ref('')
 const queriedAt = ref('')
 const page = computed(() => Math.floor(offset.value / limit) + 1)
 let controller
+const confirmation = ref(null)
+const action = reactive({ running: false, email: '', label: '', message: '', error: '', completed: false, started: 0, elapsed: 0 })
+let elapsedTimer
+function closeDialog() { if (!action.running) emit('close') }
+function askRemove(member, method) { if (!action.running) confirmation.value = { member, method } }
+async function executeRemove() {
+  if (!confirmation.value || action.running) return
+  const { member, method } = confirmation.value
+  confirmation.value = null
+  Object.assign(action, { running: true, email: member.email, label: method === 'mother_kick' ? '踢出' : '退出', message: '正在提交操作…', error: '', completed: false, started: Date.now(), elapsed: 0 })
+  elapsedTimer = window.setInterval(() => { action.elapsed = Math.floor((Date.now() - action.started) / 1000) }, 1000)
+  try {
+    await removeAdminMember(props.account.id, { email: member.email, user_id: member.id, team_account_id: props.account.team_account_id, method }, event => { action.message = event.message || action.message })
+    action.completed = true
+    action.message = `${action.label}完成`
+    emit('changed')
+    await loadMembers(rows.value.length === 1 && offset.value > 0 ? offset.value - limit : offset.value)
+  } catch (e) { action.error = e.message; action.message = '操作未完成，请查看原因' }
+  finally { action.running = false; window.clearInterval(elapsedTimer) }
+}
 
 async function loadMembers(nextOffset = offset.value) {
   controller?.abort()
@@ -46,39 +67,46 @@ async function loadMembers(nextOffset = offset.value) {
     if (controller === request) loading.value = false
   }
 }
-function searchMembers() { query.value = search.value.trim(); loadMembers(0) }
+function searchMembers() { if (action.running) return; query.value = search.value.trim(); loadMembers(0) }
 function resetSearch() { search.value = ''; searchMembers() }
 function seatLabel(seat) { return ({ prolite: '高级席位 5x', default: '普通席位', pro: 'Pro' })[seat] || seat || '未返回' }
 function roleLabel(role) { return ({ 'account-owner': '所有者', 'account-admin': '管理员', 'standard-user': '成员', owner: '所有者', admin: '管理员' })[role] || role || '未返回' }
 watch(() => props.account.id, () => { search.value = ''; query.value = ''; loadMembers(0) }, { immediate: true })
-onUnmounted(() => controller?.abort())
+onUnmounted(() => { controller?.abort(); window.clearInterval(elapsedTimer) })
 </script>
 
 <template>
-  <div class="modal-backdrop members-backdrop" @click.self="emit('close')" @keydown.esc="emit('close')">
+  <div class="modal-backdrop members-backdrop" @click.self="closeDialog" @keydown.esc="closeDialog">
     <section class="modal members-dialog" role="dialog" aria-modal="true" aria-labelledby="admin-members-title">
       <header class="members-header">
         <div><h2 id="admin-members-title">空间实际成员</h2><p>{{ account.label }} · {{ account.email }}</p><small class="mono">{{ account.team_account_id }}</small></div>
-        <IconButton label="关闭成员窗口" @click="emit('close')"><X :size="16" /></IconButton>
+        <IconButton label="关闭成员窗口" :disabled="action.running" @click="closeDialog"><X :size="16" /></IconButton>
       </header>
       <p class="members-note">通过母号专属代理实时查询 OpenAI，包含管理员及成员。每页 {{ limit }} 条。</p>
       <form class="members-search" @submit.prevent="searchMembers">
         <input v-model="search" aria-label="搜索成员邮箱" placeholder="输入邮箱搜索成员" maxlength="320" />
-        <button class="btn ghost" type="submit" :disabled="loading"><Search :size="14" />搜索</button>
-        <button v-if="query || search" class="btn ghost" type="button" :disabled="loading" @click="resetSearch">清空</button>
-        <button class="btn ghost" type="button" :disabled="loading" @click="loadMembers()"><RefreshCw :size="14" :class="{ spin: loading }" />刷新</button>
+        <button class="btn ghost" type="submit" :disabled="loading || action.running"><Search :size="14" />搜索</button>
+        <button v-if="query || search" class="btn ghost" type="button" :disabled="loading || action.running" @click="resetSearch">清空</button>
+        <button class="btn ghost" type="button" :disabled="loading || action.running" @click="loadMembers()"><RefreshCw :size="14" :class="{ spin: loading }" />刷新</button>
       </form>
+      <div v-if="confirmation" class="member-confirm" role="alert">
+        <span>确认{{ confirmation.method === 'mother_kick' ? '由母号踢出' : '由子号自行退出' }} {{ confirmation.member.email }}？</span>
+        <button class="btn ghost" type="button" @click="confirmation = null">取消</button><button class="btn primary" type="button" @click="executeRemove">确认{{ confirmation.method === 'mother_kick' ? '踢出' : '退出' }}</button>
+      </div>
+      <div v-if="action.email" class="member-progress" :class="{ 'has-error': action.error }" role="status" aria-live="polite">
+        <RefreshCw v-if="action.running" class="spin" :size="16" /><div><strong>{{ action.email }} · {{ action.label }}{{ action.running ? `中 · ${action.elapsed}s` : '' }}</strong><p>{{ action.message }}</p><p v-if="action.error">{{ action.error }}</p></div>
+      </div>
       <div v-if="loading" class="members-loading" role="status"><RefreshCw class="spin" :size="20" />正在查询 OpenAI 成员…</div>
       <div v-else-if="error" class="members-error" role="alert">查询失败：{{ error }}<button class="btn ghost" type="button" @click="loadMembers()">重试</button></div>
       <template v-else>
-        <div class="table-shell members-table"><table><thead><tr><th>邮箱 / 名称</th><th>角色</th><th>席位</th><th>加入时间</th><th>状态</th></tr></thead><tbody>
-          <tr v-if="!rows.length"><td colspan="5" class="empty-cell">{{ query ? '未找到匹配的成员' : 'OpenAI 未返回成员' }}</td></tr>
-          <tr v-for="(member, index) in rows" :key="member.id || index"><td class="member-email"><strong>{{ member.email || '未返回邮箱' }}</strong><small>{{ member.name || '—' }}</small></td><td>{{ roleLabel(member.role) }}</td><td>{{ seatLabel(member.seat_type) }}</td><td>{{ member.created_time ? formatTime(member.created_time) : '—' }}</td><td><StatusPill :tone="member.active ? 'success' : 'pending'">{{ member.active ? '正常' : '已停用' }}</StatusPill></td></tr>
+        <div class="table-shell members-table"><table><thead><tr><th>邮箱 / 名称</th><th>角色</th><th>席位</th><th>加入时间</th><th>状态</th><th>操作</th></tr></thead><tbody>
+          <tr v-if="!rows.length"><td colspan="6" class="empty-cell">{{ query ? '未找到匹配的成员' : 'OpenAI 未返回成员' }}</td></tr>
+          <tr v-for="(member, index) in rows" :key="member.id || index"><td class="member-email"><strong>{{ member.email || '未返回邮箱' }}</strong><small>{{ member.name || '—' }}</small></td><td>{{ roleLabel(member.role) }}</td><td>{{ seatLabel(member.seat_type) }}</td><td>{{ member.created_time ? formatTime(member.created_time) : '—' }}</td><td><StatusPill :tone="member.active ? 'success' : 'pending'">{{ member.active ? '正常' : '已停用' }}</StatusPill></td><td><div class="member-actions"><button class="btn ghost" type="button" :disabled="action.running || !member.can_kick" :title="member.can_kick ? '母号踢出，使用母号专属代理' : '不能操作空间所有者或身份不完整的成员'" @click="askRemove(member, 'mother_kick')">踢出</button><button class="btn ghost" type="button" :disabled="action.running || !member.can_leave" :title="member.can_leave ? '子号自行退出，使用全局代理' : member.leave_reason" @click="askRemove(member, 'child_leave')">退出</button></div></td></tr>
         </tbody></table></div>
       </template>
       <footer class="members-footer">
         <span>{{ total >= 0 ? `共 ${total} 位成员` : '成员总数待确认' }}<small v-if="queriedAt">查询于 {{ formatTime(queriedAt) }}</small></span>
-        <div><button class="btn ghost" type="button" :disabled="loading || offset === 0" @click="loadMembers(Math.max(0, offset - limit))">上一页</button><span>第 {{ page }} 页</span><button class="btn ghost" type="button" :disabled="loading || !hasMore" @click="loadMembers(offset + limit)">下一页</button></div>
+        <div><button class="btn ghost" type="button" :disabled="loading || action.running || offset === 0" @click="loadMembers(Math.max(0, offset - limit))">上一页</button><span>第 {{ page }} 页</span><button class="btn ghost" type="button" :disabled="loading || action.running || !hasMore" @click="loadMembers(offset + limit)">下一页</button></div>
       </footer>
     </section>
   </div>
@@ -86,6 +114,12 @@ onUnmounted(() => controller?.abort())
 
 <style scoped>
 .members-backdrop { z-index: 120; }
+.member-actions, .member-confirm { display: flex; align-items: center; gap: 8px; }
+.member-actions { white-space: nowrap; }
+.member-confirm { flex-wrap: wrap; margin-bottom: 12px; font-size: 12px; }
+.member-progress { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 12px; margin-bottom: 12px; background: var(--surface-2); border-radius: 6px; font-size: 12px; }
+.member-progress p { margin: 4px 0 0; overflow-wrap: anywhere; }
+.member-progress.has-error { color: var(--red); }
 .members-dialog { display: flex; flex-direction: column; width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
 .members-header, .members-note, .members-search, .members-footer { flex-shrink: 0; }
 .members-header { display: flex; justify-content: space-between; gap: 16px; }

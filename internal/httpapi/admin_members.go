@@ -50,8 +50,29 @@ func (s *Server) adminAccountMembers(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadGateway, nil, err.Error())
 		return
 	}
+	type memberView struct {
+		workflow.TeamMember
+		CanKick     bool   `json:"can_kick"`
+		CanLeave    bool   `json:"can_leave"`
+		LeaveReason string `json:"leave_reason,omitempty"`
+	}
+	items := make([]memberView, 0, len(page.Items))
+	for _, member := range page.Items {
+		item := memberView{TeamMember: member}
+		item.CanKick = member.ID != "" && member.Email != "" && !protectedAdminMember(profile, member)
+		if item.CanKick {
+			_, creds, err := s.store.MailAccountCredential(member.Email)
+			item.CanLeave = err == nil && strings.TrimSpace(creds.AccessToken) != ""
+			if !item.CanLeave {
+				item.LeaveReason = "邮件管理中未保存该子号的 AT"
+			}
+		} else {
+			item.LeaveReason = "不能操作空间所有者或身份不完整的成员"
+		}
+		items = append(items, item)
+	}
 	writeAPI(w, http.StatusOK, map[string]any{
-		"items": page.Items, "total": page.Total, "offset": page.Offset, "limit": page.Limit,
+		"items": items, "total": page.Total, "offset": page.Offset, "limit": page.Limit,
 		"has_more": page.HasMore, "queried_at": time.Now().UTC(), "team_account_id": profile.TeamAccountID,
 	}, "")
 }

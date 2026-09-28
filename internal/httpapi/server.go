@@ -215,6 +215,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/admin-accounts/{id}/credentials", s.adminAccountCredentials)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/capacity", s.adminAccountCapacity)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/members", s.adminAccountMembers)
+	mux.HandleFunc("POST /api/admin-accounts/{id}/members/remove", s.removeAdminMember)
 	mux.HandleFunc("GET /api/admin-capacity-snapshots", s.adminCapacitySnapshots)
 	mux.HandleFunc("POST /api/admin-accounts/test", s.testAdminAccount)
 	mux.HandleFunc("POST /api/tokens/inspect", s.inspectTokens)
