@@ -627,7 +627,8 @@ func (c *Client) do(ctx context.Context, method, path, token, accountID string, 
 }
 
 type requestOptions struct {
-	childLeave bool
+	childLeave   bool
+	recoverySeat bool
 }
 
 func (c *Client) doWithOptions(ctx context.Context, method, path, token, accountID string, payload any, options requestOptions) (result Response, retErr error) {
@@ -675,6 +676,9 @@ func (c *Client) doWithOptions(ctx context.Context, method, path, token, account
 	setOpenAITargetHeaders(req, path)
 	if options.childLeave {
 		setChildLeaveHeaders(req, path, c)
+	}
+	if options.recoverySeat {
+		req.Header.Set("Referer", "https://chatgpt.com/admin/members")
 	}
 	var statusCode int
 	var data []byte

@@ -25,6 +25,7 @@ import (
 )
 
 type Server struct {
+	recovery                  seatRecoveryRuntime
 	qualityRunMu              sync.Mutex
 	qualityModelRunMu         sync.Mutex
 	qualityModelLastRequest   time.Time
@@ -163,6 +164,7 @@ func (s *Server) Close() {
 		return
 	}
 	s.auditCloseOnce.Do(func() {
+		s.stopSeatRecovery()
 		s.qualityMu.Lock()
 		s.qualityClosed = true
 		if s.qualityCancel != nil {
@@ -197,6 +199,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/change-password", s.changePassword)
 	mux.HandleFunc("POST /api/integrations/turb/register", s.importTurbRegistration)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
+	mux.HandleFunc("GET /api/seat-recovery/settings", s.getSeatRecoverySettings)
+	mux.HandleFunc("PUT /api/seat-recovery/settings", s.saveSeatRecoverySettings)
+	mux.HandleFunc("GET /api/seat-recovery/tasks", s.listSeatRecovery)
+	mux.HandleFunc("POST /api/seat-recovery/tasks/{id}/control", s.controlSeatRecovery)
+	mux.HandleFunc("GET /api/seat-recovery/tasks/{id}/logs", s.seatRecoveryLogs)
+	mux.HandleFunc("GET /api/admin-accounts/{id}/seat-recovery", s.scanSeatRecovery)
+	mux.HandleFunc("POST /api/admin-accounts/{id}/seat-recovery", s.startSeatRecovery)
 	mux.HandleFunc("PUT /api/settings", s.saveSettings)
 	mux.HandleFunc("GET /api/proxies", s.listProxies)
 	mux.HandleFunc("POST /api/proxies", s.createProxy)
@@ -373,6 +382,7 @@ func (s *Server) Handler() http.Handler {
 
 // StartBackground runs periodic Free account quota checks until ctx is done.
 func (s *Server) StartBackground(ctx context.Context) {
+	s.startSeatRecoveryMonitor(ctx)
 	s.startGPTPayOrderMonitor(ctx)
 	go s.monitorHeroActivations(ctx)
 	go s.monitorFreeAccounts(ctx)

@@ -257,6 +257,10 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trace, _ := r.Context().Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
+	if err := s.store.SeatRecoveryAvailable(profile.Email); err != nil {
+		writeAPI(w, http.StatusConflict, nil, err.Error())
+		return
+	}
 	if claim := s.store.FreeAccountClaim(id); claim != "" && claim != trace.TaskID {
 		writeAPI(w, http.StatusConflict, nil, "该账号正在自动轮转，请等待本轮结束")
 		return

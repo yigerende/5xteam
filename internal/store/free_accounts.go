@@ -120,6 +120,9 @@ func (s *Store) SaveImportedFreeAccountOnly(profile model.FreeAccountProfile, ac
 func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, accessToken string, pureImport bool) (model.FreeAccountProfile, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.seatRecoveryAvailableLocked(profile.Email); err != nil {
+		return model.FreeAccountProfile{}, false, err
+	}
 	now := time.Now()
 	var existingRaw string
 	var existing model.FreeAccountProfile

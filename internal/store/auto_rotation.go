@@ -468,6 +468,9 @@ func (s *Store) ClaimAutoRotationAccount(accountID, taskID string) (bool, error)
 	if p.Dead || p.HistoryUncertain || (p.RemoveStatus != "completed" && (p.InviteStatus == "running" || p.AcceptStatus == "running" || (p.TeamAccountID != "" && p.InviteStatus == "completed"))) {
 		return false, nil
 	}
+	if err := s.seatRecoveryAvailableLocked(p.Email); err != nil {
+		return false, err
+	}
 	// Keep the user-visible pipeline error untouched while the task is claimed.
 	p.UpdatedAt = time.Now()
 	b, _ := json.Marshal(p)

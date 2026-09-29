@@ -170,6 +170,9 @@ func (s *Store) BeginFreeAccountCycle(id, expectedCycle, sourceToken string) (mo
 	if p.CycleID != expectedCycle {
 		return p, ErrStaleCycle
 	}
+	if err := s.seatRecoveryAvailableLocked(p.Email); err != nil {
+		return p, err
+	}
 	if p.Dead || p.Quality.Excluded || p.HistoryUncertain || p.RemoveStatus != "completed" || !p.DownstreamCleaned {
 		return p, errors.New("账号未清理完成、历史未确认或已判死号，不能复用")
 	}
