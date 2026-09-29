@@ -14,7 +14,7 @@ import (
 
 func (s *Server) runSeatRecoveryStep(parent context.Context, id string) {
 	p, err := s.store.SeatRecoveryTask(id)
-	if err != nil || p.Finished || p.Status == "failed" || (p.Paused && !p.Lane) {
+	if err != nil || p.Finished || (p.Paused && !p.Lane) || (p.PendingAction == "" && p.Status == "failed") {
 		return
 	}
 	interval := max(p.Settings.OperationIntervalSeconds, s.store.AutoRotationSettings().TeamOperationIntervalSeconds)
@@ -38,6 +38,21 @@ func (s *Server) runSeatRecoveryStep(parent context.Context, id string) {
 		return
 	}
 	defer lock.Unlock()
+	if p.PendingAction != "" {
+		p, err = s.store.UpdateSeatRecoveryTask(p.ID, func(v *model.SeatRecoveryTask) {
+			v.ManualRemoveMethod = v.PendingAction
+			v.PendingAction = ""
+			v.ManualRemoveSent = false
+			v.Stage, v.Status = "manual_remove", "queued"
+			v.Paused = false
+			v.Checks = 0
+			v.RetryMutation = false
+			v.Message = "正在核实成员，准备手动移出"
+		})
+		if err != nil {
+			return
+		}
+	}
 	err = s.executeSeatRecoveryStep(ctx, &p)
 	if err != nil {
 		if parent.Err() != nil {
@@ -125,6 +140,9 @@ func (s *Server) recoveryMutation(ctx context.Context, p *model.SeatRecoveryTask
 }
 
 func (s *Server) executeSeatRecoveryStep(ctx context.Context, p *model.SeatRecoveryTask) error {
+	if p.Stage == "manual_remove" || p.Stage == "manual_cooldown" {
+		return s.executeSeatRecoveryManualRemoval(ctx, p)
+	}
 	if p.Stage == "cooldown" {
 		if time.Now().Before(p.NextAt) {
 			return nil

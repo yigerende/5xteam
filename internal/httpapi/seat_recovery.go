@@ -279,55 +279,11 @@ func (s *Server) controlSeatRecovery(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(w, r, &input, 4096); err != nil {
 		return
 	}
-	id := r.PathValue("id")
-	s.recovery.mu.Lock()
-	defer s.recovery.mu.Unlock()
-	p, err := s.store.SeatRecoveryTask(id)
+	p, status, err := s.applySeatRecoveryControl(r.PathValue("id"), input.Action)
 	if err != nil {
-		writeAPI(w, 404, nil, "任务不存在")
+		writeAPI(w, status, nil, err.Error())
 		return
 	}
-	if p.Finished {
-		writeAPI(w, 409, nil, "任务已结束")
-		return
-	}
-	if input.Action != "pause" && input.Action != "resume" && input.Action != "retry" && input.Action != "cancel" {
-		writeAPI(w, 400, nil, "操作无效")
-		return
-	}
-	if input.Action == "retry" && (p.Status != "failed" || s.recovery.active[id]) {
-		writeAPI(w, 409, nil, "仅可重试已停止的失败任务")
-		return
-	}
-	if input.Action == "cancel" && (p.Stage != "login" || s.recovery.active[id]) {
-		writeAPI(w, 409, nil, "仅尚未登录、未发送进入请求的任务可取消；已进入的任务请继续完成清理")
-		return
-	}
-	p, err = s.store.UpdateSeatRecoveryTask(id, func(p *model.SeatRecoveryTask) {
-		switch input.Action {
-		case "pause":
-			p.Paused = true
-		case "resume":
-			p.Paused = false
-		case "retry":
-			p.Paused = false
-			p.Status = "queued"
-			p.Message = "等待核实远端状态后续跑"
-			p.NextAt = time.Now()
-			p.Checks = 0
-			p.RetryMutation = true
-			// Keep successful/ambiguous mutation flags: reconciliation runs first.
-		case "cancel":
-			p.Finished = true
-			p.Status = "cancelled"
-			p.Message = "已取消，未执行进入空间"
-		}
-	})
-	if err != nil {
-		writeAPI(w, 500, nil, err.Error())
-		return
-	}
-	s.recoveryLog(p, "操作："+input.Action)
 	writeAPI(w, 200, p, "")
 }
 
@@ -399,7 +355,7 @@ func (s *Server) dispatchSeatRecovery(ctx context.Context) {
 		}
 	}
 	for _, p := range items {
-		if s.recovery.active[p.ID] || p.Status == "failed" || p.NextAt.After(time.Now()) || (p.Paused && !p.Lane) {
+		if s.recovery.active[p.ID] || (p.Paused && !p.Lane) || (p.PendingAction == "" && (p.Status == "failed" || p.NextAt.After(time.Now()))) {
 			continue
 		}
 		if s.recovery.active == nil {
@@ -410,7 +366,7 @@ func (s *Server) dispatchSeatRecovery(ctx context.Context) {
 		}
 		// Preparation has its own concurrency budget. Slow logins must not hold
 		// up confirmations, ordinary-seat cleanup, or another mother's work.
-		if p.Stage == "login" {
+		if p.Stage == "login" && p.PendingAction == "" {
 			if len(s.recovery.preparing) >= max(1, p.Settings.Concurrency) {
 				continue
 			}
@@ -438,10 +394,17 @@ func (s *Server) dispatchSeatRecovery(ctx context.Context) {
 
 func (s *Server) recoverySave(p *model.SeatRecoveryTask) error {
 	saved, err := s.store.UpdateSeatRecoveryTask(p.ID, func(latest *model.SeatRecoveryTask) {
-		paused, finished := latest.Paused, latest.Finished
+		paused, finished, pending := latest.Paused, latest.Finished, latest.PendingAction
 		*latest = *p
 		latest.Paused = paused
 		latest.Finished = finished || p.Finished
+		latest.PendingAction = pending
+		if pending != "" {
+			latest.Finished = false
+			latest.Status = "queued"
+			latest.NextAt = time.Now()
+			latest.Message = "已收到手动移出请求，等待当前操作结束后核实成员并执行"
+		}
 	})
 	if err == nil {
 		*p = saved

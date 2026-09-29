@@ -29,6 +29,7 @@ type recoveryFixture struct {
 	noSpace, failLeave, ambiguousApprove, holdAgain bool
 	onMutation                                      func(*http.Request)
 	atStatus, atChecks                              int
+	allowDirectRemove, ambiguousRemove              bool
 }
 
 func newRecoveryFixture(t *testing.T) *recoveryFixture {
@@ -197,7 +198,7 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 			case r.Method == "DELETE":
 				parts := strings.Split(path, "/")
 				name = parts[len(parts)-1]
-				if f.state[name] != "default" {
+				if f.state[name] != "default" && !f.allowDirectRemove {
 					t.Error("removed before ordinary seat verified")
 				}
 				if f.failLeave {
@@ -205,6 +206,10 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 					return
 				}
 				f.state[name] = "outside"
+				if f.ambiguousRemove {
+					http.Error(w, "removed but upstream timed out", 504)
+					return
+				}
 			default:
 				t.Errorf("unexpected mutation %s %s", r.Method, path)
 			}

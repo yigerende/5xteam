@@ -202,6 +202,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/seat-recovery/settings", s.getSeatRecoverySettings)
 	mux.HandleFunc("PUT /api/seat-recovery/settings", s.saveSeatRecoverySettings)
 	mux.HandleFunc("GET /api/seat-recovery/tasks", s.listSeatRecovery)
+	mux.HandleFunc("POST /api/seat-recovery/tasks/batch-control", s.batchControlSeatRecovery)
+	mux.HandleFunc("POST /api/seat-recovery/tasks/status", s.statusSeatRecoveryTasks)
 	mux.HandleFunc("POST /api/seat-recovery/tasks/{id}/control", s.controlSeatRecovery)
 	mux.HandleFunc("GET /api/seat-recovery/tasks/{id}/logs", s.seatRecoveryLogs)
 	mux.HandleFunc("GET /api/admin-accounts/{id}/seat-recovery", s.scanSeatRecovery)

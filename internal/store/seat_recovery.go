@@ -98,6 +98,13 @@ func (s *Store) CreateSeatRecoveryTask(p model.SeatRecoveryTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p.Email = strings.ToLower(strings.TrimSpace(p.Email))
+	var activeCount int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM seat_recovery_tasks WHERE finished=0").Scan(&activeCount); err != nil {
+		return err
+	}
+	if activeCount >= 1000 {
+		return errors.New("同时未结束的恢复任务最多 1000 个")
+	}
 	eligible, err := s.seatRecoveryMailEligibleLocked(p.Email)
 	if err != nil {
 		return err
@@ -196,12 +203,41 @@ func (s *Store) UpdateSeatRecoveryTask(id string, mutate func(*model.SeatRecover
 	if _, err = tx.Exec("UPDATE seat_recovery_tasks SET finished=?,lane=?,payload=?,updated_at=? WHERE id=?", p.Finished, p.Lane, mustJSON(p), formatTime(p.UpdatedAt), id); err != nil {
 		return p, err
 	}
-	if p.Finished || (p.Stage != "join" && p.Stage != "confirm") {
+	if p.Finished || (p.Stage != "join" && p.Stage != "confirm" && p.Stage != "manual_remove" && p.Stage != "manual_cooldown") {
 		if _, err = tx.Exec("DELETE FROM seat_recovery_entry_lanes WHERE task_id=?", id); err != nil {
 			return p, err
 		}
 	}
 	return p, tx.Commit()
+}
+
+// Only remove records whose remote work is complete or has never been sent.
+// The API holds the dispatch lock and rejects active workers before calling.
+func (s *Store) DeleteSeatRecoveryTask(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var raw string
+	if err := s.db.QueryRow("SELECT payload FROM seat_recovery_tasks WHERE id=?", id).Scan(&raw); err != nil {
+		return err
+	}
+	var p model.SeatRecoveryTask
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return err
+	}
+	if p.PendingAction != "" || p.Lane || (!p.Finished && (p.JoinSent || p.ConfirmSent || p.JoinedAt != nil || p.SwitchSent || p.LeaveSent || p.ManualRemoveSent)) {
+		return errors.New("任务仍有远端操作或席位占用，请先踢出/退出并确认结束后删除")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, query := range []string{"DELETE FROM seat_recovery_entry_lanes WHERE task_id=?", "DELETE FROM seat_recovery_logs WHERE task_id=?", "DELETE FROM seat_recovery_tasks WHERE id=?"} {
+		if _, err = tx.Exec(query, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // A whole entry (request/invite -> approval/accept -> confirmed membership) owns

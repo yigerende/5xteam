@@ -9,6 +9,7 @@ const settings = { join_method: 'mother_invite', remove_method: 'mother_kick', d
 const makeTask = (id, stage, extra = {}) => ({ id, email: `${id}@example.com`, admin_label: '恢复测试母号', team_id: 'team', stage, status: 'waiting', seat_type: 'prolite', settings: { ...settings, join_method: 'child_request', remove_method: 'child_leave' }, joined_at: new Date(serverNow - 120000).toISOString(), due_at: new Date(serverNow + 180000).toISOString(), message: '正在等待停留时间', ...extra })
 const fixture = window.recoveryFixture = {
   requests: [], settings,
+  failScan: '',
   tasks: [makeTask('dwell', 'dwell'), makeTask('failed', 'leave', { status: 'failed', lane: true, seat_type: 'default', message: 'HTTP 429；普通席位继续保留，请重试' }), makeTask('done', 'completed', { status: 'completed', finished: true, seat_type: 'outside', left_at: new Date(serverNow).toISOString(), message: '席位恢复完成' })],
   candidates: [{ id: 'new', email: 'new@example.com', eligible: true, deactivated_time: '2026-09-29T00:00:00Z' }, { id: 'busy', email: 'busy@example.com', eligible: false, reason: '子号已有 Team 邀请在途，恢复任务不会抢占', deactivated_time: '2026-09-29T00:00:00Z' }],
 }
@@ -26,10 +27,29 @@ window.fetch = async (path, options = {}) => {
   }
   if (/^\/api\/admin-accounts\/mother(-two)?\/seat-recovery$/.test(url.pathname)) {
     const second = url.pathname.includes('mother-two')
+    if (method === 'GET' && fixture.failScan === (second ? 'mother-two' : 'mother')) return new Response(JSON.stringify({ok:false,error:'fixture scan failure'}),{status:502})
     if (method === 'GET') return json({ items: second ? [{...fixture.candidates[0],id:'another',email:'another@example.com'}] : fixture.candidates, team_id: second ? 'team-two' : 'team' })
     const tasks = body.emails.map(email => makeTask(email.split('@')[0], 'login', { email, team_id:body.team_id,admin_label:second?'第二母号':'恢复测试母号',settings: { ...settings }, joined_at: null, due_at: null, status: 'running', message: '正在检测 AT，有效则直接使用' }))
     fixture.tasks.unshift(...tasks); return json({ items: tasks, failures: {} })
   }
+  if (url.pathname === '/api/seat-recovery/tasks/batch-control') {
+    const results = body.ids.map(id => {
+      const p = fixture.tasks.find(p => p.id === id)
+      if (!p) return { id, ok:false, error:'任务不存在' }
+      if (body.action === 'delete') {
+        if (p.lane) return { id, email:p.email, ok:false, error:'任务仍有席位占用，请先退出' }
+        fixture.tasks = fixture.tasks.filter(p => p.id !== id)
+      }
+      if (body.action === 'pause') p.paused = true
+      if (body.action === 'resume') p.paused = false
+      if (['mother_kick','child_leave'].includes(body.action)) {
+        p.manual_remove_method = body.action; p.stage = 'manual_remove'; p.status = 'running'; p.message = '手动移出已排队'
+      }
+      return { id, email:p.email, ok:true, task:p }
+    })
+    return json({results})
+  }
+  if (url.pathname === '/api/seat-recovery/tasks/status') return json({items: fixture.tasks.filter(p => body.ids.includes(p.id))})
   const control = url.pathname.match(/\/tasks\/([^/]+)\/control$/)
   if (control) {
     const p = fixture.tasks.find(p => p.id === control[1])
