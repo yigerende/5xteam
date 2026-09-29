@@ -18,13 +18,15 @@ import (
 )
 
 type seatRecoveryRuntime struct {
-	mu        sync.Mutex
-	active    map[string]bool
-	preparing map[string]bool
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	closed    bool
-	login     func(string, func(string), func(protocolOAuthDiagnostic)) (map[string]any, error)
+	mu          sync.Mutex
+	active      map[string]bool
+	preparing   map[string]bool
+	taskCancels map[string]context.CancelFunc
+	workerTeams map[string]string
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	closed      bool
+	login       func(string, func(string), func(protocolOAuthDiagnostic)) (map[string]any, error)
 }
 
 type recoveryCandidate struct {
@@ -349,6 +351,12 @@ func (s *Server) dispatchSeatRecovery(ctx context.Context) {
 		return
 	}
 	busyTeams := map[string]bool{}
+	// A deleted worker may still be unwinding an already sent request.
+	for id, teamID := range s.recovery.workerTeams {
+		if !s.recovery.preparing[id] {
+			busyTeams[teamID] = true
+		}
+	}
 	for _, p := range items {
 		if s.recovery.active[p.ID] && !s.recovery.preparing[p.ID] {
 			busyTeams[p.TeamID] = true
@@ -378,16 +386,26 @@ func (s *Server) dispatchSeatRecovery(ctx context.Context) {
 			busyTeams[p.TeamID] = true
 		}
 		s.recovery.active[p.ID] = true
+		if s.recovery.taskCancels == nil {
+			s.recovery.taskCancels = map[string]context.CancelFunc{}
+			s.recovery.workerTeams = map[string]string{}
+		}
+		taskCtx, cancel := context.WithCancel(ctx)
+		s.recovery.taskCancels[p.ID] = cancel
+		s.recovery.workerTeams[p.ID] = p.TeamID
 		s.recovery.wg.Add(1)
 		go func(p model.SeatRecoveryTask) {
 			defer s.recovery.wg.Done()
+			defer cancel()
 			defer func() {
 				s.recovery.mu.Lock()
 				delete(s.recovery.active, p.ID)
 				delete(s.recovery.preparing, p.ID)
+				delete(s.recovery.taskCancels, p.ID)
+				delete(s.recovery.workerTeams, p.ID)
 				s.recovery.mu.Unlock()
 			}()
-			s.runSeatRecoveryStep(ctx, p.ID)
+			s.runSeatRecoveryStep(taskCtx, p.ID)
 		}(p)
 	}
 }
@@ -428,14 +446,22 @@ func (s *Server) recoveryAdvance(p *model.SeatRecoveryTask, stage, message strin
 	return s.recoverySave(p)
 }
 
-func (s *Server) recoveryLogin(p model.SeatRecoveryTask) error {
-	login := s.executeChatGPTAT
+func (s *Server) recoveryLogin(ctx context.Context, p model.SeatRecoveryTask) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	login := func(email string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
+		return s.executeOpenAILoginContext(ctx, email, "chatgpt_at", progress, diagnostic)
+	}
 	if s.recovery.login != nil {
 		login = s.recovery.login
 	}
 	result, err := login(p.Email, func(message string) { s.recoveryLog(p, message) }, func(event protocolOAuthDiagnostic) {
 		s.recoveryLog(p, event.Stage+" / "+event.Event+": "+event.Message)
 	})
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err != nil {
 		return err
 	}
@@ -454,5 +480,5 @@ func (s *Server) recoveryLogin(p model.SeatRecoveryTask) error {
 	if err != nil {
 		return err
 	}
-	return s.store.SaveSeatRecoveryLogin(p.Email, at, string(session))
+	return s.store.SaveSeatRecoveryLogin(p.ID, at, string(session))
 }

@@ -1033,6 +1033,15 @@ func (s *Server) executeChatGPTAT(email string, progress func(string), diagnosti
 }
 
 func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (result map[string]any, runErr error) {
+	return s.executeOpenAILoginContext(context.Background(), email, credentialMode, progress, diagnostic)
+}
+
+// Recovery tasks supply their cancellation context; existing Team/mail/Pro
+// callers retain the original background context and login behavior.
+func (s *Server) executeOpenAILoginContext(parent context.Context, email, credentialMode string, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (result map[string]any, runErr error) {
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
 	_, credentials, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return nil, err
@@ -1090,6 +1099,9 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 	excluded := make(map[string]struct{})
 	for round := 1; round <= oauthRoundAttempts; round++ {
 		for quality := 1; quality <= oauthQualityAttempts; quality++ {
+			if err := parent.Err(); err != nil {
+				return nil, err
+			}
 			currentRound, currentQuality = round, quality
 			lease, err := s.acquireOAuthProxyExcluding(excluded)
 			if err != nil {
@@ -1108,9 +1120,13 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 			if progress != nil {
 				progress(fmt.Sprintf("OAuth 代理质检（第 %d/%d 轮，第 %d/%d 个出口）", round, oauthRoundAttempts, quality, oauthQualityAttempts))
 			}
-			probeCtx, cancelProbe := context.WithTimeout(context.Background(), 55*time.Second)
+			probeCtx, cancelProbe := context.WithTimeout(parent, 55*time.Second)
 			probe, probeErr := s.probeOAuthProxy(probeCtx, proxyURL)
 			cancelProbe()
+			if err := parent.Err(); err != nil {
+				lease.Release()
+				return nil, err
+			}
 			if diagnostic != nil {
 				diagnostic(protocolOAuthDiagnostic{
 					SchemaVersion: 1, Stage: "proxy_check", Event: "quality_result",
@@ -1145,8 +1161,11 @@ func (s *Server) executeOpenAILogin(email, credentialMode string, progress func(
 					progress("OAuth 出口 IP 检测未取得完整结果，按 gpt-manager 规则继续登录")
 				}
 			}
-			result, runErr := s.executeOpenAILoginWithProxy(email, proxyURL, lease.label, lease.activeCount, credentialMode, login, progress, diagnostic)
+			result, runErr := s.executeOpenAILoginWithProxy(parent, email, proxyURL, lease.label, lease.activeCount, credentialMode, login, progress, diagnostic)
 			lease.Release()
+			if err := parent.Err(); err != nil {
+				return nil, err
+			}
 			lastResult, lastErr = result, runErr
 			if runErr == nil && result != nil && result["success"] == true {
 				return result, nil
@@ -1221,7 +1240,10 @@ func isRetryableOAuthNetworkResult(result map[string]any, runErr error) bool {
 // executeCodexOAuthWithProxy owns the protocol process only. The proxy is
 // selected and quality-checked by executeCodexOAuth and remains unchanged for
 // this complete OAuth attempt.
-func (s *Server) executeOpenAILoginWithProxy(email, proxyURL, proxyLabel string, activeCount int, credentialMode string, login oauthLoginSelection, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
+func (s *Server) executeOpenAILoginWithProxy(parent context.Context, email, proxyURL, proxyLabel string, activeCount int, credentialMode string, login oauthLoginSelection, progress func(string), diagnostic func(protocolOAuthDiagnostic)) (map[string]any, error) {
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
 	if progress != nil {
 		progress(fmt.Sprintf("已分配 OAuth 代理：%s（当前任务 %d）", proxyLabel, activeCount))
 	}
@@ -1291,7 +1313,7 @@ func (s *Server) executeOpenAILoginWithProxy(email, proxyURL, proxyLabel string,
 		return nil, errors.New("未找到 Python 运行环境")
 	}
 	script := filepath.Join("internal", "protocol_codex_oauth.py")
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 20*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, python, script)
 	cmd.Dir, _ = os.Getwd()

@@ -22,12 +22,14 @@ func (s *Server) applySeatRecoveryControl(id, action string) (model.SeatRecovery
 		return p, 400, errors.New("操作无效")
 	}
 	if action == "delete" {
-		if s.recovery.active[id] {
-			return p, 409, errors.New("任务正在执行，请暂停并等待当前操作结束后删除")
-		}
 		if err = s.store.DeleteSeatRecoveryTask(id); err != nil {
-			return p, 409, err
+			return p, 500, err
 		}
+		if cancel := s.recovery.taskCancels[id]; cancel != nil {
+			cancel()
+		}
+		// Keep runtime/account/mother locks until the cancelled worker unwinds.
+		// Deletion itself never waits for a network request or sends a removal.
 		return p, 200, nil
 	}
 	if p.Finished {

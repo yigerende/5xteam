@@ -21,6 +21,12 @@ const items = Array.from({ length: 24 }, (_, i) => ({
   pickup_url_present: true,
 }))
 if (new URLSearchParams(location.search).has('totp-no-at')) items[0].access_token_present = false
+if (new URLSearchParams(location.search).has('recovery')) {
+  items[0].seat_recovery_active = true
+  items[1].seat_recovery_active = true
+  items[2].chatgpt_status = 'dead'
+  items[3].seat_recovery_left_at = '2026-09-29T00:00:00Z'
+}
 window.mailExportFixture = { requests: [], fail: false, delay: 350, totpValue: '012345', totpValidity: 30000, totpFail: false, totpDelay: 0 }
 const fixture = window.mailExportFixture
 fixture.items = items
@@ -48,7 +54,7 @@ const json = data => new Response(JSON.stringify({ ok: true, data }), { headers:
 window.fetch = async (path, options = {}) => {
   const url = new URL(path, location.origin)
   const body = options.body ? JSON.parse(options.body) : {}
-  fixture.requests.push({ path: url.pathname, body })
+  fixture.requests.push({ path: url.pathname, query: url.search, body })
   if (url.pathname.startsWith('/api/pro-accounts/') && url.pathname.endsWith('/stage')) {
     const item = items.find(item => item.email === decodeURIComponent(url.pathname.split('/')[3]))
     if (item.pro_workflow_running || (item['pro_' + body.stage + '_status'] || '') !== body.expected_status) return new Response(JSON.stringify({ ok: false, error: '步骤状态已变化，请刷新后重新确认' }), { status: 409 })
@@ -192,7 +198,11 @@ window.fetch = async (path, options = {}) => {
     const page = Number(url.searchParams.get('page') || 1)
     const size = Number(url.searchParams.get('page_size') || 10)
     const mail = items.filter(item => item.management_scope === 'mail')
-    return json({ items: mail.slice((page - 1) * size, page * size), total: mail.length, pipelines: [], counts: { all: mail.length }, space_counts: { outside: mail.length, inside: 0, removed: 0 } })
+    const state = item => item.chatgpt_status === 'dead' ? 'dead' : item.seat_recovery_active ? 'recovering' : item.seat_recovery_left_at ? 'removed' : 'outside'
+    const spaceCounts = Object.fromEntries(['outside', 'inside', 'removed', 'dead', 'recovering'].map(key => [key, mail.filter(item => state(item) === key).length]))
+    const filter = url.searchParams.get('space_state'), query = (url.searchParams.get('query') || '').toLowerCase()
+    const filtered = mail.filter(item => (!filter || state(item) === filter) && item.email.includes(query))
+    return json({ items: filtered.slice((page - 1) * size, page * size), total: filtered.length, pipelines: [], counts: { all: mail.length }, space_counts: spaceCounts })
   }
   if (url.pathname === '/api/mail/accounts/select') {
     const matched = items.filter(item =>

@@ -39,8 +39,11 @@ func (s *Server) prepareSeatRecoveryAT(ctx context.Context, p model.SeatRecovery
 			check = workflow.TestAdminAccount(ctx, at, "", settings)
 		}
 		s.recoveryLog(p, fmt.Sprintf("AT 检测：有效=%t，HTTP %d，%s", check.Valid, check.HTTPStatus, check.Message))
+		if err = ctx.Err(); err != nil {
+			return "", err
+		}
 		if check.Valid || check.HTTPStatus == http.StatusUnauthorized {
-			if _, err = s.store.UpdateMailAccountATStatus(p.Email, check.CheckedAt, check.Valid, check.HTTPStatus, redactSensitiveText(check.Message)); err != nil {
+			if err = s.saveRecoveryATCheck(p, check); err != nil {
 				return "", err
 			}
 		}
@@ -63,9 +66,19 @@ func (s *Server) prepareSeatRecoveryAT(ctx context.Context, p model.SeatRecovery
 		}); err != nil {
 			return "", err
 		}
-		if err = s.recoveryLogin(p); err != nil {
+		if err = s.recoveryLogin(ctx, p); err != nil {
 			return "", err
 		}
 	}
 	return "临时 AT / Session 已保存", nil
+}
+
+func (s *Server) saveRecoveryATCheck(p model.SeatRecoveryTask, check model.AdminAccountTestResult) error {
+	s.recovery.mu.Lock()
+	defer s.recovery.mu.Unlock()
+	if _, err := s.store.SeatRecoveryTask(p.ID); err != nil {
+		return err
+	}
+	_, err := s.store.UpdateMailAccountATStatus(p.Email, check.CheckedAt, check.Valid, check.HTTPStatus, redactSensitiveText(check.Message))
+	return err
 }

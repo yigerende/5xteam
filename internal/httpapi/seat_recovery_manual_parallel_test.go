@@ -61,7 +61,7 @@ func TestSeatRecoveryManualExitMissingTokenCanSwitchToKick(t *testing.T) {
 	p := f.task(t, "one", "mother_invite", "child_leave")
 	f.runUntil(t, p.ID, "dwell")
 	f.allowDirectRemove = true
-	if err := f.s.store.SaveSeatRecoveryLogin(p.Email, "", ""); err != nil {
+	if err := f.s.store.SaveSeatRecoveryLogin(p.ID, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	recoveryControl(t, f, p.ID, "child_leave")

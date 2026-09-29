@@ -13,13 +13,22 @@ import (
 )
 
 func (s *Server) runSeatRecoveryStep(parent context.Context, id string) {
+	if parent.Err() != nil {
+		return
+	}
 	p, err := s.store.SeatRecoveryTask(id)
 	if err != nil || p.Finished || (p.Paused && !p.Lane) || (p.PendingAction == "" && p.Status == "failed") {
 		return
 	}
 	interval := max(p.Settings.OperationIntervalSeconds, s.store.AutoRotationSettings().TeamOperationIntervalSeconds)
-	ctx, cancel := context.WithTimeout(parent, 3*time.Minute+time.Duration(interval)*time.Second)
-	defer cancel()
+	ctx := parent
+	// Login retains the shared OAuth per-attempt timeouts while now accepting
+	// task cancellation. Other recovery steps keep their existing deadline.
+	if p.Stage != "login" || p.PendingAction != "" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(parent, 3*time.Minute+time.Duration(interval)*time.Second)
+		defer cancel()
+	}
 	// Existing account and mother locks serialize conflicting manual operations.
 	// No Team claims, cycles, progress records, settings, or snapshots are written.
 	if p.FreeID != "" {
@@ -111,6 +120,12 @@ func (s *Server) recoveryPending(p *model.SeatRecoveryTask, message string) erro
 // The normal Team lock is kept through the cooldown, so a Team invitation,
 // approval or kick cannot bypass the spacing after a recovery mutation.
 func (s *Server) recoveryMutation(ctx context.Context, p *model.SeatRecoveryTask, actor string, fn func(context.Context) (workflow.Response, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := s.store.SeatRecoveryTask(p.ID); err != nil {
+		return err
+	}
 	s.recoveryLog(*p, "发送请求："+actor)
 	ctx = workflow.WithRequestObserver(ctx, func(o workflow.RequestObservation) {
 		if o.Phase == "start" {
@@ -140,6 +155,9 @@ func (s *Server) recoveryMutation(ctx context.Context, p *model.SeatRecoveryTask
 }
 
 func (s *Server) executeSeatRecoveryStep(ctx context.Context, p *model.SeatRecoveryTask) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if p.Stage == "manual_remove" || p.Stage == "manual_cooldown" {
 		return s.executeSeatRecoveryManualRemoval(ctx, p)
 	}

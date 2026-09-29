@@ -413,6 +413,7 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 			var old model.MailAccountProfile
 			_ = json.Unmarshal([]byte(oldProfile), &old)
 			profile.CreatedAt = old.CreatedAt
+			profile.SeatRecoveryLeftAt = old.SeatRecoveryLeftAt
 			profile.ManagementScope, profile.ProManagedAt = old.ManagementScope, old.ProManagedAt
 			profile.ChatGPTStatus, profile.ChatGPTStatusMessage, profile.ChatGPTStatusAt = old.ChatGPTStatus, old.ChatGPTStatusMessage, old.ChatGPTStatusAt
 			preserveMailPlanCheck(&profile, old)
@@ -435,6 +436,7 @@ func (s *Store) SaveMailAccount(profile model.MailAccountProfile, credentials mo
 		var old model.MailAccountProfile
 		_ = json.Unmarshal([]byte(oldProfile), &old)
 		profile.CreatedAt = old.CreatedAt
+		profile.SeatRecoveryLeftAt = old.SeatRecoveryLeftAt
 		profile.ManagementScope, profile.ProManagedAt = old.ManagementScope, old.ProManagedAt
 		profile.ChatGPTStatus, profile.ChatGPTStatusMessage, profile.ChatGPTStatusAt = old.ChatGPTStatus, old.ChatGPTStatusMessage, old.ChatGPTStatusAt
 		preserveMailPlanCheck(&profile, old)

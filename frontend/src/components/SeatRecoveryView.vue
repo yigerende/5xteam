@@ -135,7 +135,7 @@ async function control(p, action) {
 }
 async function batchControl(action, ids = [...taskSelected.value]) {
   if (!ids.length || batch.busy) return
-  if (action === 'delete' && !window.confirm(`删除选中的 ${ids.length} 条恢复任务及日志？不会删除邮件账号或操作远端成员。未结束且已发起远端操作的任务需先踢出/退出。`)) return
+  if (action === 'delete' && !window.confirm(`强制删除选中的 ${ids.length} 条恢复任务及日志？任何状态均可删除，停止后续恢复操作并释放本地占用。不会删除邮件账号或自动踢出/退出成员；已发送的远端请求无法撤回。`)) return
   if (manualAction(action) && !window.confirm(`对选中的 ${ids.length} 个子号执行${actionNames[action]}？将跳过停留和换席，直接移出；5x 席位可能重新临停。`)) return
   Object.assign(batch, { open: true, busy: true, action, items: ids.map(id => ({ id, email: tasks.value.find(p => p.id === id)?.email || id, message: '正在提交', done: false })), error: '' })
   batchVersion++

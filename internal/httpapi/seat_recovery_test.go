@@ -364,9 +364,17 @@ func TestSeatRecoveryFourCombinationsLeaveTeamUntouched(t *testing.T) {
 				rotation := f.s.store.AutoRotationSettings()
 				admins := f.s.store.AdminAccounts()
 				visits, _ := f.s.store.TeamVisits(p.Email, p.UserID)
+				mailPage, err := f.s.store.MailAccountsPage("mail", p.Email, "recovering", 10, 0)
+				if err != nil || mailPage.Total != 1 || !mailPage.Items[0].SeatRecoveryActive {
+					t.Fatalf("new recovery not visible in mail: %+v %v", mailPage, err)
+				}
 				done := f.runUntil(t, p.ID, "completed")
 				if !done.Finished || done.Lane || done.JoinedAt == nil || done.LeftAt == nil {
 					t.Fatalf("bad completion %+v", done)
+				}
+				mailPage, err = f.s.store.MailAccountsPage("mail", p.Email, "removed", 10, 0)
+				if err != nil || mailPage.Total != 1 || mailPage.Items[0].SeatRecoveryActive || mailPage.Items[0].SeatRecoveryLeftAt == nil {
+					t.Fatalf("departed recovery not marked used: %+v %v", mailPage, err)
 				}
 				after, _, _ := f.s.store.FreeAccountCredential(p.FreeID)
 				if !reflect.DeepEqual(before, after) || !reflect.DeepEqual(rotation, f.s.store.AutoRotationSettings()) || !reflect.DeepEqual(admins, f.s.store.AdminAccounts()) {

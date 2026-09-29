@@ -284,6 +284,7 @@ function displayAccountLabel(account) {
   return maskSensitive(account?.label || '未分组');
 }
 function displaySpace(account) {
+	if (account.seat_recovery_active && !isDeadAccount(account)) return "恢复中";
   const pipeline = pipelineFor(account);
   if (!pipeline || pipeline.remove_status === 'completed') return pipelineSpaceLabel(account);
   const raw = pipeline.admin_email || pipeline.admin_label || pipeline.team_account_id || '';
@@ -328,7 +329,7 @@ function mailSpaceStatus(account) {
   if (pipeline?.accept_status === "completed") return "inside";
   return "outside";
 }
-const spaceFilterCounts = reactive({ outside: 0, inside: 0, removed: 0, dead: 0 });
+const spaceFilterCounts = reactive({ outside: 0, inside: 0, removed: 0, dead: 0, recovering: 0 });
 let accountSearchTimer;
 function isInTeamPipeline(account) {
   const pipeline = pipelineFor(account);
@@ -395,8 +396,9 @@ function pipelineStageStatus(account, stage) {
   return pipelineFor(account)?.[`${stage}_status`] || "pending";
 }
 function pipelineStatusLabel(account) {
-  const pipeline = pipelineFor(account);
-  if (!pipeline) return "未进入 Team";
+	if (account.seat_recovery_active && !isDeadAccount(account)) return "席位恢复中";
+	const pipeline = pipelineFor(account);
+	if (!pipeline) return account.seat_recovery_left_at ? "已使用过" : "未进入 Team";
   if (pipeline.dead) return pipeline.remove_status === "completed" ? "死号 · 已移出" : "死号";
   if (pipeline.remove_status === "completed") return "已移出空间";
   if (pipeline.push_status === "completed") return "Sub2 运行中";
@@ -406,6 +408,7 @@ function pipelineStatusLabel(account) {
   return "等待执行";
 }
 function pipelineStatusTone(account) {
+	if (account.seat_recovery_active && !isDeadAccount(account)) return "running";
   const pipeline = pipelineFor(account);
   if (!pipeline) return "pending";
   if (pipeline.dead) return "danger";
@@ -416,14 +419,15 @@ function pipelineStatusTone(account) {
     : "pending";
 }
 function pipelineSpaceLabel(account) {
-  const pipeline = pipelineFor(account);
-  if (!pipeline) return "未进入空间";
+	const pipeline = pipelineFor(account);
+	if (!pipeline) return account.seat_recovery_left_at ? "已使用过" : "未进入空间";
   if (pipeline.remove_status === "completed") return "已移出空间";
   const name = pipeline.admin_email || pipeline.admin_label || "";
   const team = pipeline.team_account_id || "";
   return name || team || "已进入空间";
 }
 function pipelineSpaceTone(account) {
+	if (account.seat_recovery_active && !isDeadAccount(account)) return "running";
   const pipeline = pipelineFor(account);
   if (!pipeline) return "pending";
   return pipeline.remove_status === "completed"
@@ -1222,6 +1226,10 @@ function firstCode(item) {
 
 onMounted(() => {
   refreshAll();
+  startTimer(() => {
+    if (!document.hidden && activeTab.value === "accounts" && !accountsLoading.value &&
+        (spaceFilterCounts.recovering > 0 || spaceFilter.value === "recovering")) loadAccountsHandled();
+  }, 5000);
   document.addEventListener("click", closeActionMenu);
 });
 onBeforeUnmount(() => [...timers].forEach(stopTimer));
@@ -1342,6 +1350,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
           <button type="button" :class="{ active: spaceFilter === 'inside' }" @click="setSpaceFilter('inside')">在空间里面 <span>{{ spaceFilterCounts.inside }}</span></button>
           <button type="button" :class="{ active: spaceFilter === 'removed' }" @click="setSpaceFilter('removed')">已使用过 <span>{{ spaceFilterCounts.removed }}</span></button>
           <button type="button" :class="{ active: spaceFilter === 'dead' }" @click="setSpaceFilter('dead')">死号 <span>{{ spaceFilterCounts.dead }}</span></button>
+          <button type="button" :class="{ active: spaceFilter === 'recovering' }" @click="setSpaceFilter('recovering')">恢复 <span>{{ spaceFilterCounts.recovering }}</span></button>
           <LoaderCircle v-if="accountsLoading" class="spin" :size="16" aria-label="加载中" />
         </div>
         <div class="mail-method-summary">

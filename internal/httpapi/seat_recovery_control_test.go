@@ -46,6 +46,10 @@ func TestSeatRecoveryManualRemovalSkipsDwellSwitchAndPreservesTeam(t *testing.T)
 					t.Fatal("duplicate manual removal queued")
 				}
 				p = f.runUntil(t, p.ID, "manual_done")
+				mailPage, err := f.s.store.MailAccountsPage("mail", p.Email, "removed", 10, 0)
+				if err != nil || mailPage.Total != 1 || mailPage.Items[0].SeatRecoveryActive || mailPage.Items[0].SeatRecoveryLeftAt == nil {
+					t.Fatalf("manual departure not marked used: %+v %v", mailPage, err)
+				}
 				if !p.Finished || p.Lane || !strings.Contains(p.Message, "仍有 5x 临停") {
 					t.Fatalf("incorrect completion: %+v", p)
 				}
@@ -78,9 +82,6 @@ func TestSeatRecoveryManualQueuedDuringWorkerSurvivesRestart(t *testing.T) {
 	}
 	if p.PendingAction != "mother_kick" {
 		t.Fatal("worker overwrote pending action")
-	}
-	if _, _, err := f.s.applySeatRecoveryControl(p.ID, "delete"); err == nil {
-		t.Fatal("deleted active worker")
 	}
 	f.s.recovery.active = map[string]bool{}
 	if err := f.s.store.Close(); err != nil {
@@ -116,9 +117,6 @@ func TestSeatRecoveryManualFailureRetainsOrdinaryLane(t *testing.T) {
 	p = f.get(t, p.ID)
 	if p.Status != "failed" || !p.Lane || p.Finished {
 		t.Fatalf("lost lane on failure: %+v", p)
-	}
-	if _, _, err := f.s.applySeatRecoveryControl(p.ID, "delete"); err == nil {
-		t.Fatal("deleted occupied ordinary seat")
 	}
 	f.failLeave = false
 	f.retry(t, p.ID)
@@ -156,17 +154,24 @@ func TestSeatRecoveryBatchControlsReportPartialResults(t *testing.T) {
 		ID    string `json:"id"`
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
-	} { body, _ := json.Marshal(recoveryBatchInput{IDs: ids, Action: action}); w := httptest.NewRecorder(); f.s.batchControlSeatRecovery(w, httptest.NewRequest("POST", "/", strings.NewReader(string(body)))); var out struct {
-		Data struct {
-			Results []struct {
-				ID    string `json:"id"`
-				OK    bool   `json:"ok"`
-				Error string `json:"error"`
-			} `json:"results"`
-		} `json:"data"`
-	}; if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
-		t.Fatal(w.Body.String())
-	}; return out.Data.Results }
+	} {
+		body, _ := json.Marshal(recoveryBatchInput{IDs: ids, Action: action})
+		w := httptest.NewRecorder()
+		f.s.batchControlSeatRecovery(w, httptest.NewRequest("POST", "/", strings.NewReader(string(body))))
+		var out struct {
+			Data struct {
+				Results []struct {
+					ID    string `json:"id"`
+					OK    bool   `json:"ok"`
+					Error string `json:"error"`
+				} `json:"results"`
+			} `json:"data"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatal(w.Body.String())
+		}
+		return out.Data.Results
+	}
 	results := call("pause", []string{a.ID, b.ID, a.ID, "missing"})
 	if len(results) != 3 || !results[0].OK || !results[1].OK || results[2].OK {
 		t.Fatalf("bad per-task result: %+v", results)
@@ -179,9 +184,9 @@ func TestSeatRecoveryBatchControlsReportPartialResults(t *testing.T) {
 		t.Fatal("batch resume failed")
 	}
 	f.runUntil(t, b.ID, "dwell")
-	results = call("delete", []string{a.ID, b.ID})
+	results = call("delete", []string{a.ID, "missing"})
 	if !results[0].OK || results[1].OK {
-		t.Fatalf("unsafe batch delete: %+v", results)
+		t.Fatalf("incorrect partial batch delete: %+v", results)
 	}
 	before := len(f.mutations)
 	call("child_leave", []string{b.ID})
@@ -192,6 +197,10 @@ func TestSeatRecoveryBatchControlsReportPartialResults(t *testing.T) {
 	f.s.statusSeatRecoveryTasks(w, httptest.NewRequest("POST", "/", strings.NewReader(`{"ids":["`+b.ID+`"]}`)))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "child_leave") {
 		t.Fatal("status progress missing")
+	}
+	results = call("delete", []string{b.ID})
+	if len(results) != 1 || !results[0].OK {
+		t.Fatalf("pending manual removal prevented force deletion: %+v", results)
 	}
 }
 

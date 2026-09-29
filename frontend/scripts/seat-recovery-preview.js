@@ -37,7 +37,6 @@ window.fetch = async (path, options = {}) => {
       const p = fixture.tasks.find(p => p.id === id)
       if (!p) return { id, ok:false, error:'任务不存在' }
       if (body.action === 'delete') {
-        if (p.lane) return { id, email:p.email, ok:false, error:'任务仍有席位占用，请先退出' }
         fixture.tasks = fixture.tasks.filter(p => p.id !== id)
       }
       if (body.action === 'pause') p.paused = true

@@ -20,6 +20,17 @@ func (s *Store) initializeSeatRecovery() error {
 	CREATE TABLE IF NOT EXISTS seat_recovery_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, payload TEXT NOT NULL);
 	CREATE INDEX IF NOT EXISTS seat_recovery_logs_task ON seat_recovery_logs(task_id,id);
 	`)
+	if err != nil {
+		return err
+	}
+	// Preserve mail classification for recoveries completed before this field
+	// existed, including accounts without any Team rotation record.
+	_, err = s.db.Exec(`WITH departed AS (
+		SELECT email,MAX(json_extract(payload,'$.left_at')) AS left_at FROM seat_recovery_tasks
+		WHERE json_extract(payload,'$.left_at') IS NOT NULL GROUP BY email
+	) UPDATE mail_accounts SET profile=json_set(profile,'$.seat_recovery_left_at',
+		(SELECT left_at FROM departed WHERE departed.email=mail_accounts.email))
+	WHERE email IN (SELECT email FROM departed) AND json_extract(profile,'$.seat_recovery_left_at') IS NULL`)
 	return err
 }
 
@@ -193,6 +204,7 @@ func (s *Store) UpdateSeatRecoveryTask(id string, mutate func(*model.SeatRecover
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		return p, err
 	}
+	previousLeftAt := p.LeftAt
 	mutate(&p)
 	p.UpdatedAt = time.Now()
 	tx, err := s.db.Begin()
@@ -203,6 +215,13 @@ func (s *Store) UpdateSeatRecoveryTask(id string, mutate func(*model.SeatRecover
 	if _, err = tx.Exec("UPDATE seat_recovery_tasks SET finished=?,lane=?,payload=?,updated_at=? WHERE id=?", p.Finished, p.Lane, mustJSON(p), formatTime(p.UpdatedAt), id); err != nil {
 		return p, err
 	}
+	if p.LeftAt != nil && (previousLeftAt == nil || !previousLeftAt.Equal(*p.LeftAt)) {
+		// Only a verified departure records recovery usage. Keep this on the
+		// mailbox so deleting task history cannot make the account look unused.
+		if _, err = tx.Exec("UPDATE mail_accounts SET profile=json_set(profile,'$.seat_recovery_left_at',?) WHERE email=?", formatTime(*p.LeftAt), p.Email); err != nil {
+			return p, err
+		}
+	}
 	if p.Finished || (p.Stage != "join" && p.Stage != "confirm" && p.Stage != "manual_remove" && p.Stage != "manual_cooldown") {
 		if _, err = tx.Exec("DELETE FROM seat_recovery_entry_lanes WHERE task_id=?", id); err != nil {
 			return p, err
@@ -211,22 +230,11 @@ func (s *Store) UpdateSeatRecoveryTask(id string, mutate func(*model.SeatRecover
 	return p, tx.Commit()
 }
 
-// Only remove records whose remote work is complete or has never been sent.
-// The API holds the dispatch lock and rejects active workers before calling.
+// Force deletion is independent of remote state, worker status and mother
+// configuration. Late worker writes must not recreate records or reservations.
 func (s *Store) DeleteSeatRecoveryTask(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var raw string
-	if err := s.db.QueryRow("SELECT payload FROM seat_recovery_tasks WHERE id=?", id).Scan(&raw); err != nil {
-		return err
-	}
-	var p model.SeatRecoveryTask
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return err
-	}
-	if p.PendingAction != "" || p.Lane || (!p.Finished && (p.JoinSent || p.ConfirmSent || p.JoinedAt != nil || p.SwitchSent || p.LeaveSent || p.ManualRemoveSent)) {
-		return errors.New("任务仍有远端操作或席位占用，请先踢出/退出并确认结束后删除")
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -245,6 +253,10 @@ func (s *Store) DeleteSeatRecoveryTask(id string) error {
 func (s *Store) ClaimSeatRecoveryEntry(p model.SeatRecoveryTask) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var taskID string
+	if err := s.db.QueryRow("SELECT id FROM seat_recovery_tasks WHERE id=? AND finished=0", p.ID).Scan(&taskID); err != nil {
+		return false, err
+	}
 	var owner string
 	rows, err := s.db.Query("SELECT task_id FROM seat_recovery_entry_lanes WHERE team_id=?", p.TeamID)
 	if err != nil {
@@ -294,7 +306,7 @@ func (s *Store) ClaimSeatRecoveryEntry(p model.SeatRecoveryTask) (bool, error) {
 func (s *Store) AppendSeatRecoveryLog(id, stage, message string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec("INSERT INTO seat_recovery_logs(task_id,payload) VALUES(?,?)", id, mustJSON(model.SeatRecoveryLog{At: time.Now(), Stage: stage, Message: message}))
+	_, err := s.db.Exec("INSERT INTO seat_recovery_logs(task_id,payload) SELECT id,? FROM seat_recovery_tasks WHERE id=?", mustJSON(model.SeatRecoveryLog{At: time.Now(), Stage: stage, Message: message}), id)
 	return err
 }
 
@@ -347,9 +359,15 @@ func (s *Store) seatRecoveryMailEligibleLocked(email string) (bool, error) {
 }
 
 // Persist only the refreshed AT/session; do not reset OAuth/Pro/Team state.
-func (s *Store) SaveSeatRecoveryLogin(email, at, session string) error {
+func (s *Store) SaveSeatRecoveryLogin(taskID, at, session string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Check under the deletion lock, so a late login cannot overwrite credentials
+	// after its task has been deleted (even if the child has a new task now).
+	var email string
+	if err := s.db.QueryRow("SELECT email FROM seat_recovery_tasks WHERE id=? AND finished=0", taskID).Scan(&email); err != nil {
+		return err
+	}
 	var raw, encrypted string
 	if err := s.db.QueryRow("SELECT profile,encrypted_credentials FROM mail_accounts WHERE email=?", email).Scan(&raw, &encrypted); err != nil {
 		return err

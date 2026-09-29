@@ -113,6 +113,7 @@ func (s *Server) listMailAccounts(w http.ResponseWriter, r *http.Request) {
 			if _, credentials, credentialErr := s.store.FreeAccountCredential(pipeline.ID); credentialErr == nil && strings.TrimSpace(credentials.OAuthRefreshToken) != "" {
 				if s.store.SaveMailAccountOAuth(item.Email, credentials.OAuthAccessToken, credentials.OAuthRefreshToken) == nil {
 					if refreshed, _, refreshErr := s.store.MailAccountCredential(item.Email); refreshErr == nil {
+						refreshed.SeatRecoveryActive = item.SeatRecoveryActive
 						result.Items[index] = refreshed
 					}
 				}

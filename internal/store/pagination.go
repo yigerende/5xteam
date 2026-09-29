@@ -72,14 +72,17 @@ const mailAccountPageCTE = `
 WITH visits AS (
 	SELECT email,COUNT(DISTINCT team_id) AS visited FROM team_visits GROUP BY email
 ), joined AS (
-	SELECT json_set(m.profile,'$.visited_team_count',COALESCE(v.visited,0),'$.history_uncertain',json(CASE WHEN COALESCE(json_extract(p.profile,'$.history_uncertain'),0)=1 THEN 'true' ELSE 'false' END)) AS profile, m.encrypted_credentials, m.updated_at, p.profile AS pipeline_profile,
+	SELECT json_set(m.profile,'$.visited_team_count',COALESCE(v.visited,0),'$.history_uncertain',json(CASE WHEN COALESCE(json_extract(p.profile,'$.history_uncertain'),0)=1 THEN 'true' ELSE 'false' END),
+		'$.seat_recovery_active',json(CASE WHEN r.id IS NOT NULL AND json_extract(r.payload,'$.left_at') IS NULL THEN 'true' ELSE 'false' END)) AS profile, m.encrypted_credentials, m.updated_at, p.profile AS pipeline_profile,
 		CASE WHEN LOWER(COALESCE(json_extract(m.profile, '$.management_scope'), '')) = 'pro' THEN 'pro' ELSE 'mail' END AS management_scope,
 		CASE
 			WHEN COALESCE(json_extract(p.profile,'$.dead'),0)=1 OR json_extract(m.profile,'$.chatgpt_status')='dead' OR json_extract(m.profile,'$.registration_status')='dead' THEN 'dead'
+			WHEN r.id IS NOT NULL AND json_extract(r.payload,'$.left_at') IS NULL THEN 'recovering'
 			WHEN json_extract(p.profile, '$.remote_removed_at') IS NOT NULL THEN 'removed'
 			WHEN json_extract(p.profile, '$.remove_status') = 'completed' THEN 'removed'
 			WHEN json_extract(p.profile, '$.accept_status') = 'completed' THEN 'inside'
 			WHEN COALESCE(v.visited,0)>0 THEN 'removed'
+			WHEN json_extract(m.profile,'$.seat_recovery_left_at') IS NOT NULL THEN 'removed'
 			ELSE 'outside'
 		END AS space_state,
 		LOWER(m.email || ' ' || m.label || ' ' || COALESCE(json_extract(m.profile, '$.login_method'), '')) AS search_text,
@@ -92,6 +95,7 @@ WITH visits AS (
 		ORDER BY updated_at DESC, id DESC LIMIT 1
 	)
 	LEFT JOIN visits v ON v.email=LOWER(m.email)
+	LEFT JOIN seat_recovery_tasks r ON r.email=LOWER(m.email) AND r.finished=0
 )
 `
 
@@ -193,7 +197,7 @@ func (s *Store) MailAccountsPageContext(ctx context.Context, scope, query, space
 	scope = normalizeMailManagementScope(scope)
 	query = strings.ToLower(strings.TrimSpace(query))
 	spaceState = strings.ToLower(strings.TrimSpace(spaceState))
-	if spaceState != "outside" && spaceState != "inside" && spaceState != "removed" && spaceState != "dead" {
+	if spaceState != "outside" && spaceState != "inside" && spaceState != "removed" && spaceState != "dead" && spaceState != "recovering" {
 		spaceState = ""
 	}
 	limit, offset = normalizeLimitOffset(limit, offset)
@@ -204,19 +208,19 @@ func (s *Store) MailAccountsPageContext(ctx context.Context, scope, query, space
 
 	like := "%" + query + "%"
 	filteredWhere := ` WHERE management_scope=? AND (?='' OR search_text LIKE ?) AND (?='' OR space_state=?)`
-	var all, outside, inside, removed, dead, outlook, mailcom, totp, mailtoken, directurl, none int
+	var all, outside, inside, removed, dead, recovering, outlook, mailcom, totp, mailtoken, directurl, none int
 	if err := s.db.QueryRowContext(ctx, mailAccountPageCTE+`
 		SELECT COALESCE(SUM((?='' OR search_text LIKE ?) AND (?='' OR space_state=?)),0), COUNT(*),
 			COALESCE(SUM(space_state='outside'),0), COALESCE(SUM(space_state='inside'),0), COALESCE(SUM(space_state='removed'),0),
-			COALESCE(SUM(space_state='dead'),0),
+			COALESCE(SUM(space_state='dead'),0), COALESCE(SUM(space_state='recovering'),0),
 			COALESCE(SUM(login_method='outlook'),0), COALESCE(SUM(login_method='mailcom'),0), COALESCE(SUM(login_method='totp'),0),
 			COALESCE(SUM(login_method='mailtoken'),0), COALESCE(SUM(login_method='directurl'),0),
 			COALESCE(SUM(login_method NOT IN ('outlook','mailcom','totp','mailtoken','directurl')),0)
-		FROM joined WHERE management_scope=?`, query, like, spaceState, spaceState, scope).Scan(&result.Total, &all, &outside, &inside, &removed, &dead, &outlook, &mailcom, &totp, &mailtoken, &directurl, &none); err != nil {
+		FROM joined WHERE management_scope=?`, query, like, spaceState, spaceState, scope).Scan(&result.Total, &all, &outside, &inside, &removed, &dead, &recovering, &outlook, &mailcom, &totp, &mailtoken, &directurl, &none); err != nil {
 		return result, err
 	}
 	result.Counts = map[string]int{"all": all, "outlook": outlook, "mailcom": mailcom, "totp": totp, "mailtoken": mailtoken, "directurl": directurl, "none": none}
-	result.SpaceCounts = map[string]int{"outside": outside, "inside": inside, "removed": removed, "dead": dead}
+	result.SpaceCounts = map[string]int{"outside": outside, "inside": inside, "removed": removed, "dead": dead, "recovering": recovering}
 
 	rows, err := s.db.QueryContext(ctx, mailAccountPageCTE+`
 		SELECT profile, encrypted_credentials, updated_at, COALESCE(pipeline_profile,'') FROM joined`+filteredWhere+`

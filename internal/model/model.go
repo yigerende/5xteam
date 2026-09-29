@@ -28,6 +28,8 @@ type Settings struct {
 type MailAccountProfile struct {
 	VisitedTeamCount      int                         `json:"visited_team_count"`
 	HistoryUncertain      bool                        `json:"history_uncertain,omitempty"`
+	SeatRecoveryActive    bool                        `json:"seat_recovery_active,omitempty"`
+	SeatRecoveryLeftAt    *time.Time                  `json:"seat_recovery_left_at,omitempty"`
 	ID                    string                      `json:"id"`
 	Email                 string                      `json:"email"`
 	Label                 string                      `json:"label"`

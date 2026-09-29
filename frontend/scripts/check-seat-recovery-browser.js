@@ -6,7 +6,8 @@
   const fixture = window.recoveryFixture
   const tick = () => new Promise(resolve => setTimeout(resolve, 50))
   const closeProgress = async () => { await wait(() => document.querySelector('[aria-label="恢复批量操作进度"]')?.getAttribute('aria-busy') === 'false'); document.querySelector('[aria-label="关闭操作进度"]').click(); await tick() }
-  window.confirm = () => true
+  const confirmations = []
+  window.confirm = message => { confirmations.push(message); return true }
   await wait(() => button('席位恢复'))
   button('席位恢复').click()
   await wait(() => row('dwell'))
@@ -69,9 +70,6 @@
   await tick()
   row('failed').querySelector('input[type=checkbox]').click()
   await tick()
-  button('批量删除').click()
-  await wait(() => document.querySelector('[aria-label="恢复批量操作进度"]')?.textContent.includes('席位占用'))
-  await closeProgress()
   ;[...row('failed').querySelectorAll('button')].find(p => p.textContent === '踢出').click()
   await wait(() => fixture.tasks.find(p => p.id === 'failed').manual_remove_method === 'mother_kick')
   await closeProgress()
@@ -81,6 +79,13 @@
   ;[...row('failed').querySelectorAll('button')].find(p => p.textContent === '日志').click()
   await wait(() => document.querySelector('[aria-label="席位恢复日志"]')?.textContent.includes('母号专属代理'))
   document.querySelector('[aria-label="关闭日志"]').click()
+  // Force delete an unfinished occupied task with a manual command underway.
+  button('批量删除').click()
+  await wait(() => !fixture.tasks.some(p => p.id === 'failed'))
+  await wait(() => document.querySelector('[aria-label="恢复批量操作进度"]')?.textContent.includes('删除成功'))
+  await closeProgress()
+  await wait(() => !row('failed'))
+  assert(confirmations.some(p => p.includes('强制删除') && p.includes('任何状态')), 'force-delete confirmation missing')
   assert(!fixture.requests.some(r => /\/free-accounts|\/auto-rotation|\/sub2/.test(r.path)), 'Team API called')
   // Delete completed records in the all-tasks view; selection is cleared on filter change.
   const activeFilter = [...document.querySelectorAll('label')].find(p => p.textContent.trim() === '只看未结束').querySelector('input')
@@ -96,5 +101,5 @@
   button('扫描并执行所选母号').click()
   await wait(() => row('new') && row('another'))
   assert(fixture.requests.filter(r => r.method === 'POST' && r.path.endsWith('/seat-recovery')).length === 4, 'direct multi-mother scan-and-execute failed')
-  return {ok:true, checks:['multi-mother scan/start','workspace mapping','partial scan failure','AT concurrency 100','background switching','server clock','batch pause/resume','batch kick/leave','single kick/leave','progress polling','partial delete failure','completed task deletion','logs','Team isolation']}
+  return {ok:true, checks:['multi-mother scan/start','workspace mapping','partial scan failure','AT concurrency 100','background switching','server clock','batch pause/resume','batch kick/leave','single kick/leave','progress polling','force delete occupied/unfinished task','completed task deletion','logs','Team isolation']}
 })()
