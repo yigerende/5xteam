@@ -23,7 +23,7 @@ func (s *Server) gptPayClient() *gptpay.Client {
 	return gptpay.New()
 }
 func (s *Server) getGPTPaySettings(w http.ResponseWriter, r *http.Request) {
-	v, _, err := s.store.GPTPaySettings()
+	v, _, err := s.store.GPTPayProviderSettings(r.URL.Query().Get("provider"))
 	if err != nil {
 		writeAPI(w, 500, nil, "读取 GPTPay 配置失败")
 		return
@@ -46,17 +46,47 @@ func (s *Server) saveGPTPaySettings(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, 200, v, "")
 }
 func (s *Server) getGPTPayAccount(w http.ResponseWriter, r *http.Request) {
-	v, key, err := s.store.GPTPaySettings()
+	v, key, err := s.store.GPTPayProviderSettings(r.URL.Query().Get("provider"))
 	if err != nil || key == "" {
 		writeAPI(w, 400, nil, "请先保存 GPTPay API Key")
 		return
 	}
-	account, err := s.gptPayClient().Account(r.Context(), v.URL, key)
+	account, err := s.gptPayClient().AccountForProvider(r.Context(), v.Provider, v.URL, key)
 	if err != nil {
 		writeAPI(w, 502, nil, err.Error())
 		return
 	}
 	writeAPI(w, 200, account, "")
+}
+
+func (s *Server) getGPTPayCatalog(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	if provider != gptpay.CMSNav {
+		writeAPI(w, 400, nil, "该供应商不支持公开国家与套餐目录")
+		return
+	}
+	base := r.URL.Query().Get("url")
+	if base == "" {
+		cfg, _, err := s.store.GPTPayProviderSettings(provider)
+		if err != nil {
+			writeAPI(w, 500, nil, "读取供应商配置失败")
+			return
+		}
+		base = cfg.URL
+	}
+	// Accept the address currently being edited without saving settings or
+	// requiring an API key. The route remains behind the application's login.
+	cfg, err := gptpay.NormalizeSettings(gptpay.Settings{Provider: provider, URL: base})
+	if err != nil {
+		writeAPI(w, 400, nil, err.Error())
+		return
+	}
+	catalog, err := s.gptPayClient().Catalog(r.Context(), cfg.URL)
+	if err != nil {
+		writeAPI(w, 502, nil, err.Error())
+		return
+	}
+	writeAPI(w, 200, catalog, "")
 }
 func (s *Server) listGPTPayCards(w http.ResponseWriter, r *http.Request) {
 	p := s.parsePagination(r)
@@ -171,10 +201,13 @@ func gptPaySession(p model.MailAccountProfile, c model.MailAccountCredentials) (
 		}
 		v.Account.ID = info.AccountID
 	}
-	if v.Account.ID == "" && c.ChatGPTSession != "" {
+	if c.ChatGPTSession != "" {
 		var saved gptpay.Session
 		if json.Unmarshal([]byte(c.ChatGPTSession), &saved) == nil && saved.AccessToken == v.AccessToken && strings.EqualFold(saved.User.Email, p.Email) {
-			v.Account.ID = saved.Account.ID
+			v.Raw = saved.Raw
+			if v.Account.ID == "" {
+				v.Account.ID = saved.Account.ID
+			}
 		}
 	}
 	if v.Account.ID == "" {
@@ -188,11 +221,19 @@ func gptPaySession(p model.MailAccountProfile, c model.MailAccountCredentials) (
 
 var gptPayRequestID = regexp.MustCompile(`^[A-Za-z0-9_-]{16,80}$`)
 
+func validateGPTPaySession(provider string, session gptpay.Session) error {
+	if provider == gptpay.CMSNav && len(session.Raw) == 0 {
+		return fmt.Errorf("CMSNav 需要与当前 AT 匹配的完整 Session，请先获取临时 AT 或使用全自动开通")
+	}
+	return nil
+}
+
 func (s *Server) createGPTPayOrder(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CardID    string `json:"card_id"`
 		RequestID string `json:"request_id"`
 		PlanCode  string `json:"plan_code"`
+		Provider  string `json:"provider"`
 	}
 	if decodeJSON(w, r, &input, 8<<10) != nil {
 		return
@@ -215,7 +256,7 @@ func (s *Server) createGPTPayOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	id := "pro-" + input.RequestID
 	if existing, _, e := s.store.GPTPayOrder(id); e == nil {
-		if existing.Email != email || existing.CardID != input.CardID || existing.PlanCode != input.PlanCode {
+		if existing.Email != email || existing.CardID != input.CardID || existing.PlanCode != input.PlanCode || gptpay.Provider(existing.Provider) != gptpay.Provider(input.Provider) {
 			writeAPI(w, 409, nil, "请求编号已用于不同的开通参数")
 			return
 		}
@@ -239,8 +280,8 @@ func (s *Server) createGPTPayOrder(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 400, nil, "请先在 Pro 全自动配置中保存 GPTPay API Key")
 		return
 	}
-	if input.PlanCode != v.PlanCode {
-		writeAPI(w, 409, nil, "开通套餐配置已变化，请重新打开开通窗口确认")
+	if input.PlanCode != v.PlanCode || gptpay.Provider(input.Provider) != v.Provider {
+		writeAPI(w, 409, nil, "供应商或开通套餐配置已变化，请重新打开开通窗口确认")
 		return
 	}
 	card, secret, err := s.store.GPTPayCard(input.CardID)
@@ -253,12 +294,15 @@ func (s *Server) createGPTPayOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, err := gptPaySession(p, c)
+	if err == nil {
+		err = validateGPTPaySession(v.Provider, session)
+	}
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
 	}
-	snapshot := gptpay.Snapshot{URL: v.URL, APIKey: key, Input: gptpay.CreateInput{PlanCode: v.PlanCode, CardSecret: secret, Session: session}}
-	order := gptpay.Order{ID: id, Email: email, CardID: card.ID, CardName: card.Name, CardLast4: card.Last4, PlanCode: v.PlanCode, Status: "submitting", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	snapshot := gptpay.Snapshot{Provider: v.Provider, Country: v.Country, URL: v.URL, APIKey: key, Input: gptpay.CreateInput{PlanCode: v.PlanCode, CardSecret: secret, Session: session}}
+	order := gptpay.Order{Provider: v.Provider, ID: id, Email: email, CardID: card.ID, CardName: card.Name, CardLast4: card.Last4, PlanCode: v.PlanCode, Status: "submitting", CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	if err = s.store.CreateGPTPayOrder(order, snapshot); err != nil {
 		writeAPI(w, 409, nil, "未提交开通订单："+err.Error())
 		return
@@ -301,7 +345,7 @@ func (s *Server) submitGPTPayOrder(ctx context.Context, order gptpay.Order, snap
 func (s *Server) auditGPTPayOrder(o gptpay.Order) {
 	s.updateProPaymentStage(o)
 	if p, _, err := s.store.MailAccountCredential(o.Email); err == nil {
-		s.auditProEvent(p, "recharge", o.Status, "gptpay", "Pro 开通订单状态："+o.Status, map[string]any{"order_id": o.ID, "supplier_order_id": o.Remote.ID, "plan_code": o.PlanCode, "request_id": o.RequestID, "error": o.Error, "settlement_status": o.Remote.SettlementStatus, "cancellation_status": o.Remote.CancellationStatus})
+		s.auditProEvent(p, "recharge", o.Status, "gptpay", "Pro 开通订单状态："+o.Status, map[string]any{"provider": gptpay.Provider(o.Provider), "order_id": o.ID, "supplier_order_id": o.Remote.ID, "plan_code": o.PlanCode, "request_id": o.RequestID, "error": o.Error, "settlement_status": o.Remote.SettlementStatus, "cancellation_status": o.Remote.CancellationStatus})
 	}
 }
 func (s *Server) retryGPTPayOrder(w http.ResponseWriter, r *http.Request) {
@@ -369,7 +413,8 @@ func (s *Server) refreshGPTPayOrder(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) queryGPTPayOrders(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		IDs []string `json:"order_ids"`
+		Provider string   `json:"provider"`
+		IDs      []string `json:"order_ids"`
 	}
 	if decodeJSON(w, r, &input, 16<<10) != nil {
 		return
@@ -387,12 +432,12 @@ func (s *Server) queryGPTPayOrders(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 400, nil, "请输入 1～50 个供应商订单 ID")
 		return
 	}
-	v, key, err := s.store.GPTPaySettings()
+	v, key, err := s.store.GPTPayProviderSettings(input.Provider)
 	if err != nil || key == "" {
 		writeAPI(w, 400, nil, "请先保存 GPTPay API Key")
 		return
 	}
-	items, err := s.gptPayClient().Status(r.Context(), v.URL, key, ids)
+	items, err := s.gptPayClient().StatusForProvider(r.Context(), v.Provider, v.URL, key, ids)
 	if err != nil {
 		writeAPI(w, 502, nil, err.Error())
 		return

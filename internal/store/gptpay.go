@@ -12,11 +12,35 @@ import (
 )
 
 func (s *Store) GPTPaySettings() (gptpay.Settings, string, error) {
+	return s.GPTPayProviderSettings("")
+}
+
+// An empty provider reads the active configuration; an explicit one does not
+// change the active supplier and can never inherit another supplier's key.
+func (s *Store) GPTPayProviderSettings(provider string) (gptpay.Settings, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v, _ := gptpay.NormalizeSettings(gptpay.Settings{})
+	v, err := gptpay.NormalizeSettings(gptpay.Settings{Provider: provider})
+	if err != nil {
+		return v, "", err
+	}
 	var raw, sealed string
-	err := s.db.QueryRow("SELECT profile,encrypted_key FROM gptpay_settings WHERE id=1").Scan(&raw, &sealed)
+	err = s.db.QueryRow("SELECT profile,encrypted_key FROM gptpay_settings WHERE id=1").Scan(&raw, &sealed)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return v, "", err
+	}
+	if provider != "" {
+		var active gptpay.Settings
+		if raw != "" {
+			if err = json.Unmarshal([]byte(raw), &active); err != nil {
+				return v, "", err
+			}
+		}
+		if raw == "" || gptpay.Provider(active.Provider) != provider {
+			raw, sealed = "", ""
+			err = s.db.QueryRow("SELECT profile,encrypted_key FROM gptpay_provider_settings WHERE provider=?", provider).Scan(&raw, &sealed)
+		}
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, "", nil
 	}
@@ -42,21 +66,51 @@ func (s *Store) SaveGPTPaySettings(v gptpay.Settings, key string) (gptpay.Settin
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var sealed string
-	err = s.db.QueryRow("SELECT encrypted_key FROM gptpay_settings WHERE id=1").Scan(&sealed)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return v, err
+	}
+	defer tx.Rollback()
+	if err = s.saveGPTPaySettingsTx(tx, &v, key); err != nil {
+		return v, err
+	}
+	return v, tx.Commit()
+}
+
+func (s *Store) saveGPTPaySettingsTx(tx *sql.Tx, v *gptpay.Settings, key string) error {
+	// Archive the active profile first, including legacy installations which only
+	// have the singleton. Both rows are updated in the caller's transaction.
+	var raw, oldKey string
+	err := tx.QueryRow("SELECT profile,encrypted_key FROM gptpay_settings WHERE id=1").Scan(&raw, &oldKey)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if raw != "" {
+		var old gptpay.Settings
+		if err = json.Unmarshal([]byte(raw), &old); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO gptpay_provider_settings(provider,profile,encrypted_key) VALUES(?,?,?) ON CONFLICT(provider) DO UPDATE SET profile=excluded.profile,encrypted_key=excluded.encrypted_key`, gptpay.Provider(old.Provider), raw, oldKey); err != nil {
+			return err
+		}
+	}
+	var sealed string
+	err = tx.QueryRow("SELECT encrypted_key FROM gptpay_provider_settings WHERE provider=?", v.Provider).Scan(&sealed)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
 	}
 	if strings.TrimSpace(key) != "" {
 		sealed, err = s.encrypt(strings.TrimSpace(key))
 		if err != nil {
-			return v, err
+			return err
 		}
 	}
 	v.KeyPresent = sealed != ""
-	raw, _ := json.Marshal(v)
-	_, err = s.db.Exec("INSERT INTO gptpay_settings(id,profile,encrypted_key) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET profile=excluded.profile,encrypted_key=excluded.encrypted_key", string(raw), sealed)
-	return v, err
+	if _, err = tx.Exec(`INSERT INTO gptpay_provider_settings(provider,profile,encrypted_key) VALUES(?,?,?) ON CONFLICT(provider) DO UPDATE SET profile=excluded.profile,encrypted_key=excluded.encrypted_key`, v.Provider, mustJSON(v), sealed); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO gptpay_settings(id,profile,encrypted_key) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET profile=excluded.profile,encrypted_key=excluded.encrypted_key`, mustJSON(v), sealed)
+	return err
 }
 func (s *Store) GPTPayCard(id string) (gptpay.Card, gptpay.CardSecret, error) {
 	s.mu.Lock()

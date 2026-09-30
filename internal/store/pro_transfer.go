@@ -181,7 +181,10 @@ func ValidateProTransfer(file ProTransferFile) error {
 			if o.Snapshot.APIKey == "" || o.Snapshot.URL == "" {
 				return errors.New("订单缺少查询凭据，不能完整迁移")
 			}
-			if _, err = gptpay.NormalizeSettings(gptpay.Settings{URL: o.Snapshot.URL, PlanCode: o.Order.PlanCode}); err != nil {
+			if gptpay.Provider(o.Order.Provider) != gptpay.Provider(o.Snapshot.Provider) {
+				return errors.New("订单供应商与快照不一致")
+			}
+			if _, err = gptpay.NormalizeSettings(gptpay.Settings{Provider: o.Snapshot.Provider, Country: o.Snapshot.Country, URL: o.Snapshot.URL, PlanCode: o.Order.PlanCode}); err != nil {
 				return errors.New("订单供应商地址或套餐无效")
 			}
 		}

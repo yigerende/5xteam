@@ -6,6 +6,10 @@ import '../src/styles.css'
 // upstream service is used. This module is not an entry in the production build.
 const fixture = window.gptPayFixture = { requests: [], cards: [], orders: [], config: { url:'https://gptpay.tokenseek.app/api/v1',plan_code:'pro5',key_present:true,session_timeout_minutes:30 }, pro: {provider:'sub2',quota_enabled:false,quota_used_threshold:100,quota_check_interval_seconds:120,auto_merge_enabled:false,target_admin_id:'mother-8',target_seat_type:'default',concurrency:2,retry_count:2,retry_interval_seconds:3} }
 const profile = { email:'fixture-pro@example.com',access_token_present:true,refresh_token_present:true,management_scope:'pro',current_plan_type:'free' }
+fixture.config.provider = 'tokenseek'
+fixture.config.country = 'US'
+fixture.catalog = { countries: [{code:'US',name:'美国',currency:'USD'},{code:'PH',name:'菲律宾',currency:'PHP'},{code:'JP',name:'日本',currency:'JPY'}], creditPrices: {pro5x:80,pro20x:100,pro50x:120}, productAvailability:{pro5x:true,pro20x:true,pro50x:true} }
+fixture.providerConfigs = { tokenseek: { ...fixture.config }, cmsnav: { ...fixture.config, provider: 'cmsnav', url: 'https://gptpay.cmsnav.com/api/v1', key_present: false } }
 Object.assign(fixture.config,{card_account_limit:3});Object.assign(fixture.pro,{scheduled_enabled:false,max_unmerged:5,schedule_interval_seconds:120})
 fixture.scheduleRuns=[];fixture.imported=new Set()
 fixture.profile=profile
@@ -34,7 +38,12 @@ window.fetch = async (path, options = {}) => {
   const url = new URL(path, location.origin)
   if (!url.pathname.startsWith('/api/')) throw new Error('Fixture prohibits external requests')
   const method=options.method || 'GET', body=options.body?JSON.parse(options.body):{}
-  fixture.requests.push({path:url.pathname,method,body})
+  fixture.requests.push({path:url.pathname,query:url.search,method,body})
+  if(url.pathname==='/api/gptpay/catalog'){
+    const data=JSON.parse(JSON.stringify(fixture.catalog)),fail=fixture.catalogFailure
+    await delay(fixture.catalogDelay||40)
+    return fail?reply(null,502):reply(data)
+  }
   await new Promise(resolve=>setTimeout(resolve,30))
   if(url.pathname==='/api/pro-accounts/delete'){
     await delay(250)
@@ -91,13 +100,20 @@ window.fetch = async (path, options = {}) => {
     return reply(profile,202)
   }
   if(url.pathname==='/api/pro-settings')return reply(fixture.pro)
-  if(url.pathname==='/api/pro-settings/automation'){fixture.pro={...fixture.pro,...body.automation};fixture.config={...fixture.config,...body.gptpay};return reply({automation:fixture.pro,gptpay:fixture.config})}
+  if(url.pathname==='/api/pro-settings/automation'){
+    fixture.pro={...fixture.pro,...body.automation}
+    fixture.providerConfigs[fixture.config.provider]={...fixture.config}
+    fixture.config={...body.gptpay,key_present:!!body.gptpay.api_key||!!fixture.providerConfigs[body.gptpay.provider]?.key_present}
+    delete fixture.config.api_key
+    fixture.providerConfigs[fixture.config.provider]={...fixture.config}
+    return reply({automation:fixture.pro,gptpay:fixture.config})
+  }
   if(url.pathname==='/api/pro-accounts'){
     if(fixture.listProfiles)return reply({items:fixture.listProfiles,total:fixture.listProfiles.length,summary:{all:fixture.listProfiles.length,oauth_ready:0,pushed:0,merged:0}})
     const paid=fixture.orders.find(o=>o.email===profile.email&&o.status==='success')
     return reply({items:[{...profile,activation_card:paid?{card_name:paid.card_name,card_last4:paid.card_last4}:null}],total:1,summary:{all:1,oauth_ready:1}})
   }
-  if(url.pathname==='/api/gptpay/settings'){if(method==='PUT')fixture.config={...fixture.config,...body,key_present:true};return reply(fixture.config)}
+  if(url.pathname==='/api/gptpay/settings'){if(method==='PUT')fixture.config={...fixture.config,...body,key_present:true};return reply(url.searchParams.has('provider')?fixture.providerConfigs[url.searchParams.get('provider')]:fixture.config)}
   if(url.pathname.endsWith('/auto-pro/stop')){profile.pro_auto.status='interrupted';profile.pro_auto.error='用户已停止';return reply(profile)}
   if(url.pathname.endsWith('/auto-pro')){
     if(method==='GET')return reply(profile.pro_auto||{})
@@ -125,7 +141,7 @@ window.fetch = async (path, options = {}) => {
   }
   if(url.pathname.startsWith('/api/gptpay/cards/')){const id=url.pathname.split('/').at(-1),card=fixture.cards.find(c=>c.id===id);if(method==='DELETE'){fixture.cards=fixture.cards.filter(c=>c.id!==id);return reply({deleted:true})};Object.assign(card,body);return reply(card)}
   if(url.pathname==='/api/gptpay/orders')return reply({items:fixture.orders,total:fixture.orders.length})
-  if(url.pathname.endsWith('/recharge')){stageState('recharge','running');await delay(650);const card=fixture.cards.find(c=>c.id===body.card_id);const order={id:'pro-'+body.request_id,email:profile.email,card_name:card.name,card_last4:card.last4,plan_code:body.plan_code,status:'processing',remote:{id:'supplier-fixture',orderNo:'GPT-TEST',status:'processing',cancellationStatus:'waiting',settlementStatus:'reserved'},created_at:new Date().toISOString(),updated_at:new Date().toISOString()};fixture.orders.unshift(order);return reply(order)}
+  if(url.pathname.endsWith('/recharge')){stageState('recharge','running');await delay(650);const card=fixture.cards.find(c=>c.id===body.card_id);const order={provider:body.provider||'tokenseek',id:'pro-'+body.request_id,email:profile.email,card_name:card.name,card_last4:card.last4,plan_code:body.plan_code,status:'processing',remote:{id:'supplier-fixture',orderNo:'GPT-TEST',status:'processing',cancellationStatus:'waiting',settlementStatus:'reserved'},created_at:new Date().toISOString(),updated_at:new Date().toISOString()};fixture.orders.unshift(order);return reply(order)}
   if(url.pathname.endsWith('/refresh')){stageState('recharge','completed');Object.assign(fixture.orders[0],{status:'success',remote:{...fixture.orders[0].remote,status:'success',cancellationStatus:'success',settlementStatus:'settled',chargedCredits:100},updated_at:new Date().toISOString()});return reply(fixture.orders[0])}
   if(url.pathname==='/api/gptpay/account')return reply({user:{email:'supplier@example.com'},wallet:{availableCredits:10000,reservedCredits:100},level:{name:'默认'},plans:[{planCode:'pro5',successCredits:100,failureCredits:5},{planCode:'pro20',successCredits:200,failureCredits:5}],apiKey:{expiresAt:null}})
   if(url.pathname==='/api/gptpay/orders/query')return reply({orders:body.order_ids.map(id=>({id,status:id==='supplier-fixture'?'success':'not_found'}))})

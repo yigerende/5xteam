@@ -1,4 +1,13 @@
-export const proPlanName = code => ({ pro5: 'Pro 5x', pro20: 'Pro 20x' })[code] || code
+export const payProviderName = provider => provider === 'cmsnav' ? 'GPTPay · CMSNav' : 'GPTPay · Tokenseek'
+export const proPlanName = code => ({ pro5: 'Pro 5x', pro20: 'Pro 20x', pro50: 'Pro 50x', pro5x: 'Pro 5x', pro20x: 'Pro 20x', pro50x: 'Pro 50x' })[code] || code
+export function catalogProPlans(catalog) {
+  return ['pro5', 'pro20', 'pro50'].map(code => {
+    const wireCode = code + 'x', product = catalog?.products?.find(p => p.code === wireCode)
+    const price = catalog?.creditPrices?.[wireCode] ?? product?.creditPrice
+    const available = catalog?.productAvailability?.[wireCode] ?? product?.enabled ?? (price != null)
+    return { code, price, available: !!available, label: `${proPlanName(code)}${price != null ? ` · ${price} Credits` : ''}${catalog && !available ? '（暂不可用）' : ''}` }
+  })
+}
 export const payStatusName = status => ({ submitting: '正在提交', created: '已创建', processing: '开通中', success: '成功', failed: '失败', submission_unknown: '提交待确认', manual_review: '待人工核查', not_found: '未找到', reserved: '已冻结', settled: '已结算', waiting: '等待取消续费', pending: '取消续费中' })[status] || status || '—'
 export const needsPayPoll = order => !!order?.remote?.id && (!['success', 'failed'].includes(order.status) || ['waiting', 'pending'].includes(order.remote.cancellationStatus))
 export const payRequestID = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('')

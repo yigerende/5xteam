@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { parseCardText, needsPayPoll, proPlanName } from '../src/gptpay.js'
+import { parseCardText, needsPayPoll, proPlanName, catalogProPlans } from '../src/gptpay.js'
 for (const date of ['202812','2028-12','2028/12','12/28','12/2028','2812']) {
   assert.deepEqual(parseCardText(`4242 4242 4242 4242----${date}----012`), { number: '4242424242424242', cvv: '012', exp_year: 2028, exp_month: 12 })
 }
@@ -8,6 +8,15 @@ assert.throws(() => parseCardText('4242424242424242----oops----123'))
 assert.throws(() => parseCardText('bad'))
 assert.equal(proPlanName('pro5'), 'Pro 5x')
 assert.equal(proPlanName('pro20'), 'Pro 20x')
+assert.equal(proPlanName('pro50'), 'Pro 50x')
+assert.equal(proPlanName('pro50x'), 'Pro 50x')
+const documented = catalogProPlans({ creditPrices: { pro5x: 80, pro20x: 100, pro50x: 120 } })
+assert.equal(documented[2].label, 'Pro 50x · 120 Credits')
+assert.equal(documented[2].available, true)
+const disabled = catalogProPlans({ creditPrices: {pro50x:120}, products:[{code:'pro50x',enabled:true}], productAvailability:{pro50x:false} })
+assert.equal(disabled[2].available, false)
+assert.equal(disabled[0].available, false)
+assert.equal(catalogProPlans({products:[{code:'pro5x',creditPrice:0,enabled:true}]})[0].price, 0)
 assert.equal(needsPayPoll({status:'success', remote:{id:'test', cancellationStatus:'pending'}}), true)
 assert.equal(needsPayPoll({status:'success', remote:{id:'test', cancellationStatus:'success'}}), false)
 assert.equal(needsPayPoll({status:'success', remote:{id:'test', cancellationStatus:'failed'}}), false)

@@ -298,6 +298,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/gptpay/settings", s.getGPTPaySettings)
 	mux.HandleFunc("PUT /api/gptpay/settings", s.saveGPTPaySettings)
 	mux.HandleFunc("GET /api/gptpay/account", s.getGPTPayAccount)
+	mux.HandleFunc("GET /api/gptpay/catalog", s.getGPTPayCatalog)
 	mux.HandleFunc("GET /api/gptpay/cards", s.listGPTPayCards)
 	mux.HandleFunc("POST /api/gptpay/cards", s.saveGPTPayCard)
 	mux.HandleFunc("PUT /api/gptpay/cards/{id}", s.saveGPTPayCard)

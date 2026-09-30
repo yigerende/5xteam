@@ -174,6 +174,7 @@ func (s *Store) initSchema() error {
 			encrypted_sub2_password TEXT NOT NULL DEFAULT '', encrypted_cpa_key TEXT NOT NULL DEFAULT ''
 		);
 		CREATE TABLE IF NOT EXISTS gptpay_settings (id INTEGER PRIMARY KEY CHECK(id=1), profile TEXT NOT NULL, encrypted_key TEXT NOT NULL DEFAULT '');
+		CREATE TABLE IF NOT EXISTS gptpay_provider_settings (provider TEXT PRIMARY KEY, profile TEXT NOT NULL, encrypted_key TEXT NOT NULL DEFAULT '');
 		CREATE TABLE IF NOT EXISTS gptpay_cards (id TEXT PRIMARY KEY, profile TEXT NOT NULL, encrypted_secret TEXT NOT NULL, enabled INTEGER NOT NULL, created_at TEXT NOT NULL);
 		CREATE INDEX IF NOT EXISTS gptpay_cards_enabled_idx ON gptpay_cards(enabled,created_at DESC);
 		CREATE TABLE IF NOT EXISTS gptpay_orders (id TEXT PRIMARY KEY, email TEXT NOT NULL COLLATE NOCASE, profile TEXT NOT NULL, encrypted_snapshot TEXT NOT NULL, active INTEGER NOT NULL, created_at TEXT NOT NULL);

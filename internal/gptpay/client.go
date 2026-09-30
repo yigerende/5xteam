@@ -16,7 +16,22 @@ import (
 
 const DefaultURL = "https://gptpay.tokenseek.app/api/v1"
 
+const (
+	Tokenseek = "tokenseek"
+	CMSNav    = "cmsnav"
+	CMSNavURL = "https://gptpay.cmsnav.com/api/v1"
+)
+
+func Provider(v string) string {
+	if v == "" {
+		return Tokenseek
+	}
+	return v
+}
+
 type Settings struct {
+	Provider              string `json:"provider"`
+	Country               string `json:"country"`
 	CardAccountLimit      int    `json:"card_account_limit"`
 	URL                   string `json:"url"`
 	PlanCode              string `json:"plan_code"`
@@ -48,6 +63,7 @@ type CardSecret struct {
 }
 
 type Session struct {
+	Raw  json.RawMessage `json:"-"`
 	User struct {
 		Email string `json:"email"`
 	} `json:"user"`
@@ -66,9 +82,11 @@ type CreateInput struct {
 // Snapshot is encrypted at rest and never returned by list/detail APIs. Keeping
 // it makes an uncertain submission replayable with exactly the original input.
 type Snapshot struct {
-	URL    string      `json:"url"`
-	APIKey string      `json:"api_key"`
-	Input  CreateInput `json:"input"`
+	Provider string      `json:"provider,omitempty"`
+	Country  string      `json:"country,omitempty"`
+	URL      string      `json:"url"`
+	APIKey   string      `json:"api_key"`
+	Input    CreateInput `json:"input"`
 }
 
 type RemoteOrder struct {
@@ -89,6 +107,7 @@ type RemoteOrder struct {
 }
 
 type Order struct {
+	Provider          string      `json:"provider,omitempty"`
 	LastStatusCheckAt *time.Time  `json:"last_status_check_at,omitempty"`
 	NextStatusCheckAt *time.Time  `json:"next_status_check_at,omitempty"`
 	StatusCheckError  string      `json:"status_check_error,omitempty"`
@@ -137,6 +156,17 @@ type Account struct {
 }
 
 func NormalizeSettings(v Settings) (Settings, error) {
+	v.Provider = Provider(v.Provider)
+	if v.Provider != Tokenseek && v.Provider != CMSNav {
+		return v, fmt.Errorf("请选择有效供应商")
+	}
+	v.Country = strings.ToUpper(strings.TrimSpace(v.Country))
+	if v.Country == "" {
+		v.Country = "US"
+	}
+	if !regexp.MustCompile(`^[A-Z]{2}$`).MatchString(v.Country) {
+		return v, fmt.Errorf("支付国家须为两位国家代码，如 US")
+	}
 	if v.CardAccountLimit == 0 {
 		v.CardAccountLimit = 3
 	}
@@ -146,6 +176,9 @@ func NormalizeSettings(v Settings) (Settings, error) {
 	v.URL = strings.TrimRight(strings.TrimSpace(v.URL), "/")
 	if v.URL == "" {
 		v.URL = DefaultURL
+		if v.Provider == CMSNav {
+			v.URL = CMSNavURL
+		}
 	}
 	u, err := url.Parse(v.URL)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -160,8 +193,8 @@ func NormalizeSettings(v Settings) (Settings, error) {
 	if v.PlanCode == "" {
 		v.PlanCode = "pro5"
 	}
-	if v.PlanCode != "pro5" && v.PlanCode != "pro20" {
-		return v, fmt.Errorf("请选择 Pro 5x 或 Pro 20x")
+	if v.PlanCode != "pro5" && v.PlanCode != "pro20" && !(v.Provider == CMSNav && v.PlanCode == "pro50") {
+		return v, fmt.Errorf("请选择供应商支持的套餐：Pro 5x、20x；CMSNav 还支持 Pro 50x")
 	}
 	if v.SessionTimeoutMinutes == 0 {
 		v.SessionTimeoutMinutes = 30
@@ -222,12 +255,16 @@ func ParseCard(line string, now time.Time) (CardSecret, error) {
 }
 
 type APIError struct {
+	ErrorCode        string
 	HTTPStatus, Code int
 	RequestID        string
 	Uncertain        bool
 }
 
 func (e *APIError) Error() string {
+	if e.ErrorCode != "" {
+		return e.cmsnavMessage()
+	}
 	message := map[int]string{40001: "请求、银行卡或 Session 无效", 40101: "API Key 无效或已过期", 40201: "Credits 不足", 40301: "账号或服务不可用", 40901: "幂等请求参数冲突", 40902: "该账号已有未完成订单", 41301: "请求过大", 42901: "供应商限流", 50301: "供应商暂时不可用"}[e.Code]
 	if message == "" {
 		message = "供应商响应异常"
@@ -299,8 +336,13 @@ func (c *Client) Account(ctx context.Context, base, key string) (Account, error)
 	return v, err
 }
 func (c *Client) Create(ctx context.Context, snapshot Snapshot, id string) (RemoteOrder, string, error) {
+	if Provider(snapshot.Provider) == CMSNav {
+		return c.createCMSNav(ctx, snapshot, id)
+	}
 	var v RemoteOrder
-	rid, err := c.call(ctx, snapshot.URL, snapshot.APIKey, "POST", "/gpt-recharge/orders", id, snapshot.Input, &v)
+	input := snapshot.Input
+	input.Session.Raw = nil // Preserve Tokenseek's existing minimal session payload.
+	rid, err := c.call(ctx, snapshot.URL, snapshot.APIKey, "POST", "/gpt-recharge/orders", id, input, &v)
 	if err == nil && (v.ID == "" || !ValidStatus(v.Status)) {
 		err = &APIError{Uncertain: true, RequestID: rid}
 	}

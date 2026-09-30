@@ -94,6 +94,7 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CardID   string `json:"card_id"`
 		PlanCode string `json:"plan_code"`
+		Provider string `json:"provider"`
 	}
 	if decodeJSON(w, r, &input, 8<<10) != nil {
 		return
@@ -152,8 +153,8 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, 400, nil, "请先保存 GPTPay API Key")
 			return
 		}
-		if input.PlanCode != cfg.PlanCode {
-			writeAPI(w, 409, nil, "套餐配置已变化，请重新打开窗口")
+		if input.PlanCode != cfg.PlanCode || gptpay.Provider(input.Provider) != cfg.Provider {
+			writeAPI(w, 409, nil, "供应商或套餐配置已变化，请重新打开窗口")
 			return
 		}
 		card, secret, err = s.store.GPTPayCard(input.CardID)
@@ -374,8 +375,11 @@ func (s *Server) proAutoRPC(ctx context.Context, email string, cfg gptpay.Settin
 		if err != nil {
 			return nil, err
 		}
-		order := gptpay.Order{ID: "pro-auto-" + p.ProAuto.ID, Email: email, CardID: card.ID, CardName: card.Name, CardLast4: card.Last4, PlanCode: cfg.PlanCode, Status: "submitting", CreatedAt: time.Now(), UpdatedAt: time.Now()}
-		snap := gptpay.Snapshot{URL: cfg.URL, APIKey: key, Input: gptpay.CreateInput{PlanCode: cfg.PlanCode, CardSecret: secret, Session: session}}
+		if err = validateGPTPaySession(cfg.Provider, session); err != nil {
+			return nil, err
+		}
+		order := gptpay.Order{Provider: cfg.Provider, ID: "pro-auto-" + p.ProAuto.ID, Email: email, CardID: card.ID, CardName: card.Name, CardLast4: card.Last4, PlanCode: cfg.PlanCode, Status: "submitting", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		snap := gptpay.Snapshot{Provider: cfg.Provider, Country: cfg.Country, URL: cfg.URL, APIKey: key, Input: gptpay.CreateInput{PlanCode: cfg.PlanCode, CardSecret: secret, Session: session}}
 		// Reserve the payment atomically before attaching its stable ID. A crash
 		// between these writes still leaves an active order, preventing repayment.
 		if err = s.store.CreateGPTPayOrder(order, snap); err != nil {
@@ -416,7 +420,7 @@ func (s *Server) proAutoRPC(ctx context.Context, email string, cfg gptpay.Settin
 			if err = waitProAuto(ctx, delay); err != nil {
 				return nil, errors.New("开通等待超时或流程已停止；请查询原订单，禁止重复付款")
 			}
-			items, e := s.gptPayClient().Status(ctx, snap.URL, snap.APIKey, []string{order.Remote.ID})
+			items, e := s.gptPayClient().StatusForProvider(ctx, snap.Provider, snap.URL, snap.APIKey, []string{order.Remote.ID})
 			if e != nil {
 				continue
 			} // Reads can retry; creating a second order cannot.

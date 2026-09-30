@@ -100,7 +100,7 @@ func (s *Server) pollGPTPayOrder(ctx context.Context, o gptpay.Order, now time.T
 // Cancellation is separate from purchase success and cannot hold up Pro steps.
 func (s *Server) syncGPTPayOrderStatus(ctx context.Context, o gptpay.Order, snapshot gptpay.Snapshot) (gptpay.Order, error) {
 	before := o
-	items, err := s.gptPayClient().Status(ctx, snapshot.URL, snapshot.APIKey, []string{o.Remote.ID})
+	items, err := s.gptPayClient().StatusForProvider(ctx, snapshot.Provider, snapshot.URL, snapshot.APIKey, []string{o.Remote.ID})
 	if err == nil {
 		found := false
 		for _, remote := range items {

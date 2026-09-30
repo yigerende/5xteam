@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"chatgpt-space-merge/internal/gptpay"
 	"chatgpt-space-merge/internal/model"
 )
 
@@ -55,6 +57,7 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 		paymentCode  int
 		loseSession  bool
 		cancellation string
+		cmsnav       bool
 	}{
 		{name: "complete", status: "completed", quota: 100},
 		{name: "cancel_failed_still_complete", status: "completed", quota: 100, cancellation: "failed"},
@@ -65,12 +68,47 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 		{name: "payment_failed", status: "failed", paymentCode: 402},
 		{name: "uncertain", status: "failed", paymentCode: 503},
 		{name: "session_lost_after_purchase", status: "failed", loseSession: true},
+		{name: "cmsnav_pro50_complete", cmsnav: true, status: "completed", quota: 100},
+		{name: "cmsnav_pro50_cancel_failed", cmsnav: true, status: "completed", quota: 100, cancellation: "failed"},
+		{name: "cmsnav_pro50_wait_quota", cmsnav: true, status: "waiting_quota", quota: 30},
+		{name: "cmsnav_pro50_uncertain", cmsnav: true, status: "failed", paymentCode: 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var purchases, logins, pushes, merges atomic.Int32
 			var verifyInitialSaved func()
 			s, st, email := gptPayFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				verifyInitialSaved()
+				if tc.cmsnav {
+					if r.Header.Get("Authorization") != "Bearer cmsnav-fixture-key" {
+						t.Error("incorrect automatic provider key")
+					}
+					if r.Method == "GET" {
+						if r.URL.Path != "/api/v1/customer/orders/auto-remote" {
+							t.Error("wrong automatic lookup path")
+						}
+						fmt.Fprintf(w, `{"code":0,"data":{"order":{"status":"success"},"progress":{"rechargeStatus":"success","renewalStatus":%q}}}`, tc.cancellation)
+						return
+					}
+					purchases.Add(1)
+					var input struct {
+						ProductCode string         `json:"productCode"`
+						Country     string         `json:"country"`
+						Session     gptpay.Session `json:"session"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+						t.Error(err)
+					}
+					if r.URL.Path != "/api/v1/customer/recharges" || input.ProductCode != "pro50x" || input.Country != "PH" || input.Session.AccessToken != proAutoToken("pro-test@example.com", "before") || input.Session.Account.ID != "personal-id" {
+						t.Error("automatic CMSNav payment payload mismatch")
+					}
+					if tc.paymentCode != 0 {
+						w.WriteHeader(tc.paymentCode)
+						fmt.Fprint(w, `{"errorCode":"CHANNEL_UNAVAILABLE"}`)
+						return
+					}
+					fmt.Fprint(w, `{"code":0,"data":{"taskId":"auto-remote","status":"reserved"}}`)
+					return
+				}
 				if strings.HasSuffix(r.URL.Path, "/status") {
 					fmt.Fprintf(w, `{"code":0,"data":{"orders":[{"id":"auto-remote","status":"success","cancellationStatus":%q}]}}`, tc.cancellation)
 					return
@@ -84,6 +122,15 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 				fmt.Fprint(w, `{"code":0,"data":{"id":"auto-remote","status":"processing"}}`)
 			})
 			configureProAutoFixture(t, s)
+			provider, plan := gptpay.Tokenseek, "pro20"
+			if tc.cmsnav {
+				cfg, _, _ := st.GPTPaySettings()
+				provider, plan = gptpay.CMSNav, "pro50"
+				cfg.Provider, cfg.PlanCode, cfg.Country = provider, plan, "PH"
+				if _, err := st.SaveGPTPaySettings(cfg, "cmsnav-fixture-key"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			verifyInitialSaved = func() {
 				p, c, err := st.MailAccountCredential(email)
 				if err != nil || c.AccessToken != proAutoToken(email, "before") || !strings.Contains(c.ChatGPTSession, "first-session-cookie") || !p.ChatGPTSessionPresent || p.ProAuto.Steps["login"] != "completed" {
@@ -136,7 +183,7 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 					p.SpaceMergedOnce = true
 				})
 			}}
-			rec := payCall(t, s.startProAutomation, "email", email, map[string]any{"card_id": "test-card", "plan_code": "pro20"})
+			rec := payCall(t, s.startProAutomation, "email", email, map[string]any{"provider": provider, "card_id": "test-card", "plan_code": plan})
 			if rec.Code != 202 {
 				t.Fatal(rec.Body.String())
 			}

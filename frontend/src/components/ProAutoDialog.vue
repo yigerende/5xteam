@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { X } from 'lucide-vue-next'
 import { api } from '../api'
-import { proPlanName } from '../gptpay'
+import { proPlanName, payProviderName } from '../gptpay'
 import { formatTime } from '../utils'
 import Pagination from './Pagination.vue'
 import ProAutoStages from './ProAutoStages.vue'
@@ -18,7 +18,7 @@ async function open(account){if(busy.value)return;clearTimeout(timer);generation
 function close(){if(busy.value)return;opened.value=false;generation++;clearTimeout(timer)}
 function schedule(){clearTimeout(timer);if(opened.value&&active.value)timer=setTimeout(refresh,state.value.status==='running'?1500:5000)}
 async function refresh(){const gen=generation;try{const value=await api(path());if(gen!==generation)return;state.value=value;emit('updated')}catch(e){if(gen===generation)error.value=e.message}finally{if(gen===generation)schedule()}}
-async function start(){if(busy.value)return;busy.value=true;error.value='';try{const p=await api(path(),{method:'POST',body:{card_id:cardID.value,plan_code:settings.value.plan_code}});state.value=p.pro_auto;emit('updated')}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
+async function start(){if(busy.value)return;busy.value=true;error.value='';try{const p=await api(path(),{method:'POST',body:{provider:settings.value.provider,card_id:cardID.value,plan_code:settings.value.plan_code}});state.value=p.pro_auto;emit('updated')}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
 async function stop(){if(busy.value||!window.confirm('停止后续自动步骤？已提交的 GPTPay 订单仍会继续处理，请查询订单结果。'))return;busy.value=true;try{await api(path()+'/stop',{method:'POST',body:{}});await refresh()}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
 async function changePage(v){if(busy.value)return;page.value=v;busy.value=true;try{await loadCards()}catch(e){error.value=e.message}finally{busy.value=false}}
 function changeSize(v){pageSize.value=v;changePage(1)}
@@ -32,7 +32,7 @@ defineExpose({open})
 <p v-if="state.status==='waiting_quota'">等待额度达到 {{ state.quota_used_threshold }}%，下次检测：{{ formatTime(state.next_check_at) }}</p>
 <p v-if="state.proxy_name">登录代理：{{ state.proxy_name }}<span v-if="state.exit_ip"> · 首次记录 IP：{{ state.exit_ip }}</span></p>
 <p v-if="state.error" class="danger-text">{{ state.error }}</p><p v-if="error" role="alert" class="danger-text">{{ error }}</p>
-<template v-if="canStart"><p>套餐：{{ proPlanName(settings.plan_code) }}；7 天已用额度达到 {{ settings.quota_used_threshold || 100 }}% 后合并。</p>
+<template v-if="canStart"><p>供应商：{{ payProviderName(settings.provider) }}</p><p>套餐：{{ proPlanName(settings.plan_code) }}；7 天已用额度达到 {{ settings.quota_used_threshold || 100 }}% 后合并。</p>
 <label class="field"><span>开通银行卡</span><select v-model="cardID" :disabled="busy"><option value="">请选择银行卡</option><option v-for="card in cards" :key="card.id" :value="card.id">{{ card.name }} · 尾号 {{ card.last4 }}</option></select></label>
 <Pagination v-if="total>10" :page="page" :page-size="pageSize" :total="total" @update:page="changePage" @update:page-size="changeSize" />
 <p class="muted">首次登录后保留会话等待开通，成功后沿用该会话取得新 RT/AT，再推送 Sub2。关闭窗口不影响后台流程。</p></template>

@@ -47,22 +47,10 @@ func (s *Store) SaveProAutomationSettings(input model.ProSettings, pay gptpay.Se
 		next := time.Now().Add(time.Duration(v.QuotaCheckIntervalSeconds) * time.Second)
 		v.NextQuotaSweepAt = &next
 	}
-	var sealed string
-	err = tx.QueryRow("SELECT encrypted_key FROM gptpay_settings WHERE id=1").Scan(&sealed)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return v, pay, err
-	}
-	if strings.TrimSpace(key) != "" {
-		sealed, err = s.encrypt(strings.TrimSpace(key))
-		if err != nil {
-			return v, pay, err
-		}
-	}
-	pay.KeyPresent = sealed != ""
 	if _, err = tx.Exec(`INSERT INTO pro_settings(id,profile,encrypted_sub2_password,encrypted_cpa_key) VALUES(1,?,'','') ON CONFLICT(id) DO UPDATE SET profile=excluded.profile`, mustJSON(v)); err != nil {
 		return v, pay, err
 	}
-	if _, err = tx.Exec(`INSERT INTO gptpay_settings(id,profile,encrypted_key) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET profile=excluded.profile,encrypted_key=excluded.encrypted_key`, mustJSON(pay), sealed); err != nil {
+	if err = s.saveGPTPaySettingsTx(tx, &pay, key); err != nil {
 		return v, pay, err
 	}
 	if _, err = tx.Exec(`INSERT INTO pro_schedule_clock VALUES(1,?) ON CONFLICT(id) DO UPDATE SET next_at=excluded.next_at`, time.Now().Add(time.Duration(v.ScheduleIntervalSeconds)*time.Second).UTC().Format(time.RFC3339Nano)); err != nil {

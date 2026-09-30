@@ -213,7 +213,7 @@ func (s *Server) tickProSchedule(force bool) {
 		if e = s.store.SaveProScheduleRun(run); e != nil {
 			return
 		}
-		body, _ := json.Marshal(map[string]string{"card_id": card.ID, "plan_code": pay.PlanCode})
+		body, _ := json.Marshal(map[string]string{"provider": pay.Provider, "card_id": card.ID, "plan_code": pay.PlanCode})
 		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body))).WithContext(context.WithValue(context.Background(), proScheduledContextKey{}, true))
 		r.SetPathValue("email", email)
 		w := httptest.NewRecorder()
