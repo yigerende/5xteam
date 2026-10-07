@@ -149,12 +149,25 @@ func TestProConnectionUsesDraftWithoutSaving(t *testing.T) {
 						payload := model.DefaultProSettings()
 						payload.Provider = provider
 						payload.Sub2.URL, payload.Sub2.Email, payload.Sub2.GroupIDs = upstream.URL, "admin@example.com", []int64{7}
+						payload.Sub2.GroupNames = []string{"Pro OpenAI"}
+						payload.Sub2.Models = []string{"gpt-6-astra", "gpt-5.2-codex"}
 						payload.CPA.URL = upstream.URL
 						saveBody, _ := json.Marshal(proSettingsInput{ProSettings: payload, Sub2Password: "draft-secret", CPAKey: "draft-secret"})
 						saved := httptest.NewRecorder()
 						s.saveProSettings(saved, httptest.NewRequest("PUT", "/api/pro-settings", strings.NewReader(string(saveBody))))
 						if saved.Code != 200 {
 							t.Fatalf("save after reading groups failed: %s", saved.Body.String())
+						}
+						reloaded := httptest.NewRecorder()
+						s.getProSettings(reloaded, httptest.NewRequest("GET", "/api/pro-settings", nil))
+						var response struct {
+							Data model.ProSettings `json:"data"`
+						}
+						if err := json.Unmarshal(reloaded.Body.Bytes(), &response); err != nil {
+							t.Fatal(err)
+						}
+						if !reflect.DeepEqual(response.Data.Sub2.Models, payload.Sub2.Models) || !reflect.DeepEqual(response.Data.Sub2.GroupIDs, payload.Sub2.GroupIDs) || !reflect.DeepEqual(response.Data.Sub2.GroupNames, payload.Sub2.GroupNames) {
+							t.Fatal("Pro model restrictions or selected group names were lost after saving")
 						}
 					}
 				})

@@ -66,6 +66,10 @@ function rechargeProgress({ email, running }) { setManualStage(email, 'recharge'
 const oauth = reactive({ open: false, loading: false, sessionID: '', authURL: '', callbackURL: '', expiresAt: '', targetEmail: '' })
 const sub2Groups = ref([])
 const cpaGroups = ref([])
+const sub2Models = ref('')
+const settingsLoaded = ref(false)
+const groupErrors = reactive({ sub2: '', cpa: '' })
+let groupLoad = null
 const countdown = ref(0)
 let countdownTimer
 let searchTimer
@@ -125,6 +129,16 @@ function schedulePoll(delay = 1500) {
   }, delay)
 }
 watch(activeTab, tab => { if (tab === 'accounts') schedulePoll(0) })
+watch([activeTab, () => settings.provider, settingsLoaded], () => {
+  cancelGroupLoad()
+  if (activeTab.value !== 'push' || !settingsLoaded.value) return
+  const provider = settings.provider
+  const target = settings[provider]
+  const ready = provider === 'sub2'
+    ? target.url && target.email && (target.password_present || settings.sub2_password)
+    : target.url && (target.key_present || settings.cpa_key)
+  if (ready) void loadGroups(provider, true)
+})
 function mergeStages(account) {
   const labels = { invite: '邀请空间', accept: '进入空间', transfer: '合并空间', remove: '移出空间' }
   const states = { not_started: '未开始', pending: '待处理', running: '执行中', completed: '成功', failed: '失败', unknown: '待确认', team_removed: '已移出' }
@@ -170,6 +184,13 @@ async function loadSettings() {
   try {
     const data = await api('/api/pro-settings')
     Object.assign(settings, defaults(), data, { sub2: { ...defaults().sub2, ...(data.sub2 || {}) }, cpa: { ...defaults().cpa, ...(data.cpa || {}) }, sub2_password: '', cpa_key: '' })
+    sub2Models.value = (settings.sub2.models || []).join('\n')
+    for (const provider of ['sub2', 'cpa']) {
+      const target = settings[provider]
+      const groups = provider === 'sub2' ? sub2Groups : cpaGroups
+      groups.value = (target.group_ids || []).map((id, index) => ({ id: Number(id), name: target.group_names?.[index] || `#${id}` }))
+    }
+    settingsLoaded.value = true
     updateCountdown()
   } catch (error) { setMessage(error.message, 'error') }
 }
@@ -292,23 +313,52 @@ function connectionPayload(provider) {
     ? { sub2: { url: settings.sub2.url.trim(), email: settings.sub2.email.trim() }, sub2_password: settings.sub2_password }
     : { cpa: { url: settings.cpa.url.trim() }, cpa_key: settings.cpa_key }
 }
-async function loadGroups(provider) {
+function updateGroups(provider, groups) {
+  const target = provider === 'sub2' ? sub2Groups : cpaGroups
+  const loaded = new Map((groups || []).map(group => [Number(group.id), { ...group, id: Number(group.id) }]))
+  for (const id of settings[provider].group_ids || []) {
+    if (!loaded.has(Number(id))) loaded.set(Number(id), target.value.find(group => Number(group.id) === Number(id)) || { id: Number(id), name: `#${id}` })
+  }
+  target.value = [...loaded.values()]
+}
+function cancelGroupLoad() {
+  if (!groupLoad) return
+  groupLoad.controller.abort()
+  if (busy.value === `groups-${groupLoad.provider}`) busy.value = ''
+  groupLoad = null
+}
+async function loadGroups(provider, automatic = false) {
   if (busy.value) return
+  const controller = new AbortController()
+  const payload = connectionPayload(provider)
+  groupLoad = { provider, controller }
   busy.value = `groups-${provider}`
-  try { const groups = await api(`/api/pro-settings/${provider}/groups`, { method: 'POST', body: connectionPayload(provider) }); if (provider === 'sub2') sub2Groups.value = groups; else cpaGroups.value = groups; setMessage(`已读取 ${groups.length} 个分组`, 'success') }
-  catch (error) { setMessage(error.message, 'error') }
-  finally { busy.value = '' }
+  groupErrors[provider] = ''
+  const current = () => !disposed && !controller.signal.aborted && JSON.stringify(payload) === JSON.stringify(connectionPayload(provider))
+  try {
+    const groups = await api(`/api/pro-settings/${provider}/groups`, { method: 'POST', body: payload, signal: controller.signal })
+    if (!current()) return
+    updateGroups(provider, groups)
+    if (!automatic) setMessage(`已读取 ${groups.length} 个分组`, 'success')
+  } catch (error) {
+    if (!current()) return
+    groupErrors[provider] = `读取分组失败：${error.message}。已保存的选择仍保留，可点击重新读取。`
+    if (!automatic) setMessage(error.message, 'error')
+  } finally {
+    if (groupLoad?.controller === controller) { groupLoad = null; busy.value = '' }
+  }
 }
 async function testProvider(provider) {
   if (busy.value) return
   busy.value = `test-${provider}`
-  try { const result = await api(`/api/pro-settings/${provider}/test`, { method: 'POST', body: connectionPayload(provider) }); if (provider === 'sub2' && result.groups) sub2Groups.value = result.groups; setMessage(`${provider.toUpperCase()} 连接成功`, 'success') }
+  try { const result = await api(`/api/pro-settings/${provider}/test`, { method: 'POST', body: connectionPayload(provider) }); if (provider === 'sub2' && result.groups) { updateGroups(provider, result.groups); groupErrors[provider] = '' }; setMessage(`${provider.toUpperCase()} 连接成功`, 'success') }
   catch (error) { setMessage(error.message, 'error') }
   finally { busy.value = '' }
 }
 async function saveSettings() {
   busy.value = 'save-settings'; syncGroupNames('sub2'); syncGroupNames('cpa')
-  try { const saved = await api('/api/pro-settings', { method: 'PUT', body: settings }); Object.assign(settings, saved, { sub2_password: '', cpa_key: '' }); updateCountdown(); setMessage('Pro 配置已保存', 'success') }
+  settings.sub2.models = [...new Set(sub2Models.value.split(/[\n,]+/).map(item => item.trim()).filter(Boolean))]
+  try { const saved = await api('/api/pro-settings', { method: 'PUT', body: settings }); Object.assign(settings, saved, { sub2_password: '', cpa_key: '' }); sub2Models.value = (settings.sub2.models || []).join('\n'); updateCountdown(); setMessage('Pro 配置已保存', 'success') }
   catch (error) { setMessage(error.message, 'error') }
   finally { busy.value = '' }
 }
@@ -319,7 +369,7 @@ onMounted(async () => {
   catch (error) { setMessage(error.message, 'error') }
   finally { schedulePoll() }
 })
-onBeforeUnmount(() => { disposed = true; listRequestID++; window.clearInterval(countdownTimer); window.clearTimeout(searchTimer); window.clearTimeout(pollTimer) })
+onBeforeUnmount(() => { disposed = true; cancelGroupLoad(); listRequestID++; window.clearInterval(countdownTimer); window.clearTimeout(searchTimer); window.clearTimeout(pollTimer) })
 </script>
 
 <template>
@@ -357,8 +407,8 @@ onBeforeUnmount(() => { disposed = true; listRequestID++; window.clearInterval(c
     </template>
 
     <form v-else-if="activeTab === 'push'" class="push-grid" @submit.prevent="saveSettings">
-      <section class="panel provider-panel" :class="{ selected: settings.provider === 'sub2' }"><div class="panel-title"><div><span>SUB2</span><h2>Sub2 设置</h2></div><label class="provider-choice"><input v-model="settings.provider" type="radio" value="sub2" />{{ settings.provider === 'sub2' ? '当前启用' : '启用' }}</label></div><div class="settings-fields"><label class="field wide"><span>地址</span><input v-model="settings.sub2.url" placeholder="https://sub2.example.com" /></label><label class="field"><span>管理员邮箱</span><input v-model="settings.sub2.email" /></label><label class="field"><span>管理员密码</span><input v-model="settings.sub2_password" type="password" :placeholder="settings.sub2.password_present ? '已保存，留空不修改' : '请输入密码'" /></label><label class="field"><span>账号并发</span><input v-model.number="settings.sub2.account_concurrency" type="number" min="1" max="100" /></label><label class="field"><span>优先级</span><input v-model.number="settings.sub2.priority" type="number" min="1" max="100" /></label><label class="toggle-row wide"><div><strong>WS 推荐配置</strong><small>推送时携带 cpa_ws=1</small></div><input v-model="settings.sub2.cpa_ws" type="checkbox" /><i></i></label></div><Sub2ProxyPicker v-model:enabled="settings.sub2.bind_proxy" v-model:ids="settings.sub2.proxy_ids" :url="settings.sub2.url" :email="settings.sub2.email" :password="settings.sub2_password" :active="settings.provider === 'sub2'" :disabled="!!busy" endpoint="/api/pro-settings/sub2/proxies" /><div class="group-box"><div><strong>OpenAI 分组</strong><button class="btn ghost compact" type="button" :disabled="!!busy" @click="loadGroups('sub2')"><RefreshCw v-if="busy === 'groups-sub2'" class="spin" :size="14" />{{ busy === 'groups-sub2' ? '读取中' : '读取分组' }}</button></div><p v-if="!sub2Groups.length">暂无分组</p><label v-for="group in sub2Groups" :key="group.id"><input v-model="settings.sub2.group_ids" type="checkbox" :value="group.id" />{{ group.name }}</label></div><div class="panel-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="testProvider('sub2')"><RefreshCw v-if="busy === 'test-sub2'" class="spin" :size="14" />{{ busy === 'test-sub2' ? '连接中' : '测试连接' }}</button></div></section>
-      <section class="panel provider-panel" :class="{ selected: settings.provider === 'cpa' }"><div class="panel-title"><div><span>CPA</span><h2>CPA 设置</h2></div><label class="provider-choice"><input v-model="settings.provider" type="radio" value="cpa" />{{ settings.provider === 'cpa' ? '当前启用' : '启用' }}</label></div><div class="settings-fields"><label class="field wide"><span>Management API 地址</span><input v-model="settings.cpa.url" placeholder="http://cpa:8317" /></label><label class="field wide"><span>Management Key</span><input v-model="settings.cpa_key" type="password" :placeholder="settings.cpa.key_present ? '已保存，留空不修改' : '请输入 Key'" /></label><label class="toggle-row wide"><div><strong>WS 推荐配置</strong><small>上传 auth 文件时启用 WebSocket</small></div><input v-model="settings.cpa.websockets" type="checkbox" /><i></i></label></div><div class="group-box"><div><strong>账号分组</strong><button class="btn ghost compact" type="button" :disabled="!!busy" @click="loadGroups('cpa')"><RefreshCw v-if="busy === 'groups-cpa'" class="spin" :size="14" />{{ busy === 'groups-cpa' ? '读取中' : '读取分组' }}</button></div><p v-if="!cpaGroups.length">暂无分组</p><label v-for="group in cpaGroups" :key="group.id"><input v-model="settings.cpa.group_ids" type="checkbox" :value="group.id" />{{ group.name }}</label></div><div class="panel-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="testProvider('cpa')"><RefreshCw v-if="busy === 'test-cpa'" class="spin" :size="14" />{{ busy === 'test-cpa' ? '连接中' : '测试连接' }}</button></div></section>
+      <section class="panel provider-panel" :class="{ selected: settings.provider === 'sub2' }"><div class="panel-title"><div><span>SUB2</span><h2>Sub2 设置</h2></div><label class="provider-choice"><input v-model="settings.provider" type="radio" value="sub2" />{{ settings.provider === 'sub2' ? '当前启用' : '启用' }}</label></div><div class="settings-fields"><label class="field wide"><span>地址</span><input v-model="settings.sub2.url" placeholder="https://sub2.example.com" /></label><label class="field"><span>管理员邮箱</span><input v-model="settings.sub2.email" /></label><label class="field"><span>管理员密码</span><input v-model="settings.sub2_password" type="password" :placeholder="settings.sub2.password_present ? '已保存，留空不修改' : '请输入密码'" /></label><label class="field"><span>账号并发</span><input v-model.number="settings.sub2.account_concurrency" type="number" min="1" max="100" /></label><label class="field"><span>优先级</span><input v-model.number="settings.sub2.priority" type="number" min="1" max="100" /></label><label class="toggle-row wide"><div><strong>WS 推荐配置</strong><small>推送时携带 cpa_ws=1</small></div><input v-model="settings.sub2.cpa_ws" type="checkbox" /><i></i></label></div><Sub2ProxyPicker v-model:enabled="settings.sub2.bind_proxy" v-model:ids="settings.sub2.proxy_ids" :url="settings.sub2.url" :email="settings.sub2.email" :password="settings.sub2_password" :active="settings.provider === 'sub2'" :disabled="!!busy" endpoint="/api/pro-settings/sub2/proxies" /><div class="group-box"><div><strong>OpenAI 分组</strong><button class="btn ghost compact" type="button" :disabled="!!busy" @click="loadGroups('sub2')"><RefreshCw v-if="busy === 'groups-sub2'" class="spin" :size="14" />{{ busy === 'groups-sub2' ? '读取中' : '读取分组' }}</button></div><p v-if="groupErrors.sub2" role="status">{{ groupErrors.sub2 }}</p><p v-if="!sub2Groups.length">{{ busy === 'groups-sub2' ? '正在读取分组…' : '暂无分组' }}</p><label v-for="group in sub2Groups" :key="group.id"><input v-model="settings.sub2.group_ids" type="checkbox" :value="group.id" />{{ group.name }}</label></div><label class="field models-field"><span>可用模型 <small>每行或逗号分隔，留空表示不限制</small></span><textarea v-model="sub2Models" rows="4" spellcheck="false" placeholder="gpt-5.2-codex&#10;gpt-5.1-codex-mini"></textarea></label><div class="panel-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="testProvider('sub2')"><RefreshCw v-if="busy === 'test-sub2'" class="spin" :size="14" />{{ busy === 'test-sub2' ? '连接中' : '测试连接' }}</button></div></section>
+      <section class="panel provider-panel" :class="{ selected: settings.provider === 'cpa' }"><div class="panel-title"><div><span>CPA</span><h2>CPA 设置</h2></div><label class="provider-choice"><input v-model="settings.provider" type="radio" value="cpa" />{{ settings.provider === 'cpa' ? '当前启用' : '启用' }}</label></div><div class="settings-fields"><label class="field wide"><span>Management API 地址</span><input v-model="settings.cpa.url" placeholder="http://cpa:8317" /></label><label class="field wide"><span>Management Key</span><input v-model="settings.cpa_key" type="password" :placeholder="settings.cpa.key_present ? '已保存，留空不修改' : '请输入 Key'" /></label><label class="toggle-row wide"><div><strong>WS 推荐配置</strong><small>上传 auth 文件时启用 WebSocket</small></div><input v-model="settings.cpa.websockets" type="checkbox" /><i></i></label></div><div class="group-box"><div><strong>账号分组</strong><button class="btn ghost compact" type="button" :disabled="!!busy" @click="loadGroups('cpa')"><RefreshCw v-if="busy === 'groups-cpa'" class="spin" :size="14" />{{ busy === 'groups-cpa' ? '读取中' : '读取分组' }}</button></div><p v-if="groupErrors.cpa" role="status">{{ groupErrors.cpa }}</p><p v-if="!cpaGroups.length">{{ busy === 'groups-cpa' ? '正在读取分组…' : '暂无分组' }}</p><label v-for="group in cpaGroups" :key="group.id"><input v-model="settings.cpa.group_ids" type="checkbox" :value="group.id" />{{ group.name }}</label></div><div class="panel-actions"><button class="btn ghost" type="button" :disabled="!!busy" @click="testProvider('cpa')"><RefreshCw v-if="busy === 'test-cpa'" class="spin" :size="14" />{{ busy === 'test-cpa' ? '连接中' : '测试连接' }}</button></div></section>
       <div class="save-row"><button class="btn primary" type="submit" :disabled="!!busy"><Settings2 :size="15" />保存推送设置</button></div>
     </form>
 
@@ -405,6 +455,7 @@ onBeforeUnmount(() => { disposed = true; listRequestID++; window.clearInterval(c
 .group-box > div { display: flex; justify-content: space-between; align-items: center; }
 .group-box p { color: var(--muted); font-size: 11px; }
 .group-box label { display: inline-flex; align-items: center; gap: 5px; margin: 10px 12px 0 0; font-size: 11px; }
+.models-field { margin-top: 18px; } .models-field textarea { resize: vertical; }
 .save-row { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
 .countdown { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
 .oauth-modal { width: min(650px, 100%); } .oauth-modal .field { margin-top: 16px; } .oauth-modal textarea { resize: vertical; }
