@@ -897,11 +897,15 @@ async function runSelectedPipelineTask(action) {
   const labels = { oauth: '授权', relogin: '重登', push: `推送${activeProviderLabel.value}`, quota: '查额度', remove: '移出空间' }
   setMessage(`正在批量${labels[action]}：0/${eligible.length}`)
   let completed = 0
+  let pendingRemoval = 0
   const execute = async (account) => {
     try {
       if (action === 'oauth') await runOAuthSilently(account)
       else if (action === 'relogin') await runTracked(account, action, () => api(`/api/free-accounts/${encodeURIComponent(account.id)}/relogin`, { method: 'POST', body: {} }))
-      else await runTracked(account, action, () => api(`/api/free-accounts/${encodeURIComponent(account.id)}/${action}`, { method: 'POST', body: {} }))
+      else {
+        const result = await runTracked(account, action, () => api(`/api/free-accounts/${encodeURIComponent(account.id)}/${action}`, { method: 'POST', body: {} }))
+        if (action === 'remove' && result.standard_removal && result.remove_status !== 'completed') pendingRemoval++
+      }
       completed += 1
       setMessage(`正在批量${labels[action]}：${completed}/${eligible.length}`)
       return true
@@ -930,14 +934,16 @@ async function runSelectedPipelineTask(action) {
   busy.value = ''
   await refreshLiveAccounts().catch(() => {})
   emit('reload')
-  const succeeded = results.filter(Boolean).length
-  const failed = eligible.length - succeeded
-  setMessage(`批量${labels[action]}完成：成功 ${succeeded}，失败 ${failed}${skipped ? `，跳过 ${skipped}` : ''}`, failed ? 'error' : 'success')
+  const accepted = results.filter(Boolean).length
+  const succeeded = accepted - pendingRemoval
+  const failed = eligible.length - accepted
+  setMessage(`批量${labels[action]}完成：成功 ${succeeded}，失败 ${failed}${pendingRemoval ? `，后台继续 ${pendingRemoval}` : ''}${skipped ? `，跳过 ${skipped}` : ''}`, failed ? 'error' : 'success')
 }
 async function runAction(account, action) {
   const label = { relogin: '重登并重新推送', push: `推送${activeProviderLabel.value}`, quota: '刷新额度', remove: '移出空间' }[action]
   try {
     const result = await runTracked(account, action, () => api(`/api/free-accounts/${encodeURIComponent(account.id)}/${action}`, { method: 'POST', body: {} }))
+    if (action === 'remove' && result.standard_removal && result.remove_status !== 'completed') return setMessage(`${account.email}：${result.standard_removal.message}，后台将继续执行`)
     setMessage(action === 'quota' && result.auto_removed ? `${account.email} 剩余额度已达到移出阈值并自动移出` : `${account.email}：${label}完成`, 'success')
   } catch (error) { setMessage(error.message, 'error') }
 }
@@ -1144,9 +1150,9 @@ onBeforeUnmount(() => motherSelectionController?.abort())
       <div class="table-shell"><table :aria-busy="accountsLoading"><thead><tr><th class="check-column"><input type="checkbox" :checked="allDisplayedSelected" :disabled="!displayedAccounts.length || !!busy" aria-label="选择当前页账号" @change="toggleAllDisplayed" /></th><th>账号</th><th>进入列表</th><th>六步状态</th><th>消耗额度</th><th>5小时</th><th>7天</th><th>智商情况</th><th>移出策略</th><th>重登成功 / 连续失败</th><th>进入母号数</th><th class="actions-column">操作</th></tr></thead><tbody :key="renderedAccountPage">
         <tr v-if="!displayedAccounts.length"><td colspan="12" class="empty-cell">暂无 Free 账号</td></tr>
         <tr v-for="account in displayedAccounts" :key="account.id" :class="{ 'row-running': activityFor(account), 'row-highlighted': entryEmail && account.email === entryEmail }">
-          <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="account.dead" class="danger-text" :title="account.dead_reason">死号{{ account.remove_status === 'completed' ? ' · 已自动移出空间' : ' · 自动移出失败' }}</small><small v-else-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>
+          <td class="check-column"><input type="checkbox" :checked="isPipelineSelected(account)" :disabled="!!busy" :aria-label="`选择 ${account.email}`" @change="togglePipelineSelected(account)" /></td><td class="account-cell"><strong>{{ account.email }}</strong><small>{{ account.plan_type || 'free' }} · {{ shortID(account.user_id) }}</small><small class="space-link" :title="adminSpaceID(account)">母号：{{ adminSpaceName(account) }} · 空间：{{ adminSpaceID(account) ? shortID(adminSpaceID(account)) : '未关联' }}</small><small class="credential-state">源 AT {{ account.source_token_present ? '已保存' : '缺失' }} · OAuth AT {{ account.oauth_access_token_present ? '已保存' : '未保存' }} · RT {{ account.oauth_refresh_token_present ? '已保存' : '未保存' }}</small><small v-if="account.dead" class="danger-text" :title="account.dead_reason">死号{{ account.remove_status === 'completed' ? ' · 已自动移出空间' : account.remove_status === 'running' ? ' · 移出处理中' : ' · 自动移出失败' }}</small><small v-else-if="activityFor(account)" class="running-text"><LoaderCircle class="spin" :size="10" />{{ activityText(activityFor(account)) }} · {{ elapsedSeconds(activityFor(account)) }} 秒</small><small v-else-if="account.last_error" class="danger-text" :title="account.last_error">{{ account.last_error }}</small></td>
           <td><small class="table-note">{{ account.imported_at ? formatTime(account.imported_at) : '未知' }}</small></td>
-          <td><div class="stage-strip"><label v-for="key in ['invite','accept','oauth','push','quota','remove']" :key="key" :class="['stage-select', `tone-${stageTone(visibleStageStatus(account, key))}`]" :title="`${stageLabel(key, account)}：${stateLabels[visibleStageStatus(account, key)] || '未开始'}${visibleStageStatus(account, key) === 'running' ? '（可手动修正）' : ''}`"><LoaderCircle v-if="visibleStageStatus(account, key) === 'running'" class="spin" :size="10" /><span v-else>{{ stageLabel(key, account) }}</span><select :value="visibleStageStatus(account, key)" :aria-label="`${stageLabel(key, account)}阶段状态`" :disabled="isAccountBusy(account)" @change="saveStageValue(account, key, $event.target.value)"><option value="not_started">未开始</option><option value="pending">待处理</option><option value="completed">成功</option><option value="failed">失败</option></select></label></div></td>
+          <td><div class="stage-strip"><label v-for="key in ['invite','accept','oauth','push','quota','remove']" :key="key" :class="['stage-select', `tone-${stageTone(visibleStageStatus(account, key))}`]" :title="`${stageLabel(key, account)}：${stateLabels[visibleStageStatus(account, key)] || '未开始'}${visibleStageStatus(account, key) === 'running' && !account.standard_removal ? '（可手动修正）' : ''}`"><LoaderCircle v-if="visibleStageStatus(account, key) === 'running'" class="spin" :size="10" /><span v-else>{{ stageLabel(key, account) }}</span><select :value="visibleStageStatus(account, key)" :aria-label="`${stageLabel(key, account)}阶段状态`" :disabled="isAccountBusy(account) || (account.standard_removal && account.standard_removal.stage !== 'completed' && ['invite','accept','remove'].includes(key))" @change="saveStageValue(account, key, $event.target.value)"><option v-if="visibleStageStatus(account, key) === 'running'" value="running" disabled>处理中</option><option value="not_started">未开始</option><option value="pending">待处理</option><option value="completed">成功</option><option value="failed">失败</option></select></label></div><small v-if="account.standard_removal" class="table-note" :class="{ 'danger-text': account.standard_removal.stage === 'failed' }" :title="account.standard_removal.message">{{ account.standard_removal.message }}</small></td>
           <td class="cost-cell"><strong>{{ costText(account) }}</strong><small v-if="String(account.push_provider || '').toLowerCase() !== 'cpa'" class="table-note user-cost" title="当前用户消耗额度">{{ userCostText(account) }}</small><small v-if="account.cost_checked_at && account.push_provider !== 'cpa'" class="table-note">{{ formatTime(account.cost_checked_at) }}</small><small v-else-if="account.push_provider === 'cpa'" class="table-note">CPA 不统计</small></td>
           <td><strong>{{ quotaText(account.quota_5h) }}</strong><small v-if="account.quota_5h" class="table-note">剩余</small></td>
           <td><strong>{{ quotaText(account.quota_7d) }}</strong><small v-if="account.quota_7d" class="table-note">剩余</small></td>

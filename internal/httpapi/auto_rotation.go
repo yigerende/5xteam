@@ -507,6 +507,7 @@ func (s *Server) executeAutoRotation(ctx context.Context, run model.AutoRotation
 		// reads the account value, so a settings change while a batch is running
 		// cannot make its request semantics differ from the task projection.
 		account, err = s.store.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+			item.PinRemovalSeatPolicy(settings)
 			item.JoinMethod = settings.JoinMethod
 			if item.RemoveMethod != "mother_kick" && item.RemoveMethod != "child_leave" {
 				item.RemoveMethod = settings.RemoveMethod
@@ -1002,6 +1003,12 @@ func (s *Server) cleanupFailedAutoTask(ctx context.Context, task *model.AutoRota
 		task.Error = fmt.Sprintf("%s；自动移出空间失败：%v", cause.Error(), removeErr)
 		task.Steps[removeStep].Status = "failed"
 		task.Steps[removeStep].Message = removeErr.Error()
+		if errors.Is(removeErr, errStandardRemovalPending) {
+			task.Error = cause.Error() + "；转普通后移出已交后台继续"
+			task.Steps[removeStep].Status = "pending"
+			_ = s.store.UpdateAutoRotationTask(*task)
+			return
+		}
 		s.enqueueAuditEvent(model.AutoRotationEvent{
 			RunID: task.RunID, TaskID: task.ID, AccountID: task.AccountID, Email: task.Email, AdminAccountID: task.AdminAccountID,
 			Type: "auto_failure_remove_failed", Source: "auto_rotation", Operation: "remove", Stage: "remove", Level: "error",

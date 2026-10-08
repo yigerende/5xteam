@@ -64,6 +64,19 @@ func (s *Store) AutoRotationSettings() model.AutoRotationSettings {
 func (s *Store) SaveAutoRotationSettings(settings model.AutoRotationSettings) (model.AutoRotationSettings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	seenAdmins := map[string]bool{}
+	ids := []string{}
+	for _, id := range settings.SwitchBeforeRemoveAdminIDs {
+		id = strings.TrimSpace(id)
+		if id != "" && !seenAdmins[id] {
+			seenAdmins[id] = true
+			ids = append(ids, id)
+		}
+	}
+	settings.SwitchBeforeRemoveAdminIDs = ids
+	if settings.SwitchBeforeRemove && len(ids) == 0 {
+		return settings, errors.New("开启移出前转普通时，请至少选择一个母号")
+	}
 	if settings.ThresholdPercent <= 0 || settings.ThresholdPercent > 100 {
 		return settings, errors.New("额度阈值必须在 1 到 100 之间")
 	}

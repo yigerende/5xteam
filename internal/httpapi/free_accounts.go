@@ -257,6 +257,10 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trace, _ := r.Context().Value(autoRotationTraceContextKey{}).(autoRotationTraceContext)
+	if profile.StandardRemoval != nil && profile.StandardRemoval.Stage != "completed" {
+		writeAPI(w, http.StatusConflict, nil, "该账号正在转普通后移出，请完成后再进入下一轮")
+		return
+	}
 	if err := s.store.SeatRecoveryAvailable(profile.Email); err != nil {
 		writeAPI(w, http.StatusConflict, nil, err.Error())
 		return
@@ -368,6 +372,7 @@ func (s *Server) joinFreeAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	profile, err = s.store.UpdateFreeAccount(profile.ID, func(item *model.FreeAccountProfile) {
+		item.PinRemovalSeatPolicy(rotationSettings)
 		item.AdminAccountID, item.AdminEmail = admin.ID, admin.Email
 		item.TeamAccountID, item.SeatType = admin.TeamAccountID, input.SeatType
 		item.LastError = ""
@@ -887,6 +892,10 @@ func (s *Server) handleDeadFreeAccount(accountID string, result map[string]any, 
 	removeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	removed, removeErr := s.performFreeAccountRemove(removeCtx, accountID)
+	if errors.Is(removeErr, errStandardRemovalPending) {
+		s.auditAccountEvent(removeCtx, accountID, "dead_remove_pending", "remove", trigger, "", "死号转普通后移出已交后台继续", nil)
+		return
+	}
 	if removeErr != nil {
 		s.enqueueAuditEvent(model.AutoRotationEvent{
 			AccountID: accountID, AdminAccountID: profile.AdminAccountID, Type: "dead_remove_failed", Stage: "remove",
@@ -1672,6 +1681,9 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 	}
 	if allowAutoRemove {
 		if updated, handled, pauseErr := s.removeSchedulingPauseExpired(ctx, profile, settings, password); handled {
+			if errors.Is(pauseErr, errStandardRemovalPending) {
+				return updated, false, nil
+			}
 			return updated, pauseErr == nil, pauseErr
 		}
 	}
@@ -1758,8 +1770,8 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 				return updated, updated.RemoveStatus == "completed", readErr
 			} else {
 				outcome, cleanupErr := s.record401ReloginFailure(ctx, profile.ID, "sub2", reloginErr)
-				if outcome.Removed {
-					return outcome.Profile, true, cleanupErr
+				if outcome.Removed || outcome.RemovalPending {
+					return outcome.Profile, outcome.Removed, cleanupErr
 				}
 				if cleanupErr != nil {
 					return outcome.Profile, false, cleanupErr
@@ -1796,6 +1808,9 @@ func (s *Server) performFreeAccountQuotaInternal(ctx context.Context, id string,
 		return profile, false, nil
 	}
 	profile, err = s.performFreeAccountRemove(ctx, profile.ID)
+	if errors.Is(err, errStandardRemovalPending) {
+		return profile, false, nil
+	}
 	return profile, err == nil, err
 }
 
@@ -1883,10 +1898,11 @@ func isSub2Unauthorized(err error) bool {
 }
 
 type reloginFailureOutcome struct {
-	Profile model.FreeAccountProfile
-	Count   int
-	Limit   int
-	Removed bool
+	Profile        model.FreeAccountProfile
+	Count          int
+	Limit          int
+	Removed        bool
+	RemovalPending bool
 }
 
 func (s *Server) reloginFailureLimit(provider string) int {
@@ -1916,6 +1932,10 @@ func (s *Server) removeFreeAccountWithoutRelogin(ctx context.Context, accountID,
 	}
 	s.auditAccountEvent(ctx, accountID, "unauthorized_remove_start", "remove", "monitor_401", provider, reason, map[string]any{"failure_limit": 0, "forced_mother_kick": true})
 	removed, err := s.performFreeAccountRemove(ctx, accountID)
+	if errors.Is(err, errStandardRemovalPending) {
+		s.auditAccountEvent(ctx, accountID, "unauthorized_remove_pending", "remove", "monitor_401", provider, "401 账号转普通后清退已交后台继续", nil)
+		return removed, nil
+	}
 	if err != nil {
 		s.auditAccountEvent(ctx, accountID, "unauthorized_remove_failed", "remove", "monitor_401", provider, "401 直接清退失败", map[string]any{"error": err.Error()})
 	} else {
@@ -1968,6 +1988,11 @@ func (s *Server) record401ReloginFailure(ctx context.Context, accountID, provide
 	})
 	removed, removeErr := s.performFreeAccountRemove(ctx, accountID)
 	outcome.Profile = removed
+	if errors.Is(removeErr, errStandardRemovalPending) {
+		outcome.RemovalPending = true
+		s.auditAccountEvent(ctx, accountID, "relogin_failure_remove_pending", "remove", "monitor_401", provider, "401 重登失败账号转普通后移出已交后台继续", nil)
+		return outcome, nil
+	}
 	if removeErr != nil {
 		s.enqueueAuditEvent(model.AutoRotationEvent{
 			AccountID: accountID, Email: profile.Email, AdminAccountID: profile.AdminAccountID,
@@ -2034,7 +2059,7 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 				if cleanupErr != nil {
 					return true, cleanupErr
 				}
-				if outcome.Removed {
+				if outcome.Removed || outcome.RemovalPending {
 					return true, nil
 				}
 				return true, fmt.Errorf("下游返回 401，重登并重新推送失败（连续 %d/%d 次）: %w", outcome.Count, outcome.Limit, reloginErr)
@@ -2061,7 +2086,7 @@ func (s *Server) checkFreeAccountStatus(ctx context.Context, id string, settings
 			if cleanupErr != nil {
 				return true, cleanupErr
 			}
-			if outcome.Removed {
+			if outcome.Removed || outcome.RemovalPending {
 				return true, nil
 			}
 			return true, fmt.Errorf("下游返回 401，重登并重新推送失败（连续 %d/%d 次）: %w", outcome.Count, outcome.Limit, reloginErr)
@@ -2219,6 +2244,10 @@ func (s *Server) removeFreeAccount(w http.ResponseWriter, r *http.Request) {
 	// as entered, after which this operation is allowed to clean up the remote
 	// Team membership without waiting on the stale workflow mutex.
 	profile, err := s.performFreeAccountRemoval(r.Context(), id, true)
+	if errors.Is(err, errStandardRemovalPending) {
+		writeAPI(w, http.StatusAccepted, profile, "")
+		return
+	}
 	if err != nil {
 		s.auditAccountEvent(r.Context(), id, "remove", "remove", "manual_single", "", "手动母号踢出处理失败", map[string]any{"forced_mother_kick": true, "error": err.Error()})
 		writeAPI(w, http.StatusBadRequest, nil, err.Error())
@@ -2249,7 +2278,7 @@ func (s *Server) performFreeAccountRemovalGuarded(ctx context.Context, id string
 	if profile.RemoveStatus == "completed" {
 		return profile, nil
 	}
-	if profile.RemoteRemovedAt != nil {
+	if profile.RemoteRemovedAt != nil && profile.StandardRemoval == nil {
 		return s.finishRemovedCycle(ctx, profile)
 	}
 	if profile.AcceptStatus != "completed" || profile.AdminAccountID == "" || profile.TeamAccountID == "" {
@@ -2270,6 +2299,9 @@ func (s *Server) performFreeAccountRemovalGuarded(ctx context.Context, id string
 	removeMethod := removalMethodForCycle(profile, s.store.AutoRotationSettings())
 	if forceMotherKick {
 		removeMethod = "mother_kick"
+	}
+	if profile.NeedsStandardRemoval() {
+		return s.performStandardRemoval(ctx, profile, removeMethod, forceMotherKick)
 	}
 	if removeMethod == "child_leave" {
 		return s.performFreeAccountChildLeave(ctx, profile)
@@ -2415,6 +2447,14 @@ func (s *Server) finishRemovedCycle(ctx context.Context, p model.FreeAccountProf
 		item.RemoveStatus = "completed"
 		item.LastError = ""
 		item.DownstreamCleaned = true
+		if item.StandardRemoval != nil && !item.StandardRemoval.Lane {
+			state := *item.StandardRemoval
+			state.Stage, state.Message = "completed", "转普通后移出完成"
+			item.StandardRemoval = &state
+			if item.Quality.Action == "kick" {
+				item.Quality.ActionStatus, item.Quality.Error = "completed", ""
+			}
+		}
 	})
 }
 
@@ -2525,6 +2565,10 @@ func (s *Server) updateFreeAccountStage(w http.ResponseWriter, r *http.Request) 
 	// make that recovery impossible.
 	now := time.Now()
 	before, _, beforeErr := s.store.FreeAccountCredential(id)
+	if before.StandardRemoval != nil && before.StandardRemoval.Stage != "completed" && (input.Stage == "remove" || input.Stage == "accept" || input.Stage == "invite") {
+		writeAPI(w, http.StatusConflict, nil, "转普通移出任务尚未结束，请重试移出并核实远端状态，不能直接修改进入或移出状态")
+		return
+	}
 	profile, err := s.store.UpdateFreeAccount(id, func(item *model.FreeAccountProfile) {
 		applyManualFreeAccountStage(item, input.Stage, input.Status, input.Message, now)
 		if input.Stage == "push" && input.Status == "completed" {
@@ -3252,7 +3296,7 @@ func (s *Server) monitorFreeAccounts(ctx context.Context) {
 			for _, account := range s.store.FreeAccounts() {
 				// Monitoring is intentionally limited to accounts that are both in
 				// the Team space and successfully pushed to the active downstream.
-				if account.Dead || account.AcceptStatus != "completed" || account.PushStatus != "completed" || account.RemoveStatus == "completed" || account.RemoteRemovedAt != nil {
+				if account.StandardRemoval != nil || account.Dead || account.AcceptStatus != "completed" || account.PushStatus != "completed" || account.RemoveStatus == "completed" || account.RemoteRemovedAt != nil {
 					continue
 				}
 				hasDownstream := provider == "cpa" && strings.TrimSpace(account.CPAAuthFileName) != ""

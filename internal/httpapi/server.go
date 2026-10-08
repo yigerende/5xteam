@@ -389,6 +389,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 	s.startGPTPayOrderMonitor(ctx)
 	go s.monitorHeroActivations(ctx)
 	go s.monitorFreeAccounts(ctx)
+	go s.monitorStandardRemovals(ctx)
 	go s.monitorQuality(ctx)
 	go s.autoRotationLoop(ctx)
 	go s.autoRotationHistoryCleanup(ctx)

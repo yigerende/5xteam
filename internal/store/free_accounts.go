@@ -137,6 +137,7 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		profile.CycleID, profile.VisitedTeamCount, profile.HistoryUncertain = existing.CycleID, existing.VisitedTeamCount, existing.HistoryUncertain
 		profile.ReusePending, profile.RemoteRemovedAt, profile.RemovalReason = existing.ReusePending, existing.RemoteRemovedAt, existing.RemovalReason
 		profile.RemoveMethod = existing.RemoveMethod
+		profile.RemovalSeatPolicy, profile.StandardRemoval = existing.RemovalSeatPolicy, existing.StandardRemoval
 		profile.JoinMethod = existing.JoinMethod
 		profile.DownstreamCleaned = existing.DownstreamCleaned
 		profile.Status, profile.InviteStatus, profile.AcceptStatus = existing.Status, existing.InviteStatus, existing.AcceptStatus
@@ -287,6 +288,11 @@ func (s *Store) updateFreeAccountCycle(id, cycleID string, mutate func(*model.Fr
 	before := profile
 	if mutate != nil {
 		mutate(&profile)
+	}
+	if profile.StandardRemoval != nil && profile.StandardRemoval.Lane {
+		if err := s.checkStandardSeatLaneLocked(profile.TeamAccountID, profile.ID, ""); err != nil {
+			return before, err
+		}
 	}
 	profile.UpdatedAt = time.Now()
 	tx, err := s.db.Begin()

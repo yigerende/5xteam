@@ -9,7 +9,16 @@ import { formatTime } from '../utils'
 import { oauthLoginSummary } from '../oauthLoginLog'
 
 const props = defineProps({ adminAccounts: { type: Array, default: () => [] }, defaultPageSize: { type: Number, default: 10 } })
-const settings = ref({ enabled: false, threshold_percent: 50, interval_seconds: 300, team_operation_interval_seconds: 10, concurrency: 2, max_per_run: 0, retry_count: 1, join_method: 'mother_invite', remove_method: 'mother_kick', oauth_login_mode: 'email_otp' })
+const settings = ref({ enabled: false, threshold_percent: 50, interval_seconds: 300, team_operation_interval_seconds: 10, concurrency: 2, max_per_run: 0, retry_count: 1, join_method: 'mother_invite', remove_method: 'mother_kick', oauth_login_mode: 'email_otp', switch_before_remove: false, switch_before_remove_admin_ids: [] })
+const switchAdmins = computed(() => {
+  const list = props.adminAccounts.map(admin => ({ id: admin.id, name: admin.label || admin.email || admin.id }))
+  for (const id of settings.value.switch_before_remove_admin_ids || []) {
+    if (!list.some(admin => admin.id === id)) list.push({ id, name: `${id}（母号已删除）` })
+  }
+  return list
+})
+const allSwitchAdmins = computed(() => switchAdmins.value.length > 0 && switchAdmins.value.every(admin => settings.value.switch_before_remove_admin_ids?.includes(admin.id)))
+function toggleSwitchAdmins() { settings.value.switch_before_remove_admin_ids = allSwitchAdmins.value ? [] : switchAdmins.value.map(admin => admin.id) }
 const runs = ref([]); const tasks = ref([]); const events = ref([]); const selectedRun = ref(null); const busy = ref(''); const message = ref({ text: '', type: '' })
 const runPage = ref(1); const runPageSize = ref(props.defaultPageSize); const runTotal = ref(0)
 const taskPage = ref(1); const taskPageSize = ref(props.defaultPageSize); const taskTotal = ref(0)
@@ -48,7 +57,7 @@ async function load() {
     const jobs = [api('/api/auto-rotation/settings'), loadRuns()]
     if (selectedRun.value) jobs.push(loadTasks(), loadEvents())
     const [settingsData] = await Promise.all(jobs)
-    settings.value = { join_method: 'mother_invite', oauth_login_mode: 'email_otp', team_operation_interval_seconds: 10, ...settingsData }
+    settings.value = { join_method: 'mother_invite', oauth_login_mode: 'email_otp', team_operation_interval_seconds: 10, switch_before_remove: false, ...settingsData, switch_before_remove_admin_ids: settingsData.switch_before_remove_admin_ids || [] }
   } catch (e) { setMessage(e.message, 'error') }
 }
 function setRunPage(value) { runPage.value = value; loadRuns().catch((e) => setMessage(e.message, 'error')) }
@@ -57,7 +66,7 @@ function setTaskPage(value) { taskPage.value = value; loadTasks().catch((e) => s
 function setTaskPageSize(value) { taskPageSize.value = value; taskPage.value = 1; loadTasks().catch((e) => setMessage(e.message, 'error')) }
 function setEventPage(value) { eventPage.value = value; loadEvents().catch((e) => setMessage(e.message, 'error')) }
 function setEventPageSize(value) { eventPageSize.value = value; eventPage.value = 1; loadEvents().catch((e) => setMessage(e.message, 'error')) }
-async function save() { busy.value = 'save'; try { settings.value = await api('/api/auto-rotation/settings', { method: 'PUT', body: settings.value }); setMessage('自动轮转配置已保存', 'success') } catch (e) { setMessage(e.message, 'error') } finally { busy.value = '' } }
+async function save() { if (settings.value.switch_before_remove && !settings.value.switch_before_remove_admin_ids?.length) return setMessage('请至少选择一个转普通的母号', 'error'); busy.value = 'save'; try { settings.value = await api('/api/auto-rotation/settings', { method: 'PUT', body: settings.value }); setMessage('自动轮转配置已保存', 'success') } catch (e) { setMessage(e.message, 'error') } finally { busy.value = '' } }
 async function trigger() { busy.value = 'run'; try { await api('/api/auto-rotation/run', { method: 'POST', body: {} }); runPage.value = 1; setMessage('已触发自动轮转批次', 'success'); await load() } catch (e) { setMessage(e.message, 'error') } finally { busy.value = '' } }
 async function viewRun(run) {
   selectedRun.value = run
@@ -126,6 +135,13 @@ onBeforeUnmount(() => window.clearInterval(countdownTimer))
         <label class="field"><span>每轮最大补充数（0 不限制）</span><input v-model.number="settings.max_per_run" type="number" min="0" max="500" required /></label>
         <label class="field"><span>单账号重试次数</span><input v-model.number="settings.retry_count" type="number" min="0" max="10" required /></label>
         <label class="field"><span>移出方式</span><select v-model="settings.remove_method"><option value="mother_kick">母号踢出</option><option value="child_leave">子号自己退出</option></select></label>
+        <label class="field checkbox-field"><span>移出前转普通<small>仅所选母号，默认关闭</small></span><input v-model="settings.switch_before_remove" type="checkbox" /></label>
+        <div v-if="settings.switch_before_remove" class="switch-admins field">
+          <span>转普通的母号 · 已选 {{ settings.switch_before_remove_admin_ids?.length || 0 }} 个</span>
+          <label><input type="checkbox" :checked="allSwitchAdmins" @change="toggleSwitchAdmins" />全选</label>
+          <div class="switch-admin-list"><label v-for="admin in switchAdmins" :key="admin.id"><input v-model="settings.switch_before_remove_admin_ids" type="checkbox" :value="admin.id" />{{ admin.name }}</label></div>
+          <small>本轮进入前固定规则，在途账号不受修改影响。手动移出和死号先转普通再由母号踢出；普通席位不足时等待。</small>
+        </div>
         <label class="field"><span>进入方式</span><select v-model="settings.join_method"><option value="mother_invite">母号邀请，子号同意（默认）</option><option value="child_request">子号申请，母号同意（分配 5x）</option></select></label>
         <label class="field"><span>全局 OAuth 登录方式</span><select v-model="settings.oauth_login_mode"><option value="email_otp">邮箱验证码登录（默认）</option><option value="password_totp">优先密码 + OpenAI 2FA 登录</option></select></label>
       </div>
@@ -138,6 +154,8 @@ onBeforeUnmount(() => window.clearInterval(countdownTimer))
 </template>
 <style scoped>
 .auto-config { margin: 14px 0; }
+.switch-admins { grid-column: 1 / -1; } .switch-admins label { display: inline-flex; align-items: center; gap: 6px; }
+.switch-admin-list { display: flex; flex-wrap: wrap; gap: 10px 18px; max-height: 180px; overflow-y: auto; }
 .auto-fields { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 0 14px; }
 .compact { min-height: 28px; padding: 0 8px; }
 .auto-countdown { display: inline-flex; align-items: center; min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); color: var(--muted); font-size: 10px; white-space: nowrap; }

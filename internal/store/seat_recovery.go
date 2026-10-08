@@ -19,8 +19,15 @@ func (s *Store) initializeSeatRecovery() error {
 	CREATE TABLE IF NOT EXISTS seat_recovery_entry_lanes (team_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE);
 	CREATE TABLE IF NOT EXISTS seat_recovery_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, payload TEXT NOT NULL);
 	CREATE INDEX IF NOT EXISTS seat_recovery_logs_task ON seat_recovery_logs(task_id,id);
+	CREATE INDEX IF NOT EXISTS free_standard_removal_lane ON free_accounts(json_extract(profile,'$.team_account_id')) WHERE json_extract(profile,'$.standard_removal.lane')=1;
+	CREATE INDEX IF NOT EXISTS free_standard_removal_due ON free_accounts(json_extract(profile,'$.standard_removal.next_at')) WHERE json_extract(profile,'$.standard_removal.stage') IS NOT NULL;
 	`)
 	if err != nil {
+		return err
+	}
+	// Legacy cycles already admitted before this feature keep their old removal
+	// behavior, including failed/ambiguous invitations resumed after deployment.
+	if _, err = s.db.Exec(`UPDATE free_accounts SET profile=json_set(profile,'$.removal_seat_policy',json('{"enabled":false,"admin_ids":[]}')) WHERE json_extract(profile,'$.removal_seat_policy') IS NULL AND (json_extract(profile,'$.invite_status') IN ('running','completed','failed') OR json_extract(profile,'$.accept_status') IN ('running','completed','failed'))`); err != nil {
 		return err
 	}
 	// Preserve mail classification for recoveries completed before this field
@@ -206,6 +213,11 @@ func (s *Store) UpdateSeatRecoveryTask(id string, mutate func(*model.SeatRecover
 	}
 	previousLeftAt := p.LeftAt
 	mutate(&p)
+	if p.Lane {
+		if err := s.checkStandardSeatLaneLocked(p.TeamID, "", p.ID); err != nil {
+			return p, err
+		}
+	}
 	p.UpdatedAt = time.Now()
 	tx, err := s.db.Begin()
 	if err != nil {

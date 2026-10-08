@@ -23,10 +23,10 @@ type qualityRuntime struct {
 }
 
 func qualityEligible(p model.FreeAccountProfile) bool {
-	return !p.Dead && p.AcceptStatus == "completed" && p.PushStatus == "completed" && p.RemoveStatus != "completed" && p.RemoteRemovedAt == nil && p.Sub2AccountID > 0 && p.PushProvider != "cpa"
+	return p.StandardRemoval == nil && !p.Dead && p.AcceptStatus == "completed" && p.PushStatus == "completed" && p.RemoveStatus != "completed" && p.RemoteRemovedAt == nil && p.Sub2AccountID > 0 && p.PushProvider != "cpa"
 }
 func qualityActionRetryEligible(p model.FreeAccountProfile) bool {
-	return p.Quality.Action == "kick" && (p.Quality.ActionStatus == "pending" || p.Quality.ActionStatus == "failed") && p.RemoteRemovedAt != nil && p.RemoveStatus != "completed"
+	return p.StandardRemoval == nil && p.Quality.Action == "kick" && (p.Quality.ActionStatus == "pending" || p.Quality.ActionStatus == "failed") && p.RemoteRemovedAt != nil && p.RemoveStatus != "completed"
 }
 func qualityIdentity(p model.FreeAccountProfile, settings model.Sub2Settings) string {
 	pushed := ""
@@ -611,6 +611,9 @@ func (s *Server) applyQualityAction(ctx context.Context, p model.FreeAccountProf
 		state.ActionStatus = "failed"
 		state.Error = err.Error()
 		next = now.Add(time.Duration(q.RetrySeconds) * time.Second)
+		if errors.Is(err, errStandardRemovalPending) {
+			state.ActionStatus = "pending"
+		}
 	} else {
 		state.ActionStatus = "completed"
 		state.Error = ""

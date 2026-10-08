@@ -30,6 +30,7 @@ type recoveryFixture struct {
 	onMutation                                      func(*http.Request)
 	atStatus, atChecks                              int
 	allowDirectRemove, ambiguousRemove              bool
+	failSwitch, ambiguousSwitch                     bool
 }
 
 func newRecoveryFixture(t *testing.T) *recoveryFixture {
@@ -181,6 +182,10 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 				f.state[name] = "prolite"
 				delete(f.pending, name)
 			case r.Method == "POST" && strings.HasSuffix(path, "/seat/update"):
+				if f.failSwitch {
+					http.Error(w, "fixture switch rejected", 400)
+					return
+				}
 				parts := strings.Split(path, "/")
 				name = parts[len(parts)-3]
 				if source != "mother" || body["operation"] != "switch" || body["seat_type"] != "default" || r.Header.Get("Referer") != "https://chatgpt.com/admin/members" {
@@ -195,6 +200,10 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 					t.Error("switched without an available ordinary seat")
 				}
 				f.state[name] = "default"
+				if f.ambiguousSwitch {
+					http.Error(w, "switched but timed out", 504)
+					return
+				}
 			case r.Method == "DELETE":
 				parts := strings.Split(path, "/")
 				name = parts[len(parts)-1]

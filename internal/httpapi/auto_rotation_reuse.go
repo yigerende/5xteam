@@ -82,6 +82,7 @@ func (s *Server) executeAutoRotationWithReuse(ctx context.Context, run model.Aut
 			}
 		}
 		account, err = s.store.UpdateFreeAccount(account.ID, func(item *model.FreeAccountProfile) {
+			item.PinRemovalSeatPolicy(settings)
 			item.JoinMethod = settings.JoinMethod
 			if item.RemoveMethod != "mother_kick" && item.RemoveMethod != "child_leave" {
 				item.RemoveMethod = settings.RemoveMethod

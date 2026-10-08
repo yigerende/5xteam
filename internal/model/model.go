@@ -366,17 +366,19 @@ type AccountProgress struct {
 }
 
 type AutoRotationSettings struct {
-	AllowMultiMotherReuse        bool    `json:"allow_multi_mother_reuse"`
-	Enabled                      bool    `json:"enabled"`
-	ThresholdPercent             float64 `json:"threshold_percent"`
-	IntervalSeconds              int     `json:"interval_seconds"`
-	TeamOperationIntervalSeconds int     `json:"team_operation_interval_seconds"`
-	Concurrency                  int     `json:"concurrency"`
-	MaxPerRun                    int     `json:"max_per_run"`
-	RetryCount                   int     `json:"retry_count"`
-	RemoveMethod                 string  `json:"remove_method"`
-	JoinMethod                   string  `json:"join_method"`
-	OAuthLoginMode               string  `json:"oauth_login_mode"`
+	AllowMultiMotherReuse        bool     `json:"allow_multi_mother_reuse"`
+	Enabled                      bool     `json:"enabled"`
+	ThresholdPercent             float64  `json:"threshold_percent"`
+	IntervalSeconds              int      `json:"interval_seconds"`
+	TeamOperationIntervalSeconds int      `json:"team_operation_interval_seconds"`
+	Concurrency                  int      `json:"concurrency"`
+	MaxPerRun                    int      `json:"max_per_run"`
+	RetryCount                   int      `json:"retry_count"`
+	RemoveMethod                 string   `json:"remove_method"`
+	SwitchBeforeRemove           bool     `json:"switch_before_remove"`
+	SwitchBeforeRemoveAdminIDs   []string `json:"switch_before_remove_admin_ids"`
+	JoinMethod                   string   `json:"join_method"`
+	OAuthLoginMode               string   `json:"oauth_login_mode"`
 }
 
 func DefaultAutoRotationSettings() AutoRotationSettings {
