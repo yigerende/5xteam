@@ -9,6 +9,7 @@ import ProAutoStages from './ProAutoStages.vue'
 const emit=defineEmits(['updated'])
 const email=ref(''),opened=ref(false),busy=ref(false),error=ref(''),state=ref({}),settings=ref({}),cards=ref([]),cardID=ref(''),page=ref(1),pageSize=ref(10),total=ref(0)
 const active=computed(()=>['running','waiting_quota'].includes(state.value.status))
+const manualRunning=computed(()=>Object.values(state.value.stage_progress?.steps||{}).includes('running'))
 const resumable=computed(()=>state.value.steps?.oauth==='completed'&&!active.value&&state.value.status!=='completed')
 const canStart=computed(()=>!active.value&&state.value.status!=='completed'&&!state.value.order_id)
 let timer,generation=0
@@ -16,7 +17,7 @@ const path=()=>`/api/pro-accounts/${encodeURIComponent(email.value)}/auto-pro`
 async function loadCards(){const data=await api(`/api/gptpay/cards?page=${page.value}&page_size=${pageSize.value}&enabled=true`);cards.value=data.items||[];total.value=data.total||0;cardID.value=cards.value[0]?.id||''}
 async function open(account){if(busy.value)return;clearTimeout(timer);generation++;email.value=account.email;state.value=account.pro_auto||{};error.value='';opened.value=true;busy.value=true;page.value=1;try{const [config,current,pro]=await Promise.all([api('/api/gptpay/settings'),api(path()),api('/api/pro-settings'),loadCards()]);settings.value={...config,quota_used_threshold:pro.quota_used_threshold};state.value=current||{}}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
 function close(){if(busy.value)return;opened.value=false;generation++;clearTimeout(timer)}
-function schedule(){clearTimeout(timer);if(opened.value&&active.value)timer=setTimeout(refresh,state.value.status==='running'?1500:5000)}
+function schedule(){clearTimeout(timer);if(opened.value&&(active.value||manualRunning.value))timer=setTimeout(refresh,state.value.status==='running'||manualRunning.value?1500:5000)}
 async function refresh(){const gen=generation;try{const value=await api(path());if(gen!==generation)return;state.value=value;emit('updated')}catch(e){if(gen===generation)error.value=e.message}finally{if(gen===generation)schedule()}}
 async function start(){if(busy.value)return;busy.value=true;error.value='';try{const p=await api(path(),{method:'POST',body:{provider:settings.value.provider,card_id:cardID.value,plan_code:settings.value.plan_code}});state.value=p.pro_auto;emit('updated')}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
 async function stop(){if(busy.value||!window.confirm('停止后续自动步骤？已提交的 GPTPay 订单仍会继续处理，请查询订单结果。'))return;busy.value=true;try{await api(path()+'/stop',{method:'POST',body:{}});await refresh()}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
@@ -27,9 +28,10 @@ defineExpose({open})
 </script>
 <template><Teleport to="body"><div v-if="opened" class="modal-backdrop" @click.self="close"><section class="modal pro-auto-dialog" role="dialog" aria-modal="true" aria-label="全自动开通 Pro">
 <div class="modal-heading"><h2>全自动开通 Pro</h2><button class="icon-button" title="关闭全自动窗口" :disabled="busy" @click="close"><X :size="17" /></button></div>
-<p>{{ email }}</p><ProAutoStages :state="state" />
+<p>{{ email }}</p><ProAutoStages :state="state.stage_progress || state" />
 <p v-if="state.status==='completed'" class="done">全自动流程已完成，已移出空间。</p>
 <p v-if="state.status==='waiting_quota'">等待额度达到 {{ state.quota_used_threshold }}%，下次检测：{{ formatTime(state.next_check_at) }}</p>
+<p v-if="state.status==='awaiting_push'">RT/AT 已保存，请推送当前下游，成功后自动恢复定时额度检测；也可点击“继续后续流程”。</p>
 <p v-if="state.proxy_name">登录代理：{{ state.proxy_name }}<span v-if="state.exit_ip"> · 首次记录 IP：{{ state.exit_ip }}</span></p>
 <p v-if="state.error" class="danger-text">{{ state.error }}</p><p v-if="error" role="alert" class="danger-text">{{ error }}</p>
 <template v-if="canStart"><p>供应商：{{ payProviderName(settings.provider) }}</p><p>套餐：{{ proPlanName(settings.plan_code) }}；7 天已用额度达到 {{ settings.quota_used_threshold || 100 }}% 后合并。</p>

@@ -116,7 +116,10 @@ window.fetch = async (path, options = {}) => {
   if(url.pathname==='/api/gptpay/settings'){if(method==='PUT')fixture.config={...fixture.config,...body,key_present:true};return reply(url.searchParams.has('provider')?fixture.providerConfigs[url.searchParams.get('provider')]:fixture.config)}
   if(url.pathname.endsWith('/auto-pro/stop')){profile.pro_auto.status='interrupted';profile.pro_auto.error='用户已停止';return reply(profile)}
   if(url.pathname.endsWith('/auto-pro')){
-    if(method==='GET')return reply(profile.pro_auto||{})
+    if(method==='GET'){
+      const state=profile.pro_auto||{}, progress=profile.pro_stage_progress
+      return reply(progress?{...state,error:progress.errors?.[state.stage]||'',stage_progress:progress}:state)
+    }
     if(profile.pro_auto?.status==='running')return reply(profile)
     delete profile.pro_stage_progress
     const state=profile.pro_auto={id:'fixture-auto',status:'running',stage:'login',steps:{login:'running'}}

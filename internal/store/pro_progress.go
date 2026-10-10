@@ -32,6 +32,7 @@ func (s *Store) FinishProManualStage(email, stage, id, status, message string) e
 		}
 		progress.Status, progress.Error, progress.UpdatedAt = status, message, time.Now()
 		p.ProManualStages[stage] = progress
+		p.ReconcileProAutoManual(time.Now())
 	})
 	return err
 }

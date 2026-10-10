@@ -62,8 +62,12 @@ func (s *Server) getProAutomation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := p.ProAuto
-	state.Error = state.DisplayError()
-	writeAPI(w, 200, state, "")
+	progress := p.ProStages()
+	state.Error = progress.Errors[state.Stage]
+	writeAPI(w, 200, struct {
+		model.ProAutoState
+		StageProgress model.ProStageDisplay `json:"stage_progress"`
+	}{state, progress}, "")
 }
 
 func (s *Server) autoProUpdate(email, stage, status, message string) error {
@@ -698,7 +702,7 @@ func (s *Server) startProAutomationMonitor() {
 func (s *Server) queueDueProAutomation(email string) {
 	s.proAutoMu.Lock()
 	defer s.proAutoMu.Unlock()
-	if s.proAutoClosed || s.proAutoJobs[email] != nil {
+	if s.proAutoClosed || s.proAutoJobs[email] != nil || s.proLoginAlreadyRunning(email) {
 		return
 	}
 	v, _ := s.proLocks.LoadOrStore("account:"+email, &sync.Mutex{})

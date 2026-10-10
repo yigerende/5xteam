@@ -33,7 +33,7 @@ func (s *Store) DueProAutomations(now time.Time) ([]model.MailAccountProfile, er
 func (s *Store) RecoverProAutomations() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT email,profile FROM mail_accounts WHERE json_extract(profile,'$.pro_auto.status')='running' OR (json_extract(profile,'$.management_scope')='pro' AND json_extract(profile,'$.pro_transfer_status')='completed' AND COALESCE(json_extract(profile,'$.pro_auto.id'),'')!='')`)
+	rows, err := s.db.Query(`SELECT email,profile FROM mail_accounts WHERE json_extract(profile,'$.pro_auto.status')='running' OR (json_extract(profile,'$.management_scope')='pro' AND COALESCE(json_extract(profile,'$.pro_auto.id'),'')!='' AND (json_extract(profile,'$.pro_transfer_status')='completed' OR json_extract(profile,'$.pro_auto.status') IN ('failed','interrupted','awaiting_push')))`)
 	if err != nil {
 		return err
 	}
@@ -48,6 +48,10 @@ func (s *Store) RecoverProAutomations() error {
 			break
 		}
 		if p.ReconcileProAutoMerge(time.Now()) {
+			updates[email] = p
+			continue
+		}
+		if p.ReconcileProAutoManual(time.Now()) {
 			updates[email] = p
 			continue
 		}
