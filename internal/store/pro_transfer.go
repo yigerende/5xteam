@@ -465,10 +465,11 @@ func (s *Store) ImportProAccount(entry ProTransferAccount, exportedAt time.Time,
 func (s *Store) ProExportEmails(query, mergeState string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT email FROM mail_accounts WHERE json_extract(profile,'$.management_scope')='pro'
-		AND (?='' OR lower(email || ' ' || coalesce(json_extract(profile,'$.current_plan_type'),'') || ' ' || coalesce(json_extract(profile,'$.push_provider'),'')) LIKE ?)
-		AND (? NOT IN ('merged','unmerged') OR (?='merged' AND json_extract(profile,'$.space_merged_once')=1) OR (?='unmerged' AND coalesce(json_extract(profile,'$.space_merged_once'),0)=0))
-		ORDER BY email LIMIT 10001`, strings.TrimSpace(query), "%"+strings.ToLower(strings.TrimSpace(query))+"%", mergeState, mergeState, mergeState)
+	query = strings.ToLower(strings.TrimSpace(query))
+	mergeState = normalizeProMergeFilter(mergeState)
+	rows, err := s.db.Query(proAccountsCTE+` SELECT email FROM accounts
+		WHERE (?='' OR search_text LIKE ?) AND (?='' OR merge_state=?)
+		ORDER BY email LIMIT 10001`, query, "%"+query+"%", mergeState, mergeState)
 	if err != nil {
 		return nil, err
 	}

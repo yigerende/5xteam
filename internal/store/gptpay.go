@@ -136,6 +136,9 @@ func (s *Store) GPTPayCard(id string) (gptpay.Card, gptpay.CardSecret, error) {
 }
 func (s *Store) SaveGPTPayCard(v gptpay.Card, secret gptpay.CardSecret) (gptpay.Card, error) {
 	// Defensive validation also applies to callers outside the HTTP handlers.
+	if v.MaxAccounts != nil && (*v.MaxAccounts < 0 || *v.MaxAccounts > 10000) {
+		return v, fmt.Errorf("最大开通数须为 1～10000，或填 0 沿用全局上限")
+	}
 	if len(secret.Number) < 12 || len(secret.Number) > 19 {
 		return v, fmt.Errorf("银行卡号长度无效")
 	}
@@ -163,8 +166,33 @@ func (s *Store) SaveGPTPayCard(v gptpay.Card, secret gptpay.CardSecret) (gptpay.
 	if err != nil {
 		return v, err
 	}
-	raw, _ = json.Marshal(v)
-	_, err = s.db.Exec("INSERT INTO gptpay_cards(id,profile,encrypted_secret,enabled,created_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET profile=excluded.profile,encrypted_secret=excluded.encrypted_secret,enabled=excluded.enabled", v.ID, string(raw), sealed, v.Enabled, formatTime(v.CreatedAt))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return v, err
+	}
+	defer tx.Rollback()
+	if v.MaxAccounts != nil {
+		key := proCardKey(secret.Number)
+		if *v.MaxAccounts == 0 {
+			_, err = tx.Exec(`DELETE FROM pro_card_limits WHERE card_key=?`, key)
+		} else {
+			_, err = tx.Exec(`INSERT INTO pro_card_limits(card_key,max_accounts) VALUES(?,?) ON CONFLICT(card_key) DO UPDATE SET max_accounts=excluded.max_accounts`, key, *v.MaxAccounts)
+		}
+		if err != nil {
+			return v, err
+		}
+	}
+	// The override belongs to the physical card, independently of duplicate rows.
+	stored := v
+	stored.MaxAccounts = nil
+	raw, _ = json.Marshal(stored)
+	if _, err = tx.Exec("INSERT INTO gptpay_cards(id,profile,encrypted_secret,enabled,created_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET profile=excluded.profile,encrypted_secret=excluded.encrypted_secret,enabled=excluded.enabled", v.ID, string(raw), sealed, v.Enabled, formatTime(v.CreatedAt)); err != nil {
+		return v, err
+	}
+	if err = tx.Commit(); err != nil {
+		return v, err
+	}
+	err = s.decorateProCardLocked(&v, secret)
 	return v, err
 }
 func (s *Store) DeleteGPTPayCard(id string) error {
@@ -268,7 +296,7 @@ func (s *Store) CreateGPTPayOrder(v gptpay.Order, snapshot gptpay.Snapshot) erro
 	}
 	defer tx.Rollback()
 	key := proCardKey(snapshot.Input.Number)
-	limit, err := proCardLimit(tx)
+	limit, err := proCardLimit(tx, key)
 	if err != nil {
 		return err
 	}
@@ -276,7 +304,13 @@ func (s *Store) CreateGPTPayOrder(v gptpay.Order, snapshot gptpay.Snapshot) erro
 	if err != nil {
 		return err
 	}
-	if opened+pending >= limit {
+	var reserved bool
+	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pro_card_reservations WHERE email=? AND card_key=?)`, v.Email, key).Scan(&reserved); err != nil {
+		return err
+	}
+	// Lowering a limit only blocks new work; an admitted automatic login keeps
+	// its existing place when converting the reservation into a payment order.
+	if !reserved && opened+pending >= limit {
 		return fmt.Errorf("银行卡已达开通上限 %d（含在途占位）", limit)
 	}
 	raw, _ := json.Marshal(snapshot)

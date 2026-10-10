@@ -40,6 +40,7 @@ type Settings struct {
 }
 
 type Card struct {
+	MaxAccounts       *int      `json:"max_accounts,omitempty"`
 	OpenedAccounts    int       `json:"opened_accounts"`
 	PendingAccounts   int       `json:"pending_accounts"`
 	RemainingAccounts int       `json:"remaining_accounts"`

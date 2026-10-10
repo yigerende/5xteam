@@ -60,7 +60,7 @@ defineExpose({ open })
     <template v-if="!order">
       <p>供应商：{{ payProviderName(settings.provider) }}</p><p>开通套餐：<strong>{{ proPlanName(settings.plan_code) }}</strong></p>
       <p v-if="!settings.key_present" class="danger-text">请先在“Pro 全自动配置”中保存 GPTPay API Key。</p>
-      <label class="field"><span>选择银行卡</span><select v-model="cardID" :disabled="busy"><option value="">请选择已启用银行卡</option><option v-for="card in cards" :key="card.id" :value="card.id">{{ card.name }} · 尾号 {{ card.last4 }} · {{ card.exp_year }}/{{ String(card.exp_month).padStart(2, '0') }}</option></select></label>
+      <label class="field"><span>选择银行卡</span><select v-model="cardID" :disabled="busy"><option value="">请选择已启用银行卡</option><option v-for="card in cards" :key="card.id" :value="card.id">{{ card.name }} · 尾号 {{ card.last4 }} · {{ card.exp_year }}/{{ String(card.exp_month).padStart(2, '0') }} · 已开通 {{ card.opened_accounts ?? 0 }} · 剩余 {{ card.remaining_accounts ?? 0 }}</option></select></label>
       <Pagination v-if="total > 10" :page="page" :page-size="pageSize" :total="total" @update:page="changePage" @update:page-size="changeSize" />
       <p v-if="!cards.length && !busy">请先到“银行卡信息”添加并启用银行卡。</p>
       <p class="muted">将使用此账号已保存的 AT 和所选银行卡向 GPTPay 提交开通订单，费用按供应商配置扣除。</p>

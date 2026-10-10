@@ -109,6 +109,12 @@ window.fetch = async (path, options = {}) => {
     return reply({automation:fixture.pro,gptpay:fixture.config})
   }
   if(url.pathname==='/api/pro-accounts'){
+    if(fixture.filterCases){
+      const all=fixture.filterCases, state=url.searchParams.get('merge_state'),query=(url.searchParams.get('query')||'').toLowerCase()
+      const filtered=all.filter(v=>(!state||v.state===state)&&v.profile.email.toLowerCase().includes(query))
+      const size=Number(url.searchParams.get('page_size')||10),page=Number(url.searchParams.get('page')||1)
+      return reply({items:filtered.slice((page-1)*size,page*size).map(v=>v.profile),total:filtered.length,summary:{all:all.length,unmerged:all.filter(v=>v.state==='unmerged').length,in_progress:all.filter(v=>v.state==='in_progress').length,merged:all.filter(v=>v.state==='merged').length}})
+    }
     if(fixture.listProfiles)return reply({items:fixture.listProfiles,total:fixture.listProfiles.length,summary:{all:fixture.listProfiles.length,oauth_ready:0,pushed:0,merged:0}})
     const paid=fixture.orders.find(o=>o.email===profile.email&&o.status==='success')
     return reply({items:[{...profile,activation_card:paid?{card_name:paid.card_name,card_last4:paid.card_last4}:null}],total:1,summary:{all:1,oauth_ready:1}})
@@ -138,8 +144,8 @@ window.fetch = async (path, options = {}) => {
     return reply(profile)
   }
   if(url.pathname==='/api/gptpay/cards'){
-    if(method==='POST'){const card={id:'card-'+(fixture.cards.length+1),name:body.name,last4:body.number.slice(-4),exp_year:body.exp_year,exp_month:body.exp_month,enabled:body.enabled};fixture.cards.push(card);return reply(card)}
-    const filtered=fixture.cards.map(c=>({...c,opened_accounts:c.opened_accounts||0,pending_accounts:c.pending_accounts||0,account_limit:fixture.config.card_account_limit,remaining_accounts:Math.max(0,fixture.config.card_account_limit-(c.opened_accounts||0)-(c.pending_accounts||0))})).filter(c=>url.searchParams.get('enabled')!=='true'||c.enabled&&c.remaining_accounts>0), size=Number(url.searchParams.get('page_size')||10), page=Number(url.searchParams.get('page')||1)
+    if(method==='POST'){const card={id:'card-'+(fixture.cards.length+1),name:body.name,last4:body.number.slice(-4),exp_year:body.exp_year,exp_month:body.exp_month,enabled:body.enabled,max_accounts:body.max_accounts};fixture.cards.push(card);return reply(card)}
+    const filtered=fixture.cards.map(c=>({...c,opened_accounts:c.opened_accounts||0,pending_accounts:c.pending_accounts||0,account_limit:c.max_accounts||fixture.config.card_account_limit,remaining_accounts:Math.max(0,(c.max_accounts||fixture.config.card_account_limit)-(c.opened_accounts||0)-(c.pending_accounts||0))})).filter(c=>url.searchParams.get('enabled')!=='true'||c.enabled&&c.remaining_accounts>0), size=Number(url.searchParams.get('page_size')||10), page=Number(url.searchParams.get('page')||1)
     return reply({items:filtered.slice((page-1)*size,page*size),total:filtered.length})
   }
   if(url.pathname.startsWith('/api/gptpay/cards/')){const id=url.pathname.split('/').at(-1),card=fixture.cards.find(c=>c.id===id);if(method==='DELETE'){fixture.cards=fixture.cards.filter(c=>c.id!==id);return reply({deleted:true})};Object.assign(card,body);return reply(card)}

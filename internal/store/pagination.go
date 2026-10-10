@@ -53,6 +53,8 @@ type ProAccountsPageSummary struct {
 	OAuthReady int `json:"oauth_ready"`
 	Pushed     int `json:"pushed"`
 	Merged     int `json:"merged"`
+	Unmerged   int `json:"unmerged"`
+	InProgress int `json:"in_progress"`
 }
 
 type AdminAccountsPageSummary struct {
@@ -418,23 +420,15 @@ func (s *Store) ProAccountsPage(query, mergeState string, limit, offset int) ([]
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	query = strings.ToLower(strings.TrimSpace(query))
-	mergeState = strings.ToLower(strings.TrimSpace(mergeState))
-	if mergeState != "merged" && mergeState != "unmerged" {
-		mergeState = ""
-	}
+	mergeState = normalizeProMergeFilter(mergeState)
 	limit, offset = normalizeLimitOffset(limit, offset)
-	const cte = `WITH accounts AS (
-		SELECT profile, encrypted_credentials, updated_at,
-			CASE WHEN json_extract(profile,'$.space_merged_once')=1 THEN 'merged' ELSE 'unmerged' END AS merge_state,
-			LOWER(email || ' ' || COALESCE(json_extract(profile,'$.current_plan_type'),'') || ' ' || COALESCE(json_extract(profile,'$.push_provider'),'')) AS search_text,
-			COALESCE(NULLIF(json_extract(profile,'$.pro_managed_at'),''), NULLIF(json_extract(profile,'$.updated_at'),''), updated_at) AS managed_at
-		FROM mail_accounts WHERE LOWER(COALESCE(json_extract(profile,'$.management_scope'),''))='pro'
-	)`
+	const cte = proAccountsCTE
 	var summary ProAccountsPageSummary
 	if err := s.db.QueryRow(cte+` SELECT COUNT(*),
 		COALESCE(SUM(json_extract(profile,'$.access_token_present')=1 AND json_extract(profile,'$.refresh_token_present')=1),0),
-		COALESCE(SUM(json_extract(profile,'$.push_status')='completed'),0), COALESCE(SUM(merge_state='merged'),0) FROM accounts`).Scan(
-		&summary.All, &summary.OAuthReady, &summary.Pushed, &summary.Merged); err != nil {
+		COALESCE(SUM(json_extract(profile,'$.push_status')='completed'),0), COALESCE(SUM(merge_state='merged'),0),
+		COALESCE(SUM(merge_state='unmerged'),0), COALESCE(SUM(merge_state='in_progress'),0) FROM accounts`).Scan(
+		&summary.All, &summary.OAuthReady, &summary.Pushed, &summary.Merged, &summary.Unmerged, &summary.InProgress); err != nil {
 		return nil, 0, summary, err
 	}
 	like := "%" + query + "%"

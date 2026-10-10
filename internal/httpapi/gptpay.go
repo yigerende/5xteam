@@ -99,13 +99,14 @@ func (s *Server) listGPTPayCards(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) saveGPTPayCard(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name    *string `json:"name"`
-		Enabled *bool   `json:"enabled"`
-		Raw     string  `json:"raw"`
-		Number  string  `json:"number"`
-		CVV     string  `json:"cvv"`
-		Month   int     `json:"exp_month"`
-		Year    int     `json:"exp_year"`
+		MaxAccounts *int    `json:"max_accounts"`
+		Name        *string `json:"name"`
+		Enabled     *bool   `json:"enabled"`
+		Raw         string  `json:"raw"`
+		Number      string  `json:"number"`
+		CVV         string  `json:"cvv"`
+		Month       int     `json:"exp_month"`
+		Year        int     `json:"exp_year"`
 	}
 	if decodeJSON(w, r, &input, 16<<10) != nil {
 		return
@@ -129,6 +130,8 @@ func (s *Server) saveGPTPayCard(w http.ResponseWriter, r *http.Request) {
 	if input.Enabled != nil {
 		v.Enabled = *input.Enabled
 	}
+	// Omitted on enable/disable/name-only updates; zero explicitly resets it.
+	v.MaxAccounts = input.MaxAccounts
 	if input.Raw != "" {
 		var err error
 		secret, err = gptpay.ParseCard(input.Raw, time.Now())

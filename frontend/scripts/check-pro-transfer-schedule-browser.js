@@ -6,8 +6,8 @@
  const click=async text=>{const b=button(text);assert(b&&!b.disabled,'Missing/enabled button '+text);b.click();await pause(100)}
  const field=text=>[...document.querySelectorAll('label.field')].find(l=>l.querySelector('span')?.textContent.trim()===text)?.querySelector('input,select')
  const fill=(text,value)=>{const e=field(text);assert(e,'No field '+text);e.value=value;e.dispatchEvent(new Event('input',{bubbles:true}))}
- await click('Pro 全自动配置');await wait(()=>field('每张银行卡最多开通账号数'))
- assert(field('每张银行卡最多开通账号数').value==='3','Default card max')
+ await click('Pro 全自动配置');await wait(()=>field('银行卡默认最大开通数')&&button('保存 Pro 配置')&&!button('保存 Pro 配置').disabled)
+ assert(field('银行卡默认最大开通数').value==='3','Default card max')
  fill('开通并在 Sub 最大数（未合并）',5);fill('定时开通检查间隔（秒）',60)
  const toggle=[...document.querySelectorAll('.toggle-row')].find(l=>l.textContent.includes('定时执行全自动 Pro')).querySelector('input');toggle.click()
  await click('保存 Pro 配置');await wait(()=>f.pro.scheduled_enabled===true)

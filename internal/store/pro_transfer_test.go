@@ -222,7 +222,8 @@ func TestProTransferDuplicateConcurrentImportAndSelection(t *testing.T) {
 		transferSource(t, src, email)
 	}
 	src.UpdateProAccount("two@example.com", func(p *model.MailAccountProfile) { p.SpaceMergedOnce = true })
-	emails, e := src.ProExportEmails("", "unmerged")
+	// The saved Session/AT already projects a completed login stage.
+	emails, e := src.ProExportEmails("", "in_progress")
 	if e != nil || len(emails) != 1 || emails[0] != "one@example.com" {
 		t.Fatal("wrong export filter")
 	}

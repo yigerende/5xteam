@@ -94,7 +94,7 @@ async function saveSettings() {
 }
 async function queryAccount() { await action(async () => { account.value = await api('/api/gptpay/account?provider=' + queryProvider.value); notify('供应商账户信息已更新', 'success') }) }
 function edit(card = null) {
-  editor.value = { id: card?.id || '', name: card?.name || '', enabled: card?.enabled ?? true, number: '', cvv: '', exp_month: card?.exp_month || 0, exp_year: card?.exp_year || 0, last4: card?.last4 || '' }
+  editor.value = { id: card?.id || '', name: card?.name || '', enabled: card?.enabled ?? true, number: '', cvv: '', exp_month: card?.exp_month || 0, exp_year: card?.exp_year || 0, last4: card?.last4 || '', max_accounts: card?.max_accounts || 0 }
   rawCard.value = ''; notify()
 }
 function parseCard() { try { Object.assign(editor.value, parseCardText(rawCard.value)); rawCard.value = ''; notify('已解析，请核对有效期后保存', 'success') } catch (e) { notify(e.message, 'error') } }
@@ -102,7 +102,9 @@ async function saveCard() {
   await action(async () => {
     const card = editor.value
     if (rawCard.value.trim()) Object.assign(card, parseCardText(rawCard.value))
-    await api('/api/gptpay/cards' + (card.id ? '/' + encodeURIComponent(card.id) : ''), { method: card.id ? 'PUT' : 'POST', body: { name: card.name, enabled: card.enabled, number: card.number, cvv: card.cvv, exp_month: card.exp_month, exp_year: card.exp_year } })
+    const maxAccounts = Number(card.max_accounts || 0)
+    if (!Number.isInteger(maxAccounts) || maxAccounts < 0 || maxAccounts > 10000) throw new Error('最大开通数须为 1～10000，或填 0 沿用全局上限')
+    await api('/api/gptpay/cards' + (card.id ? '/' + encodeURIComponent(card.id) : ''), { method: card.id ? 'PUT' : 'POST', body: { name: card.name, enabled: card.enabled, number: card.number, cvv: card.cvv, exp_month: card.exp_month, exp_year: card.exp_year, ...(card.id || maxAccounts > 0 ? { max_accounts: maxAccounts } : {}) } })
     editor.value = null; rawCard.value = ''; await load(); notify('银行卡已保存', 'success')
   })
 }
@@ -155,7 +157,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(catalogTimer); catalogCont
           <small v-if="catalogCountry">结算币种：{{ catalogCountry.currency || '供应商未提供' }}；下单使用国家代码 {{ settings.country }}。</small>
         </div>
         <div v-if="settings.provider === 'cmsnav'" class="catalog-status wide" aria-live="polite"><span v-if="catalogLoading">正在读取国家、货币与套餐…</span><span v-else-if="catalogError" class="danger-text">目录读取失败：{{ catalogError }}</span><span v-else-if="catalog">已读取 {{ catalog.countries.length }} 个国家/地区。<span v-if="catalogSelectionInvalid" class="danger-text">请选择目录内的国家和可用套餐。</span></span><button class="btn ghost compact" type="button" :disabled="busy || catalogLoading" @click="loadCatalog">刷新国家与套餐</button></div>
-        <label class="field"><span>每张银行卡最多开通账号数</span><input v-model.number="settings.card_account_limit" type="number" min="1" max="10000" required/><small>成功开通与在途占位共用上限，默认 3 个。同一张卡重复添加也共用计数。</small></label>
+        <label class="field"><span>银行卡默认最大开通数</span><input v-model.number="settings.card_account_limit" type="number" min="1" max="10000" required/><small>未单独设置的卡沿用此上限，默认 3 个。成功开通与在途占位共同计数，同一卡号共用上限。</small></label>
         <label class="field"><span>登录及开通会话最长保留（分钟）</span><input v-model.number="settings.session_timeout_minutes" type="number" min="5" max="60" required /><small>出口 IP 变化或检测失败仅记录日志，继续执行；任务超时仍会停止，已提交订单可查询。</small></label>
         <label class="field wide"><span>GPTPay API 地址</span><input v-model="settings.url" required placeholder="https://gptpay.tokenseek.app/api/v1" /></label>
         <label class="field wide"><span>GPTPay API Key</span><input v-model="settings.api_key" type="password" autocomplete="new-password" :placeholder="settings.key_present ? '已保存，留空不修改' : '填写供应商 API Key'" /></label>
@@ -188,7 +190,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(catalogTimer); catalogCont
         <div class="panel-title"><div><span>PAYMENT CARDS</span><h2>银行卡信息</h2><p>仅启用且未过期的卡可用于新开通订单。</p></div><button class="btn primary" :disabled="busy" @click="edit()">添加银行卡</button></div>
         <div class="table-shell"><table><thead><tr><th>名称</th><th>银行卡</th><th>已开通账号</th><th>有效期</th><th>状态</th><th>操作</th></tr></thead><tbody>
           <tr v-if="!rows.length"><td colspan="6" class="empty-cell">暂无银行卡</td></tr>
-          <tr v-for="card in rows" :key="card.id"><td>{{ card.name }}</td><td>•••• {{ card.last4 }}</td><td>{{card.opened_accounts||0}} / {{card.account_limit||3}}<small class="order-id">在途 {{card.pending_accounts||0}} · 剩余 {{card.remaining_accounts??0}}</small></td><td>{{ card.exp_year }}-{{ String(card.exp_month).padStart(2, '0') }}</td><td>{{ card.enabled ? '已启用' : '已禁用' }}</td><td><div class="row-actions"><button class="btn ghost compact" :disabled="busy" @click="toggle(card)">{{ card.enabled ? '禁用' : '启用' }}</button><button class="btn ghost compact" :disabled="busy" @click="edit(card)">编辑</button><button class="btn ghost compact danger-text" :disabled="busy" @click="remove(card)">删除</button></div></td></tr>
+          <tr v-for="card in rows" :key="card.id"><td>{{ card.name }}</td><td>•••• {{ card.last4 }}</td><td>{{card.opened_accounts||0}} / {{card.account_limit||3}}<small class="order-id">{{ card.max_accounts ? '单独设置' : '沿用全局' }}</small><small class="order-id">在途 {{card.pending_accounts||0}} · 剩余 {{card.remaining_accounts??0}}</small></td><td>{{ card.exp_year }}-{{ String(card.exp_month).padStart(2, '0') }}</td><td>{{ card.enabled ? '已启用' : '已禁用' }}</td><td><div class="row-actions"><button class="btn ghost compact" :disabled="busy" @click="toggle(card)">{{ card.enabled ? '禁用' : '启用' }}</button><button class="btn ghost compact" :disabled="busy" @click="edit(card)">编辑</button><button class="btn ghost compact danger-text" :disabled="busy" @click="remove(card)">删除</button></div></td></tr>
         </tbody></table></div>
         <Pagination :page="page" :page-size="pageSize" :total="total" @update:page="changePage" @update:page-size="changeSize" />
       </section>
@@ -202,6 +204,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(catalogTimer); catalogCont
           <label class="field"><span>到期年份</span><input v-model.number="editor.exp_year" required type="number" min="2000" max="9999" /></label>
           <label class="field"><span>到期月份</span><input v-model.number="editor.exp_month" required type="number" min="1" max="12" /></label>
           <label class="field"><span>CVV</span><input v-model="editor.cvv" type="password" autocomplete="new-password" :required="!editor.id" :placeholder="editor.id ? '已保存，留空不修改' : '3～4 位数字'" /></label>
+          <label class="field"><span>最大开通数</span><input v-model.number="editor.max_accounts" type="number" min="0" max="10000" step="1" required /><small>0 表示沿用全局上限。已开通和在途共同计数；调低后停止新增，已有在途继续。同一卡号共用此设置。</small></label>
           <label class="field"><span>启用</span><input v-model="editor.enabled" type="checkbox" /></label>
         </div>
         <div class="panel-actions"><button class="btn ghost" type="button" :disabled="busy" @click="editor = null; rawCard = ''">取消</button><button class="btn primary" :disabled="busy">保存银行卡</button></div>

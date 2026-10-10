@@ -25,6 +25,7 @@ func (s *Store) initializeProScheduler() error {
 	CREATE INDEX IF NOT EXISTS pro_card_usage_email ON pro_card_usage(email,status);
 	CREATE INDEX IF NOT EXISTS pro_schedule_accounts ON mail_accounts(coalesce(json_extract(profile,'$.space_merged_once'),0),json_extract(profile,'$.created_at'),email) WHERE json_extract(profile,'$.management_scope')='pro';
 	CREATE TABLE IF NOT EXISTS pro_card_reservations(email TEXT PRIMARY KEY COLLATE NOCASE,card_key TEXT NOT NULL);
+	CREATE TABLE IF NOT EXISTS pro_card_limits(card_key TEXT PRIMARY KEY,max_accounts INTEGER NOT NULL CHECK(max_accounts BETWEEN 1 AND 10000));
 	CREATE TABLE IF NOT EXISTS pro_schedule_runs(id TEXT PRIMARY KEY,status TEXT NOT NULL,started_at TEXT NOT NULL,payload TEXT NOT NULL);
 	CREATE UNIQUE INDEX IF NOT EXISTS pro_schedule_active ON pro_schedule_runs(status) WHERE status='running';
 	CREATE TABLE IF NOT EXISTS pro_schedule_clock(id INTEGER PRIMARY KEY CHECK(id=1),next_at TEXT NOT NULL);
@@ -81,9 +82,22 @@ func proCardCounts(q proCapacityQuery, key, exceptEmail string) (opened, pending
 	err = q.QueryRow(`SELECT count(*) FROM (SELECT lower(email) email FROM pro_card_usage WHERE card_key=? AND status NOT IN ('failed','success') UNION SELECT lower(email) FROM pro_card_reservations WHERE card_key=?) p WHERE email<>? COLLATE NOCASE AND NOT EXISTS(SELECT 1 FROM pro_card_usage u WHERE u.card_key=? AND u.email=p.email AND u.status='success')`, key, key, exceptEmail, key).Scan(&pending)
 	return
 }
-func proCardLimit(q proCapacityQuery) (int, error) {
+func proCardCustomLimit(q proCapacityQuery, key string) (int, error) {
 	var limit int
-	err := q.QueryRow(`SELECT coalesce(json_extract(profile,'$.card_account_limit'),3) FROM gptpay_settings WHERE id=1`).Scan(&limit)
+	err := q.QueryRow(`SELECT max_accounts FROM pro_card_limits WHERE card_key=?`, key).Scan(&limit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return limit, err
+}
+
+func proCardLimit(q proCapacityQuery, key string) (int, error) {
+	custom, err := proCardCustomLimit(q, key)
+	if err != nil || custom > 0 {
+		return custom, err
+	}
+	var limit int
+	err = q.QueryRow(`SELECT coalesce(json_extract(profile,'$.card_account_limit'),3) FROM gptpay_settings WHERE id=1`).Scan(&limit)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 3, nil
 	}
@@ -93,11 +107,20 @@ func proCardLimit(q proCapacityQuery) (int, error) {
 	return limit, err
 }
 func (s *Store) decorateProCardLocked(card *gptpay.Card, secret gptpay.CardSecret) error {
-	limit, err := proCardLimit(s.db)
+	key := proCardKey(secret.Number)
+	limit, err := proCardLimit(s.db, key)
 	if err != nil {
 		return err
 	}
-	opened, pending, err := proCardCounts(s.db, proCardKey(secret.Number), "")
+	custom, err := proCardCustomLimit(s.db, key)
+	if err != nil {
+		return err
+	}
+	card.MaxAccounts = nil
+	if custom > 0 {
+		card.MaxAccounts = &custom
+	}
+	opened, pending, err := proCardCounts(s.db, key, "")
 	if err != nil {
 		return err
 	}
@@ -140,7 +163,7 @@ func (s *Store) ReserveProCard(email, cardID string, enforceMaximum bool) error 
 		return err
 	}
 	key := proCardKey(secret.Number)
-	limit, err := proCardLimit(tx)
+	limit, err := proCardLimit(tx, key)
 	if err != nil {
 		return err
 	}

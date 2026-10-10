@@ -35,7 +35,7 @@ defineExpose({open})
 <p v-if="state.proxy_name">登录代理：{{ state.proxy_name }}<span v-if="state.exit_ip"> · 首次记录 IP：{{ state.exit_ip }}</span></p>
 <p v-if="state.error" class="danger-text">{{ state.error }}</p><p v-if="error" role="alert" class="danger-text">{{ error }}</p>
 <template v-if="canStart"><p>供应商：{{ payProviderName(settings.provider) }}</p><p>套餐：{{ proPlanName(settings.plan_code) }}；7 天已用额度达到 {{ settings.quota_used_threshold || 100 }}% 后合并。</p>
-<label class="field"><span>开通银行卡</span><select v-model="cardID" :disabled="busy"><option value="">请选择银行卡</option><option v-for="card in cards" :key="card.id" :value="card.id">{{ card.name }} · 尾号 {{ card.last4 }}</option></select></label>
+<label class="field"><span>开通银行卡</span><select v-model="cardID" :disabled="busy"><option value="">请选择银行卡</option><option v-for="card in cards" :key="card.id" :value="card.id">{{ card.name }} · 尾号 {{ card.last4 }} · 已开通 {{ card.opened_accounts ?? 0 }} · 剩余 {{ card.remaining_accounts ?? 0 }}</option></select></label>
 <Pagination v-if="total>10" :page="page" :page-size="pageSize" :total="total" @update:page="changePage" @update:page-size="changeSize" />
 <p class="muted">首次登录后保留会话等待开通，成功后沿用该会话取得新 RT/AT，再推送 Sub2。关闭窗口不影响后台流程。</p></template>
 <p v-if="state.order_id&&!active&&!resumable&&state.status!=='completed'">请先在 GPTPay 供应商页面核实原订单；原会话已释放时，请使用单项按钮处理后续步骤。</p>
