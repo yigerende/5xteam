@@ -84,6 +84,9 @@ func (p *MailAccountProfile) ReconcileProAutoMerge(now time.Time) bool {
 		status, message = "failed", p.ProLastError
 	case "pending":
 		status, message = "interrupted", "空间已合并，请继续完成剩余四步流程"
+		if p.ProPostMergeGroupsPending() && p.RemoveStatus == "completed" {
+			message = "空间已移出，请继续调整 Sub2 分组"
+		}
 	}
 	changed := p.ProAuto.Status != status || p.ProAuto.Stage != "merge" || p.ProAuto.Error != message ||
 		p.ProAuto.NextCheckAt != nil || p.ProAuto.Steps["quota"] != quota || p.ProAuto.Steps["merge"] != merge
@@ -132,6 +135,15 @@ func (p MailAccountProfile) ProStages() ProStageDisplay {
 			v.Errors[step] = progress.Error
 		}
 	}
+	// The saved grouping result is authoritative even if an earlier manual
+	// attempt failed and the workflow was subsequently resumed automatically.
+	if p.ProPostMergeGroups != nil && p.TransferStatus == "completed" && (p.RemoveStatus == "completed" || p.RemoveStatus == "team_removed") {
+		v.Steps["merge"] = p.ProMergeProgress()
+		delete(v.Errors, "merge")
+		if p.ProPostMergeGroups.Error != "" {
+			v.Errors["merge"] = p.ProPostMergeGroups.Error
+		}
+	}
 	return v
 }
 
@@ -151,6 +163,16 @@ func (p MailAccountProfile) ProMergeProgress() string {
 		}
 	}
 	if p.InviteStatus == "completed" && p.AcceptStatus == "completed" && p.TransferStatus == "completed" && (p.RemoveStatus == "completed" || p.RemoveStatus == "team_removed") {
+		if p.ProPostMergeGroupsPending() {
+			switch p.ProPostMergeGroups.Status {
+			case "failed":
+				return "failed"
+			case "running":
+				return "running"
+			default:
+				return "pending"
+			}
+		}
 		return "completed"
 	}
 	return "pending"

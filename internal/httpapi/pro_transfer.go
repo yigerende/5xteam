@@ -154,6 +154,16 @@ func (s *Server) resumeImportedPro(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.RemoveStatus == "completed" || p.RemoveStatus == "team_removed" {
+		if p.ProPostMergeGroupsPending() {
+			p, err = s.startProMergeJob(email, lock.Unlock)
+			if err != nil {
+				writeAPI(w, 409, nil, err.Error())
+				return
+			}
+			locked = false
+			writeAPI(w, 202, p, "")
+			return
+		}
 		p, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 			p.ProMigration.Paused = false
 			p.ProMigration.Notice = "流程已完成"

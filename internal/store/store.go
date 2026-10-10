@@ -508,6 +508,7 @@ func preserveProProfile(profile *model.MailAccountProfile, old model.MailAccount
 	profile.ProAuto = old.ProAuto
 	profile.ProMigration = old.ProMigration
 	profile.ProManualStages = old.ProManualStages
+	profile.ProPostMergeGroups = old.ProPostMergeGroups
 	profile.RefreshTokenEdited = old.RefreshTokenEdited
 	profile.OAuthStatus, profile.OAuthAccountID, profile.OAuthUserID = old.OAuthStatus, old.OAuthAccountID, old.OAuthUserID
 	profile.OAuthExpiresAt, profile.OAuthAuthorizedAt = old.OAuthExpiresAt, old.OAuthAuthorizedAt

@@ -24,6 +24,8 @@ type ProAutoState struct {
 // ProSettings is intentionally independent from Team rotation push settings.
 // Its two providers are mutually exclusive through Provider.
 type ProSettings struct {
+	PostMergeGroupIDs         []int64      `json:"post_merge_group_ids"`
+	PostMergeGroupNames       []string     `json:"post_merge_group_names"`
 	ScheduledEnabled          bool         `json:"scheduled_enabled"`
 	MaxUnmerged               int          `json:"max_unmerged"`
 	ScheduleIntervalSeconds   int          `json:"schedule_interval_seconds"`

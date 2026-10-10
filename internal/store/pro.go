@@ -12,6 +12,17 @@ import (
 )
 
 func normalizeProSettings(v *model.ProSettings) {
+	groupNames := make(map[int64]string)
+	for index, id := range v.PostMergeGroupIDs {
+		if index < len(v.PostMergeGroupNames) && groupNames[id] == "" {
+			groupNames[id] = strings.TrimSpace(v.PostMergeGroupNames[index])
+		}
+	}
+	v.PostMergeGroupIDs = uniquePositiveInt64(v.PostMergeGroupIDs)
+	v.PostMergeGroupNames = make([]string, len(v.PostMergeGroupIDs))
+	for index, id := range v.PostMergeGroupIDs {
+		v.PostMergeGroupNames[index] = groupNames[id]
+	}
 	if v.MaxUnmerged < 1 {
 		v.MaxUnmerged = 5
 	}
@@ -199,13 +210,18 @@ func (s *Store) RecoverProWorkflows() error {
 			continue
 		}
 		legacyCancelled := p.TransferStatus == "failed" && (strings.Contains(p.ProLastError, "context canceled") || strings.Contains(p.ProLastError, "context deadline exceeded"))
-		if !p.ProWorkflowRunning && !legacyCancelled {
+		groupsRunning := p.ProPostMergeGroups != nil && p.ProPostMergeGroups.Status == "running"
+		if !p.ProWorkflowRunning && !legacyCancelled && !groupsRunning {
 			continue
 		}
 		if legacyCancelled {
 			p.TransferStatus = "unknown"
 		}
 		p.ProWorkflowRunning = false
+		if groupsRunning {
+			p.ProPostMergeGroups.Status = "pending"
+			p.ProPostMergeGroups.UpdatedAt = time.Now()
+		}
 		for _, status := range []*string{&p.InviteStatus, &p.AcceptStatus, &p.TransferStatus, &p.RemoveStatus} {
 			if *status == "running" {
 				if status == &p.TransferStatus {

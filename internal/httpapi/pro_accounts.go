@@ -1027,7 +1027,7 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 		s.auditProEvent(firstProProfile(out, profile), "space_merge", status, v.Provider, message, details)
 	}()
 	if profile.SpaceMergedOnce && profile.RemoveStatus == "completed" {
-		return profile, nil
+		return s.finishProPostMergeGroups(ctx, profile)
 	}
 	// Only a started workflow is bound to its original Team. Preselected
 	// targets and fully reset workflows use the current Pro configuration.
@@ -1079,6 +1079,7 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 	if err != nil {
 		return profile, err
 	}
+	unlockAdmin = sync.OnceFunc(unlockAdmin)
 	defer unlockAdmin()
 	adminSettings, err := s.settingsForAdmin(s.store.Settings(), admin)
 	if err != nil {
@@ -1143,6 +1144,12 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 		}},
 	}
 	for _, step := range steps {
+		if step.name == "remove" {
+			profile, err = s.prepareProPostMergeGroups(profile, v)
+			if err != nil {
+				return profile, err
+			}
+		}
 		unlockStep := func() {}
 		if step.name == "remove" && profile.RemoveStatus != "completed" && profile.RemoveStatus != "team_removed" {
 			value, _ := s.teamRemoveLocks.LoadOrStore(admin.TeamAccountID, &sync.Mutex{})
@@ -1163,7 +1170,13 @@ func (s *Server) performProMerge(ctx context.Context, email string) (out model.M
 		}
 	}
 	// Pro keeps its Sub2/CPA account after leaving, including legacy cleanup states.
-	return s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "completed" })
+	profile, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.RemoveStatus = "completed" })
+	if err != nil {
+		return profile, err
+	}
+	// Downstream grouping must not hold up unrelated operations on this Team.
+	unlockAdmin()
+	return s.finishProPostMergeGroups(ctx, profile)
 }
 
 func (s *Server) mergeProAccount(w http.ResponseWriter, r *http.Request) {

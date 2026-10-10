@@ -11,7 +11,7 @@ const initial = {
 const key = 'pro-push-preview'
 const fixture = window.proPushFixture = {
   saved: JSON.parse(sessionStorage.getItem(key) || 'null') || initial,
-  requests: [], fail: '', delay: 50,
+  requests: [], accounts: [], fail: '', delay: 50,
   groups: { sub2: [{ id: 7, name: '不降智' }, { id: 8, name: '备用组' }, { id: 10, name: '其他组' }], cpa: [{ id: 9, name: 'CPA 已保存' }] },
 }
 const reply = (data, error = '') => new Response(JSON.stringify({ ok: !error, data, error }), { status: error ? 502 : 200, headers: { 'Content-Type': 'application/json' } })
@@ -26,7 +26,16 @@ window.fetch = async (path, options = {}) => {
     }
     return reply(fixture.saved)
   }
-  if (url.pathname === '/api/pro-accounts') return reply({ items: [], total: 0 })
+  if (url.pathname === '/api/pro-accounts') return reply({ items: fixture.accounts, total: fixture.accounts.length })
+  if (url.pathname.endsWith('/merge') && method === 'POST') {
+    const account = fixture.accounts.find(a => url.pathname.includes(encodeURIComponent(a.email)))
+    if (!account) throw new Error('Unknown fixture account')
+    account.pro_workflow_running = true
+    account.pro_post_merge_groups.status = 'running'
+    account.pro_post_merge_groups.error = ''
+    setTimeout(() => { account.pro_post_merge_groups.status = 'completed'; account.pro_workflow_running = false }, 800)
+    return reply(account)
+  }
   const match = url.pathname.match(/^\/api\/pro-settings\/(sub2|cpa)\/(groups|test)$/)
   if (match) {
     const provider = match[1], fail = fixture.fail === provider, groups = structuredClone(fixture.groups[provider])

@@ -293,6 +293,10 @@ func (s *Store) ImportProAccount(entry ProTransferAccount, exportedAt time.Time,
 	p.Email = result.Email
 	p.ManagementScope = "pro"
 	p.ProWorkflowRunning = false
+	if p.ProPostMergeGroups != nil && p.ProPostMergeGroups.Status == "running" {
+		p.ProPostMergeGroups.Status = "pending"
+		p.ProPostMergeGroups.UpdatedAt = time.Now()
+	}
 	now := time.Now()
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = now
