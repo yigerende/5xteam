@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -11,7 +12,7 @@ type nexovccCaseQuery interface {
 }
 
 func (c NexovccCase) canRemoveUnopened() bool {
-	return c.State == "unopened" && c.PaymentStatus == "failed" && c.OpenedAt == nil && c.Match == nil
+	return c.State == "unopened" && (c.PaymentStatus == "failed" || c.PaymentStatus == "manual_review" || c.PaymentStatus == "submission_unknown") && c.OpenedAt == nil && c.Match == nil
 }
 
 type NexovccCaseRemoval struct {
@@ -20,9 +21,8 @@ type NexovccCaseRemoval struct {
 	Skipped    int      `json:"skipped"`
 }
 
-// DeleteNexovccUnopenedCases hides confirmed failed records from return lists.
-// Payment orders, card usage and financial matches remain intact. A changed
-// manual revision, successful payment or new match makes the record visible again.
+// DeleteNexovccUnopenedCases reconciles stopped unopened orders before hiding
+// them. The original payment evidence and unrelated card usage remain intact.
 func (s *Store) DeleteNexovccUnopenedCases() (NexovccCaseRemoval, error) {
 	out := NexovccCaseRemoval{DeletedIDs: []string{}}
 	s.mu.Lock()
@@ -47,6 +47,13 @@ func (s *Store) DeleteNexovccUnopenedCases() (NexovccCaseRemoval, error) {
 		if !c.canRemoveUnopened() {
 			out.Skipped++
 			continue
+		}
+		if err = s.releaseUnopenedCaseTx(tx, "nexovcc", c.ID, time.Now().UTC()); err != nil {
+			if errors.Is(err, errCaseStillRunning) {
+				out.Skipped++
+				continue
+			}
+			return out, err
 		}
 		if _, err = tx.Exec(`INSERT INTO nexovcc_case_removals(order_id,revision,removed_at) VALUES(?,?,?) ON CONFLICT(order_id) DO UPDATE SET revision=excluded.revision,removed_at=excluded.removed_at`, c.ID, c.Revision, now); err != nil {
 			return out, err

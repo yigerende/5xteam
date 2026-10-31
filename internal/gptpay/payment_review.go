@@ -20,6 +20,9 @@ func (o Order) PaymentReviewBlocksRestock() bool {
 // Keep the supplier's failed order intact, but require operator review before
 // automation can continue. Never reinterpret successful or uncertain payments.
 func (o Order) PaymentReviewRequired() bool {
+	if o.OccupancyResolution != nil {
+		return false
+	}
 	if o.Status != "failed" || o.SucceededAt != nil {
 		return false
 	}

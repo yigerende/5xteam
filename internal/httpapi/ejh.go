@@ -878,7 +878,7 @@ func (s *Server) ensureEJHCard(ctx context.Context, admissionChecks ...func() er
 				if occupant.Deleted {
 					reason = "账号已删除，但原订单占用尚未解除"
 				}
-				return gptpay.Card{}, cardPreparationWait("EJH 卡尾号 %s 的账号 %s：%s（订单 %s）；请在开通订单中核实原订单及移出情况，暂停自动补卡；本次未开卡、未付款，原任务等待核实后继续", card.Last4, occupant.Email, reason, occupant.OrderID)
+				return gptpay.Card{}, cardPreparationWait("EJH 卡尾号 %s 的账号 %s：%s（订单 %s）；请到 EJH 卡台点击“处理占用”，或在账号回款→未开通中核实后删除该记录，暂停自动补卡；本次未开卡、未付款，原任务等待核实后继续", card.Last4, occupant.Email, reason, occupant.OrderID)
 			}
 		}
 	}

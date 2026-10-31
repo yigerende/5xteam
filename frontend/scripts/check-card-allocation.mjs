@@ -14,7 +14,7 @@ for (const file of ['ProRechargeDialog.vue', 'ProAutoDialog.vue']) {
  for (const provider of ['ejh','nexovcc']) for (const auto of [false,true]) for (const available of [false,true]) {
   const calls=[]
   const settings=file==='ProAutoDialog.vue'?ref({}):reactive({})
-  const ctx=vm.createContext({applyPaymentPolicies,cardOrigin,computed,props:{defaultPageSize:50},blockedCards:ref([]),occupancyMessage:ref(''),settings,cardID:ref(''),cards:ref([]),total:ref(0),page:ref(1),pageSize:ref(10),busy:ref(false),preparingCard:ref(false),canStart:ref(true),email:ref(''),order:ref(null),error:ref(''),opened:ref(false),state:ref({}),requestID:'',timer:0,generation:0,clearTimeout(){},schedule(){},emit(){},path:()=>'/auto-pro',payRequestID:()=> 'local-request',api:async(path,options)=>{
+  const ctx=vm.createContext({applyPaymentPolicies,cardOrigin,computed,props:{defaultPageSize:50},blockedCards:ref([]),occupancyMessage:ref(''),settings,cardID:ref(''),cards:ref([]),total:ref(0),page:ref(1),pageSize:ref(10),busy:ref(false),preparingCard:ref(false),canStart:ref(true),email:ref(''),order:ref(null),error:ref(''),opened:ref(false),openedAccount:ref(null),state:ref({}),requestID:'',timer:0,generation:0,clearTimeout(){},schedule(){},emit(){},path:()=>'/auto-pro',payRequestID:()=> 'local-request',api:async(path,options)=>{
    calls.push({path,options})
    if(options) return {pro_auto:{status:'running'}}
    if(path==='/api/pro-settings')return {card_provider:provider,ejh_auto_open:provider==='ejh'?auto:!auto,nexovcc_auto_open:provider==='nexovcc'?auto:!auto}
@@ -50,7 +50,7 @@ for (const file of ['ProRechargeDialog.vue', 'ProAutoDialog.vue']) {
  }
  assert.ok(source.includes('无可用卡时从 ${autoCardLabel} 补卡'))
  if(file==='ProAutoDialog.vue') {
-  const names=['active','deletionSubmitted','resumable','retryCurrent','restartable','canStart']
+  const names=['replacementFailed','active','deletionSubmitted','resumable','retryCurrent','restartable','canStart']
   const state=ref({restock_retry_available:true,steps:{}})
   const ctx=vm.createContext({applyPaymentPolicies,cardOrigin,computed,state,quotaResumeAvailable:ref(false)})
   const flags=parsed.statements.filter(s=>ts.isVariableStatement(s)&&s.declarationList.declarations.some(d=>names.includes(d.name.getText(parsed)))).map(s=>s.getText(parsed)).join('\n')

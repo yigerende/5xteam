@@ -136,6 +136,10 @@ func Open(dataDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.reconcileDeletedUnopenedCases(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 

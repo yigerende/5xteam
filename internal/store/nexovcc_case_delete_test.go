@@ -76,11 +76,11 @@ func TestNexovccDeleteUnopenedCasesPreservesHistoryAndProtectedCases(t *testing.
 	total := 0
 	for out := range results {
 		total += out.Deleted
-		if out.Deleted != len(out.DeletedIDs) || out.Skipped != 5 {
+		if out.Deleted != len(out.DeletedIDs) || out.Skipped != 4 {
 			t.Fatal(out)
 		}
 	}
-	if total != 12 {
+	if total != 13 {
 		t.Fatal("wrong deletion count", total)
 	}
 	for table, want := range before {
@@ -105,7 +105,7 @@ func TestNexovccDeleteUnopenedCasesPreservesHistoryAndProtectedCases(t *testing.
 			t.Fatal("wrong hidden count", n, want)
 		}
 	}
-	checkHidden(12)
+	checkHidden(13)
 	order, snapshot, err := s.GPTPayOrder("cleanup-00")
 	if err != nil || snapshot.APIKey != "supplier-key" {
 		t.Fatal("original order lost", err)
@@ -113,22 +113,22 @@ func TestNexovccDeleteUnopenedCasesPreservesHistoryAndProtectedCases(t *testing.
 	if err = s.UpdateGPTPayOrder(order); err != nil {
 		t.Fatal(err)
 	}
-	checkHidden(12) // Unchanged failed-order refresh must not undo cleanup.
+	checkHidden(13) // Unchanged failed-order refresh must not undo cleanup.
 	order.Status = "success"
-	if err = s.UpdateGPTPayOrder(order); err != nil {
-		t.Fatal(err)
+	if err = s.UpdateGPTPayOrder(order); err == nil {
+		t.Fatal("stale refresh resurrected an explicitly resolved order")
 	}
-	checkHidden(11)
+	checkHidden(13)
 	if err = s.SetNexovccCase("cleanup-01", "unopened", "重新核实该笔记录", 0); err != nil {
 		t.Fatal(err)
 	}
-	checkHidden(10)
+	checkHidden(12)
 	if _, err = s.db.Exec(`INSERT INTO nexovcc_case_matches(order_id,group_id,returned,profile) VALUES(?,?,?,?)`, "cleanup-02", "late-payment", 0, match); err != nil {
 		t.Fatal(err)
 	}
-	checkHidden(9)
+	checkHidden(11)
 	var audits int
-	if err = s.db.QueryRow(`SELECT count(*) FROM nexovcc_audit WHERE json_extract(profile,'$.action')='delete_unopened_case'`).Scan(&audits); err != nil || audits != 12 {
+	if err = s.db.QueryRow(`SELECT count(*) FROM nexovcc_audit WHERE json_extract(profile,'$.action')='delete_unopened_case'`).Scan(&audits); err != nil || audits != 13 {
 		t.Fatal("missing audit or duplicate cleanup", audits, err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,21 +115,35 @@ func TestEJHDeleteUnopenedCasesAPI(t *testing.T) {
 	if n := len(visible()); n != 14 {
 		t.Fatal(n)
 	}
+	lock := &sync.Mutex{}
+	s.proLocks.Store("account:delete-1@example.com", lock)
+	lock.Lock()
+	w := call("DELETE", "/api/ejh/cases/unopened", body, true, "")
+	lock.Unlock()
+	if w.Code != 409 || len(visible()) != 14 {
+		t.Fatal("partial deletion during payment", w.Code, w.Body.String())
+	}
+	// Earlier locks acquired before the conflict must have been released.
+	v, _ := s.proLocks.Load("account:delete-0@example.com")
+	if !v.(*sync.Mutex).TryLock() {
+		t.Fatal("account lock leaked")
+	}
+	v.(*sync.Mutex).Unlock()
 	deleteAndCheck("delete-0", 1)
 	if n := len(visible()); n != 13 {
 		t.Fatal(n)
 	}
 	deleteAndCheck("delete-0", 0)
-	deleteAndCheck("unopened", 12) // Includes records beyond the default ten-row page.
+	deleteAndCheck("unopened", 11) // Includes records beyond the default ten-row page.
 	rows := visible()
-	if len(rows) != 1 || rows[0].ID != "delete-13" {
+	if len(rows) != 2 {
 		t.Fatal("normal record lost", rows)
 	}
 	deleteAndCheck("unopened", 0)
 	if err = st.EJHBackfillCases(); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(visible()); n != 1 {
+	if n := len(visible()); n != 2 {
 		t.Fatal("backfill resurrected deleted entries", n)
 	}
 	order, _, err := st.GPTPayOrder("delete-12")

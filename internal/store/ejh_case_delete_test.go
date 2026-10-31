@@ -63,7 +63,7 @@ func TestDeleteEJHUnopenedCasesPreservesFinancialHistory(t *testing.T) {
 	if ids, err = s.DeleteEJHUnopenedCases("failed"); err != nil || len(ids) != 0 {
 		t.Fatal("not idempotent", ids, err)
 	}
-	if ids, err = s.DeleteEJHUnopenedCases(""); err != nil || !reflect.DeepEqual(ids, []string{"pending"}) {
+	if ids, err = s.DeleteEJHUnopenedCases(""); err != nil || len(ids) != 0 {
 		t.Fatal(ids, err)
 	}
 	if ids, err = s.DeleteEJHUnopenedCases(""); err != nil || len(ids) != 0 {
@@ -94,7 +94,7 @@ func TestDeleteEJHUnopenedCasesPreservesFinancialHistory(t *testing.T) {
 		t.Fatal("reconciliation history removed", len(cases), err)
 	}
 	for _, c := range cases {
-		wantRemoved := c.ID == "failed" || c.ID == "pending"
+		wantRemoved := c.ID == "failed"
 		if (c.RemovedAt != nil) != wantRemoved {
 			t.Fatal("restart lost removal marker", c.ID, c.RemovedAt)
 		}

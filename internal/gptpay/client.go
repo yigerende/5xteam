@@ -203,6 +203,9 @@ type Order struct {
 func (o Order) Active() bool { return o.Status != "success" && o.Status != "failed" }
 
 func (o Order) NeedsStatusPoll() bool {
+	if o.OccupancyResolution != nil && o.OccupancyResolution.Outcome == "not_activated" {
+		return false
+	}
 	if o.CanRetryRateLimit() {
 		return true
 	}
@@ -239,6 +242,9 @@ func (r RemoteOrder) CanCheckXUPay() bool {
 }
 
 func (o Order) RetryBlocked() bool {
+	if o.OccupancyResolution != nil && o.OccupancyResolution.Outcome == "not_activated" && o.Status == "failed" {
+		return false
+	}
 	if Provider(o.Provider) == XUPay {
 		return o.Remote.PaymentState == "succeeded" || o.Status == "success" || o.Status == "manual_review" || o.Status == "submission_unknown"
 	}

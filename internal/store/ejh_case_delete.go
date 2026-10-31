@@ -2,13 +2,13 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
 
-// DeleteEJHUnopenedCases removes return-list records, not payment orders. The
-// marker survives unchanged order updates/backfill; a later opened/returned state remains
-// visible so deleting a pending record cannot hide a subsequently paid order.
+// DeleteEJHUnopenedCases records operator reconciliation and releases the exact
+// stopped order before hiding the return record. Payment history remains saved.
 // An empty id selects all currently unopened EJH records in one transaction.
 func (s *Store) DeleteEJHUnopenedCases(id string) ([]string, error) {
 	s.mu.Lock()
@@ -40,6 +40,19 @@ func (s *Store) DeleteEJHUnopenedCases(id string) ([]string, error) {
 			continue
 		}
 		if c.RemovedAt != nil {
+			continue
+		}
+		if c.OpenedAt == nil && c.Charge == nil && len(c.Returns) == 0 {
+			if err = s.releaseUnopenedCaseTx(tx, "ejh", c.ID, now.UTC()); err != nil {
+				if id == "" && errors.Is(err, errCaseStillRunning) {
+					continue
+				}
+				return nil, err
+			}
+		} else if c.PaymentStatus != "success" {
+			if id != "" {
+				return nil, errCaseStillRunning
+			}
 			continue
 		}
 		if _, err = tx.Exec(`UPDATE ejh_cases SET profile=json_set(profile,'$.removed_at',?) WHERE id=?`, formatTime(now), c.ID); err != nil {

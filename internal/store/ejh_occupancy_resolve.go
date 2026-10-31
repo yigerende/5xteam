@@ -79,21 +79,23 @@ func (s *Store) resolveCardOccupancy(provider, id string, in EJHOccupancyResolut
 		}
 		return nil // A retried response must not release a newer order or reservation.
 	}
-	var exists, working bool
+	var exists bool
 	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM mail_accounts WHERE email=? COLLATE NOCASE)`, email).Scan(&exists); err != nil {
 		return err
 	}
-	if exists {
+	if exists && in.Outcome != "not_activated" {
 		return fmt.Errorf("账号仍在管理列表或已重新导入，请通过账号的正常开通 / 合并流程处理")
 	}
-	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pro_restock_tasks WHERE email=? COLLATE NOCASE AND status NOT IN ('ready','failed','cancelled'))`, email).Scan(&working); err != nil {
-		return err
-	}
-	if working {
-		return fmt.Errorf("账号仍有自动补货任务，请先停止并核实任务结果")
+	if busy, e := caseAccountWorking(tx, email); e != nil {
+		return e
+	} else if busy {
+		return fmt.Errorf("账号仍在执行，请等本轮执行结束后核实")
 	}
 	if order.Status != in.ExpectedStatus || status != order.Status {
 		return fmt.Errorf("订单状态已变化，请重新打开并核实后提交")
+	}
+	if order.Remote.AutomaticRunning || order.CheckPending || (in.Outcome == "not_activated" && (order.SucceededAt != nil || order.Remote.PaymentState == "succeeded")) {
+		return errCaseStillRunning
 	}
 	switch order.Status {
 	case "success", "failed", "manual_review", "submission_unknown":
@@ -113,6 +115,11 @@ func (s *Store) resolveCardOccupancy(provider, id string, in EJHOccupancyResolut
 	before := order
 	now := time.Now().UTC()
 	order.Status, order.UpdatedAt = target, now
+	if target == "failed" {
+		order.NextStatusCheckAt = nil
+		order.RateLimited = false
+		order.CheckPending = false
+	}
 	order.OccupancyResolution = &gptpay.OccupancyResolution{Outcome: in.Outcome, Evidence: in.Evidence, At: now}
 	// Preserve supplier responses, errors, snapshots and credits as original evidence.
 	if _, err = tx.Exec(`UPDATE gptpay_orders SET profile=?,active=0 WHERE id=?`, mustJSON(order), id); err != nil {

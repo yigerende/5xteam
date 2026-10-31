@@ -104,6 +104,9 @@ func (s *Server) pollGPTPayOrder(ctx context.Context, o gptpay.Order, now time.T
 // Shared by foreground refresh and background polling under the account lock.
 // Cancellation is separate from purchase success and cannot hold up Pro steps.
 func (s *Server) syncGPTPayOrderStatus(ctx context.Context, o gptpay.Order, snapshot gptpay.Snapshot) (gptpay.Order, error) {
+	if o.OccupancyResolution != nil && o.OccupancyResolution.Outcome == "not_activated" {
+		return o, nil
+	}
 	before := o
 	if snapshot.Provider == gptpay.XUPay && o.StatusCheckError != "" && o.NextStatusCheckAt != nil && o.NextStatusCheckAt.After(time.Now()) {
 		return o, nil
