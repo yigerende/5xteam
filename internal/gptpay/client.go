@@ -131,34 +131,38 @@ type Snapshot struct {
 }
 
 type RemoteOrder struct {
-	PaymentState        string `json:"paymentState,omitempty"`
-	ActivationStatus    string `json:"activationStatus,omitempty"`
-	CreditUnit          string `json:"creditUnit,omitempty"`
-	Retryable           *bool  `json:"retryable,omitempty"`
-	RetryHint           string `json:"retryHint,omitempty"`
-	FailureCategory     string `json:"failureCategory,omitempty"`
-	ErrorCode           string `json:"errorCode,omitempty"`
-	PaymentAmount       string `json:"paymentAmount,omitempty"`
-	PaymentAmountMinor  *int64 `json:"paymentAmountMinor,omitempty"`
-	PaymentCurrency     string `json:"paymentCurrency,omitempty"`
-	PaymentCountry      string `json:"paymentCountry,omitempty"`
-	PaymentAmountSource string `json:"paymentAmountSource,omitempty"`
-	Country             string `json:"country,omitempty"`
-	CreditQuantity      int    `json:"creditQuantity,omitempty"`
-	ID                  string `json:"id"`
-	OrderNo             string `json:"orderNo"`
-	Status              string `json:"status"`
-	SettlementStatus    string `json:"settlementStatus"`
-	CancellationStatus  string `json:"cancellationStatus"`
-	PlanCode            string `json:"planCode"`
-	ReservedCredits     int64  `json:"reservedCredits"`
-	ChargedCredits      int64  `json:"chargedCredits"`
-	ReleasedCredits     int64  `json:"releasedCredits"`
-	TargetEmail         string `json:"targetEmail"`
-	CardLast4           string `json:"cardLast4"`
-	FailureReason       string `json:"failureReason"`
-	CreatedAt           string `json:"createdAt"`
-	UpdatedAt           string `json:"updatedAt"`
+	AutomaticRunning    bool           `json:"automaticRunning,omitempty"`
+	CanCheck            *bool          `json:"canCheck,omitempty"`
+	Message             string         `json:"message,omitempty"`
+	Events              []PaymentEvent `json:"events,omitempty"`
+	PaymentState        string         `json:"paymentState,omitempty"`
+	ActivationStatus    string         `json:"activationStatus,omitempty"`
+	CreditUnit          string         `json:"creditUnit,omitempty"`
+	Retryable           *bool          `json:"retryable,omitempty"`
+	RetryHint           string         `json:"retryHint,omitempty"`
+	FailureCategory     string         `json:"failureCategory,omitempty"`
+	ErrorCode           string         `json:"errorCode,omitempty"`
+	PaymentAmount       string         `json:"paymentAmount,omitempty"`
+	PaymentAmountMinor  *int64         `json:"paymentAmountMinor,omitempty"`
+	PaymentCurrency     string         `json:"paymentCurrency,omitempty"`
+	PaymentCountry      string         `json:"paymentCountry,omitempty"`
+	PaymentAmountSource string         `json:"paymentAmountSource,omitempty"`
+	Country             string         `json:"country,omitempty"`
+	CreditQuantity      int            `json:"creditQuantity,omitempty"`
+	ID                  string         `json:"id"`
+	OrderNo             string         `json:"orderNo"`
+	Status              string         `json:"status"`
+	SettlementStatus    string         `json:"settlementStatus"`
+	CancellationStatus  string         `json:"cancellationStatus"`
+	PlanCode            string         `json:"planCode"`
+	ReservedCredits     int64          `json:"reservedCredits"`
+	ChargedCredits      int64          `json:"chargedCredits"`
+	ReleasedCredits     int64          `json:"releasedCredits"`
+	TargetEmail         string         `json:"targetEmail"`
+	CardLast4           string         `json:"cardLast4"`
+	FailureReason       string         `json:"failureReason"`
+	CreatedAt           string         `json:"createdAt"`
+	UpdatedAt           string         `json:"updatedAt"`
 }
 
 type OccupancyResolution struct {
@@ -168,6 +172,10 @@ type OccupancyResolution struct {
 }
 
 type Order struct {
+	CheckPending        bool                 `json:"check_pending,omitempty"`
+	RateLimited         bool                 `json:"rate_limited,omitempty"`
+	RateLimitRetries    int                  `json:"rate_limit_retries,omitempty"`
+	SubmissionUncertain bool                 `json:"submission_uncertain,omitempty"`
 	SubmissionStarted   bool                 `json:"submission_started,omitempty"`
 	OccupancyResolution *OccupancyResolution `json:"occupancy_resolution,omitempty"`
 	Country             string               `json:"country,omitempty"`
@@ -195,10 +203,39 @@ type Order struct {
 func (o Order) Active() bool { return o.Status != "success" && o.Status != "failed" }
 
 func (o Order) NeedsStatusPoll() bool {
-	if o.Status == "manual_review" {
+	if o.CanRetryRateLimit() {
+		return true
+	}
+	if Provider(o.Provider) == XUPay && o.Remote.ID != "" && (o.CheckPending || o.Remote.AutomaticRunning) {
+		return true
+	}
+	if o.Status == "manual_review" && !o.Remote.AutomaticRunning {
 		return false
 	}
 	return o.Remote.ID != "" && (o.Active() || o.Remote.CancellationStatus == "waiting" || o.Remote.CancellationStatus == "pending")
+}
+
+const XUPayRateLimitRetries = 3
+
+func (o Order) CanRetryRateLimit() bool {
+	return Provider(o.Provider) == XUPay && o.RateLimited && o.Remote.ID == "" &&
+		o.Status == "submission_unknown" && o.RateLimitRetries < XUPayRateLimitRetries && o.NextStatusCheckAt != nil
+}
+
+type PaymentEvent struct {
+	Stage     string `json:"stage"`
+	Message   string `json:"message"`
+	CreatedAt string `json:"createdAt"`
+}
+
+func (r RemoteOrder) CanCheckXUPay() bool {
+	if r.ID == "" || r.AutomaticRunning {
+		return false
+	}
+	if r.CanCheck != nil {
+		return *r.CanCheck
+	}
+	return r.PaymentState == "review" || r.PaymentState == "action_required"
 }
 
 func (o Order) RetryBlocked() bool {
@@ -390,6 +427,7 @@ func ParseCard(line string, now time.Time) (CardSecret, error) {
 }
 
 type APIError struct {
+	RetryAfter       time.Duration
 	Provider         string
 	Retryable        *bool
 	RetryHint        string

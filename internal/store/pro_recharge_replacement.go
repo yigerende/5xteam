@@ -12,6 +12,8 @@ import (
 	"chatgpt-space-merge/internal/restock"
 )
 
+var errXUPayRateLimited = errors.New("序付接口限流，保留原任务等待或核实，不消耗换号次数")
+
 func replacementProfile(tx *sql.Tx, email string) (p model.MailAccountProfile, err error) {
 	var raw string
 	if err = tx.QueryRow(`SELECT profile FROM mail_accounts WHERE email=?`, email).Scan(&raw); err == nil {
@@ -44,6 +46,9 @@ func replacementPayment(tx *sql.Tx, p model.MailAccountProfile) (order gptpay.Or
 	if err == nil && (order.Status == "success" || order.SucceededAt != nil) {
 		err = errors.New("原订单已开通成功，不再换号")
 	}
+	if err == nil && order.Provider == gptpay.XUPay && order.RateLimited {
+		err = errXUPayRateLimited
+	}
 	return
 }
 
@@ -66,6 +71,14 @@ func (s *Store) QueueProRechargeReplacement(email, flowID string) error {
 		return nil
 	}
 	order, err := replacementPayment(tx, p)
+	if errors.Is(err, errXUPayRateLimited) {
+		r.Pending = false
+		r.Message = err.Error()
+		if err = saveReplacementProfile(tx, p); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	if err != nil {
 		return err
 	}

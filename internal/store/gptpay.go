@@ -546,9 +546,12 @@ func (s *Store) GPTPayOrdersDue(now time.Time, limit int) ([]gptpay.Order, error
 	defer s.mu.Unlock()
 	limit = min(20, max(1, limit))
 	rows, err := s.db.Query(`SELECT o.profile FROM gptpay_orders o
-		WHERE COALESCE(json_extract(o.profile,'$.remote.id'),'')<>''
-		AND COALESCE(json_extract(o.profile,'$.status'),'')<>'manual_review'
-		AND (o.active=1 OR json_extract(o.profile,'$.remote.cancellationStatus') IN ('waiting','pending'))
+		WHERE ((COALESCE(json_extract(o.profile,'$.remote.id'),'')<>''
+		AND (COALESCE(json_extract(o.profile,'$.status'),'')<>'manual_review' OR json_extract(o.profile,'$.remote.automaticRunning')=1 OR json_extract(o.profile,'$.check_pending')=1)
+		AND (o.active=1 OR json_extract(o.profile,'$.remote.cancellationStatus') IN ('waiting','pending') OR json_extract(o.profile,'$.remote.automaticRunning')=1 OR json_extract(o.profile,'$.check_pending')=1))
+		OR (json_extract(o.profile,'$.provider')='xupay' AND json_extract(o.profile,'$.rate_limited')=1
+		AND COALESCE(json_extract(o.profile,'$.remote.id'),'')='' AND json_extract(o.profile,'$.status')='submission_unknown'
+		AND COALESCE(json_extract(o.profile,'$.rate_limit_retries'),0)<3 AND json_extract(o.profile,'$.next_status_check_at') IS NOT NULL))
 		AND COALESCE(json_extract(o.profile,'$.next_status_check_at'),'')<=?
 		AND NOT EXISTS (SELECT 1 FROM mail_accounts m WHERE m.email=o.email AND json_extract(m.profile,'$.pro_auto.status')='running')
 		ORDER BY COALESCE(json_extract(o.profile,'$.next_status_check_at'),''),o.created_at LIMIT ?`, now.UTC().Format(time.RFC3339Nano), limit)

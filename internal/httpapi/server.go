@@ -347,6 +347,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/gptpay/orders/query", s.queryGPTPayOrders)
 	mux.HandleFunc("POST /api/gptpay/orders/{id}/refresh", s.refreshGPTPayOrder)
 	mux.HandleFunc("POST /api/gptpay/orders/{id}/retry", s.retryGPTPayOrder)
+	mux.HandleFunc("POST /api/gptpay/orders/{id}/check", s.checkXUPayOrder)
 	mux.HandleFunc("POST /api/pro-accounts/{email}/recharge", s.createGPTPayOrder)
 	mux.HandleFunc("POST /api/pro-accounts/{email}/auto-pro", s.startProAutomation)
 	mux.HandleFunc("GET /api/pro-schedule", s.getProSchedule)

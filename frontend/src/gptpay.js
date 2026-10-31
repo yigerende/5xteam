@@ -28,7 +28,11 @@ export function catalogProPlans(catalog, provider = 'cmsnav') {
   })
 }
 export const payStatusName = status => ({ submitting: '正在提交', created: '已创建', processing: '开通中', success: '成功', failed: '失败', submission_unknown: '提交待确认', manual_review: '待人工核查', not_found: '未找到', not_applicable: '不适用', reserved: '已冻结', settled: '已结算', waiting: '等待取消续费', pending: '取消续费中' })[status] || status || '—'
-export const needsPayPoll = order => order?.status !== 'manual_review' && !!order?.remote?.id && (!['success', 'failed'].includes(order.status) || ['waiting', 'pending'].includes(order.remote.cancellationStatus))
+export const retryingRateLimit = order => order?.provider === 'xupay' && order.rate_limited && !order.remote?.id && order.status === 'submission_unknown' && (order.rate_limit_retries || 0) < 3 && !!order.next_status_check_at
+export const needsPayPoll = order => !!(retryingRateLimit(order) || order?.remote?.id && (order.check_pending || order.remote.automaticRunning || order.status !== 'manual_review' && (!['success', 'failed'].includes(order.status) || ['waiting', 'pending'].includes(order.remote.cancellationStatus))))
+export const canCheckXUPay = order => order?.provider === 'xupay' && !!order.remote?.id && !order.check_pending && !order.remote.automaticRunning && !(order.status_check_error && Date.parse(order.next_status_check_at) > Date.now()) && (order.remote.canCheck ?? ['review', 'action_required'].includes(order.remote.paymentState))
+export const payPollDelay = (order, now = Date.now()) => Math.min(2147483647, Math.max(now - Date.parse(order?.created_at) < 60000 ? 5000 : 15000, (Date.parse(order?.next_status_check_at) || now) - now))
+export const supplierAmountTitle = (remote, provider) => provider !== 'xupay' ? '供应商应付' : remote?.paymentAmountSource === 'charged' ? '已确认实收' : '付款报价'
 export const paymentRetryBlocked = order => order?.provider === 'xupay' ? order.remote?.paymentState === 'succeeded' || ['success', 'manual_review', 'submission_unknown'].includes(order.status) : order?.provider === 'cmsnav' && order.status === 'failed' && !(!order.remote?.id && ['API_KEY_INVALID','RESOURCE_FORBIDDEN','INSUFFICIENT_CREDITS','REQUEST_REJECTED','SESSION_INVALID','CHANNEL_UNAVAILABLE','CORS_ORIGIN_NOT_ALLOWED'].includes(order.remote?.errorCode)) && (order.remote?.retryable === false || order.remote?.failureCategory === 'payment_verification' || order.remote?.errorCode === 'PAYMENT_VERIFICATION_REQUIRED')
 export function supplierPaymentLabel(remote) {
   const currency = remote?.paymentCurrency

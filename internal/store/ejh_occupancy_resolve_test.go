@@ -4,6 +4,7 @@ import (
 	"chatgpt-space-merge/internal/ejh"
 	"chatgpt-space-merge/internal/gptpay"
 	"encoding/json"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -46,7 +47,7 @@ func TestEJHResolveDeletedOccupancy(t *testing.T) {
 					t.Fatal(got, err)
 				}
 				order, snapshot, err := s.GPTPayOrder(old.ID)
-				if err != nil || order.Active() || order.OccupancyResolution == nil || order.Remote != old.Remote || snapshot.Input.Number == "" {
+				if err != nil || order.Active() || order.OccupancyResolution == nil || !reflect.DeepEqual(order.Remote, old.Remote) || snapshot.Input.Number == "" {
 					t.Fatal(order, err)
 				}
 				cases, err := s.EJHCases()

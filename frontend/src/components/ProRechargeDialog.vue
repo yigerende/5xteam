@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 import { LoaderCircle, X } from 'lucide-vue-next'
 import { api } from '../api'
 import { supplierCredits, xupayStates, needsPayPoll, paymentRetryBlocked, supplierPaymentLabel, payRequestID, payStatusName, proPlanName, payProviderName, paymentCountryLabel } from '../gptpay'
+import XUPayOrderDetails from './XUPayOrderDetails.vue'
+import { canCheckXUPay, payPollDelay, supplierAmountTitle } from '../gptpay'
 import Pagination from './Pagination.vue'
 
 const props=defineProps({defaultPageSize:{type:Number,default:10}})
@@ -30,12 +32,19 @@ function newOrder() {
   if (!window.confirm(`上一次订单状态为“${payStatusName(order.value.status)}”。确认要为 ${email.value} 新建一次开通订单？`)) return
   order.value = null; requestID = payRequestID(); error.value = ''; clearTimeout(timer)
 }
-function schedule() { clearTimeout(timer); if (disposed || !opened.value || !needsPayPoll(order.value)) return; timer = setTimeout(() => refresh(), Date.now() - Date.parse(order.value.created_at) < 60000 ? 5000 : 15000) }
+function schedule() { clearTimeout(timer); if (disposed || !opened.value || !needsPayPoll(order.value)) return; timer = setTimeout(() => refresh(), payPollDelay(order.value)) }
 async function refresh() {
   if (busy.value || !order.value) { schedule(); return }
   const gen = generation; busy.value = true
   try { const value = await api(`/api/gptpay/orders/${encodeURIComponent(order.value.id)}/refresh`, { method: 'POST', body: {} }); if (disposed || gen !== generation) return; order.value = value; error.value = ''; emit('updated') }
   catch(e) { error.value = e.message }
+  finally { busy.value = false; schedule() }
+}
+async function checkOrder() {
+  if (busy.value || !canCheckXUPay(order.value)) return
+  busy.value = true; clearTimeout(timer)
+  try { order.value = await api(`/api/gptpay/orders/${encodeURIComponent(order.value.id)}/check`, { method: 'POST', body: {} }); error.value = ''; emit('updated') }
+  catch (e) { error.value = e.message }
   finally { busy.value = false; schedule() }
 }
 async function submit(retry = false) {
@@ -67,18 +76,19 @@ defineExpose({ open })
       <label class="field"><span>选择银行卡</span><select v-model="cardID" :disabled="busy"><option value="">{{autoCardEnabled ? `自动选卡（无可用卡时从 ${autoCardLabel} 补卡）` : '请选择已启用银行卡'}}</option><option v-for="card in cards" :key="card.id" :value="card.id">{{ card.name }} · 尾号 {{ card.last4 }} · {{ card.exp_year }}/{{ String(card.exp_month).padStart(2, '0') }} · 已开通 {{ card.opened_accounts ?? 0 }} · 剩余 {{ card.remaining_accounts ?? 0 }}</option></select></label>
       <Pagination v-if="total > 10" :page="page" :page-size="pageSize" :total="total" @update:page="changePage" @update:page-size="changeSize" />
       <p v-if="autoCardEnabled" class="muted">优先使用 {{autoCardLabel}} 可用卡，无卡可用则按该卡台模板和每日预算补卡。原订单重试不会另行开卡。</p><p v-else-if="!cards.length && !busy">暂无可选卡：请添加或启用银行卡，或到 Pro 全自动配置启用自动补卡。</p>
-      <p class="muted">将使用此账号已保存的 AT 和所选银行卡向 {{ payProviderName(settings.provider) }} 提交开通订单，费用按供应商配置扣除。</p>
+      <p class="muted">将使用此账号登录时保存的 Session 和所选银行卡向 {{ payProviderName(settings.provider) }} 提交开通订单，费用按供应商配置扣除。</p>
       <div class="panel-actions"><button class="btn ghost" :disabled="busy" @click="close">取消</button><button class="btn primary" :disabled="busy || (!chosen && !autoCardEnabled) || !settings.key_present || (['cmsnav', 'xupay'].includes(settings.provider) && !settings.terms_accepted)" @click="submit(false)"><LoaderCircle v-if="busy" class="spin" :size="15" />{{ busy ? '正在提交…' : '确认开通 ' + proPlanName(settings.plan_code) }}</button></div>
     </template>
     <template v-else>
       <h3 :class="{ 'danger-text': order.status === 'failed' }">{{ proPlanName(order.plan_code) }} · {{ payStatusName(order.status) }}</h3>
       <p>开通国家：{{ paymentCountryLabel(order.country || order.remote?.country) }}<span v-if="order.plan_code === 'codex_point'">；购买点数：{{ order.credit_quantity || order.remote?.creditQuantity }}</span></p>
-      <p>{{ payProviderName(order.provider) }}</p><dl><dt>订单编号</dt><dd>{{ order.remote?.orderNo || order.id }}</dd><dt>供应商订单 ID</dt><dd>{{ order.remote?.id || '尚未返回' }}</dd><dt>银行卡</dt><dd>{{ order.card_name }} · 尾号 {{ order.card_last4 }}</dd><dt>结算 / 取消续费</dt><dd>{{ payStatusName(order.remote?.settlementStatus) }} / {{ payStatusName(order.remote?.cancellationStatus) }}</dd><template v-if="['cmsnav', 'xupay'].includes(order.provider)"><dt>供应商应付</dt><dd>{{ supplierPaymentLabel(order.remote) }}</dd></template><dt>扣除服务费</dt><dd>{{ supplierCredits(order.remote?.chargedCredits, order.provider) }}</dd></dl>
-      <p v-if="order.provider === 'xupay'">{{ xupayStates(order.remote) }}</p><p v-if="order.status === 'manual_review'" class="danger-text">待人工核查，已停止自动轮询，请联系供应商处理。</p><p v-if="paymentRetryBlocked(order)" class="danger-text">禁止重复付款：{{ order.remote?.retryHint || '请先联系供应商处理，再查询原订单。' }}</p><p v-if="order.error" class="danger-text">{{ order.error }}</p>
+      <p>{{ payProviderName(order.provider) }}</p><dl><dt>订单编号</dt><dd>{{ order.remote?.orderNo || order.id }}</dd><dt>供应商订单 ID</dt><dd>{{ order.remote?.id || '尚未返回' }}</dd><dt>银行卡</dt><dd>{{ order.card_name }} · 尾号 {{ order.card_last4 }}</dd><dt>结算 / 取消续费</dt><dd>{{ payStatusName(order.remote?.settlementStatus) }} / {{ payStatusName(order.remote?.cancellationStatus) }}</dd><template v-if="['cmsnav', 'xupay'].includes(order.provider)"><dt>{{ supplierAmountTitle(order.remote, order.provider) }}</dt><dd>{{ supplierPaymentLabel(order.remote) }}</dd></template><dt>扣除服务费</dt><dd>{{ supplierCredits(order.remote?.chargedCredits, order.provider) }}</dd></dl>
+      <p v-if="order.provider === 'xupay'">{{ xupayStates(order.remote) }}</p><p v-if="order.status === 'manual_review' && !order.remote?.automaticRunning && !order.check_pending" class="danger-text">待人工核查，已停止自动轮询，请联系供应商处理。</p><p v-if="paymentRetryBlocked(order)" class="danger-text">禁止重复付款：{{ order.remote?.retryHint || '请先联系供应商处理，再查询原订单。' }}</p><p v-if="order.error" class="danger-text">{{ order.error }}</p>
       <p v-if="order.status_check_error" class="danger-text">订单同步：{{ order.status_check_error }}；{{ order.status === 'manual_review' ? '请人工查询。' : '后台会继续查询。' }}</p>
       <p v-if="order.status === 'success' && order.remote?.cancellationStatus === 'failed'" class="muted">Pro 已开通成功；取消续费失败单独记录，不影响开通完成状态。</p>
+      <XUPayOrderDetails :order="order" />
       <p v-if="needsPayPoll(order)" class="muted">后台正在定时同步订单；关闭窗口或重启服务后仍会继续查询。</p>
-      <div class="panel-actions"><button v-if="order.remote?.id" class="btn ghost" :disabled="busy" @click="refresh">查询状态</button><button v-else-if="!['success', 'failed', 'manual_review'].includes(order.status)" class="btn primary" :disabled="busy" @click="submit(true)">重试原订单</button><button v-if="['success', 'failed'].includes(order.status) && !needsPayPoll(order) && !paymentRetryBlocked(order)" class="btn ghost" :disabled="busy" @click="newOrder">新建开通</button><button class="btn ghost" :disabled="busy" @click="close">关闭</button></div>
+      <div class="panel-actions"><button v-if="canCheckXUPay(order)" class="btn ghost" :disabled="busy" @click="checkOrder">核实原单</button><button v-if="order.remote?.id" class="btn ghost" :disabled="busy" @click="refresh">查询状态</button><button v-else-if="!order.rate_limited && !['success', 'failed', 'manual_review'].includes(order.status)" class="btn primary" :disabled="busy" @click="submit(true)">重试原订单</button><button v-if="['success', 'failed'].includes(order.status) && !needsPayPoll(order) && !paymentRetryBlocked(order)" class="btn ghost" :disabled="busy" @click="newOrder">新建开通</button><button class="btn ghost" :disabled="busy" @click="close">关闭</button></div>
     </template>
   </section></div></Teleport>
 </template>

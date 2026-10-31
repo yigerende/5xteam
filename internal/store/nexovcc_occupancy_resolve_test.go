@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -68,7 +69,7 @@ func TestNexovccResolveDeletedOccupancy(t *testing.T) {
 					t.Fatal("repeat released new reservation", local)
 				}
 				order, snapshot, err := s.GPTPayOrder(o.Order.ID)
-				if err != nil || order.OccupancyResolution == nil || snapshot.Input.Number == "" || order.Remote != o.Order.Remote {
+				if err != nil || order.OccupancyResolution == nil || snapshot.Input.Number == "" || !reflect.DeepEqual(order.Remote, o.Order.Remote) {
 					t.Fatal("lost original evidence", order, err)
 				}
 				var raw string

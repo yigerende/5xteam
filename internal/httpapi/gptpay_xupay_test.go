@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestXUPayEndToEndOriginalOrderAndPaidFence(t *testing.T) {
@@ -42,6 +43,7 @@ func TestXUPayEndToEndOriginalOrderAndPaidFence(t *testing.T) {
 			w.WriteHeader(503)
 			fmt.Fprint(w, `{"error":"fixture upstream timeout"}`)
 		case 2:
+			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(429)
 			fmt.Fprint(w, `{"error":"rate limited before idempotency lookup"}`)
 		default:
@@ -78,6 +80,7 @@ func TestXUPayEndToEndOriginalOrderAndPaidFence(t *testing.T) {
 	if o.Status != "submission_unknown" || posts != 2 {
 		t.Fatal("429 on replay released uncertain charge", o)
 	}
+	time.Sleep(time.Until(*o.NextStatusCheckAt) + 10*time.Millisecond)
 	o = payOrder(t, payCall(t, s.retryGPTPayOrder, "id", o.ID, map[string]any{}))
 	if o.Status != "processing" || o.Remote.ID != "xupay-order" {
 		t.Fatal(o)

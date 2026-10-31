@@ -451,7 +451,13 @@ func (s *Server) submitGPTPayOrder(ctx context.Context, order gptpay.Order, snap
 }
 
 func (s *Server) submitGPTPayOrderWithAdmission(ctx context.Context, order gptpay.Order, snapshot gptpay.Snapshot, admit func() error) (gptpay.Order, error) {
-	previouslySubmitted := order.SubmissionStarted
+	previouslyUncertain := order.SubmissionUncertain || (order.SubmissionStarted && !order.RateLimited)
+	if order.RateLimited {
+		if !order.CanRetryRateLimit() || order.NextStatusCheckAt.After(time.Now()) {
+			return order, nil
+		}
+		order.RateLimitRetries++
+	}
 	s.updateProPaymentStage(order)
 	ctx, cancel := context.WithTimeout(ctx, 50*time.Second)
 	defer cancel()
@@ -460,11 +466,12 @@ func (s *Server) submitGPTPayOrderWithAdmission(ctx context.Context, order gptpa
 			return order, err
 		}
 	}
-	if snapshot.Provider == gptpay.XUPay && !order.SubmissionStarted {
+	if snapshot.Provider == gptpay.XUPay {
 		// A later replay can be rejected before XUPay reaches its idempotency
 		// lookup (expired session, rate limit, changed key). Persist first entry
 		// before I/O so that such a response cannot erase an earlier charge.
 		order.SubmissionStarted = true
+		order.SubmissionUncertain = true // A crash during this attempt leaves its outcome unknown.
 		if err := s.store.UpdateGPTPayOrder(order); err != nil {
 			return order, fmt.Errorf("保存序付提交标记失败，未发送付款请求")
 		}
@@ -475,10 +482,23 @@ func (s *Server) submitGPTPayOrderWithAdmission(ctx context.Context, order gptpa
 	if err != nil {
 		order.Status = "submission_unknown"
 		var apiErr *gptpay.APIError
-		if errors.As(err, &apiErr) && !apiErr.Uncertain && !(snapshot.Provider == gptpay.XUPay && previouslySubmitted) {
+		if errors.As(err, &apiErr) && !apiErr.Uncertain && !(snapshot.Provider == gptpay.XUPay && previouslyUncertain) {
 			order.Status = "failed"
 		}
 		order.Error = err.Error()
+		order.SubmissionUncertain = previouslyUncertain || apiErr == nil || apiErr.Uncertain
+		order.RateLimited = gptpay.XUPayRetryAfter(err) > 0
+		order.NextStatusCheckAt = nil
+		if order.RateLimited {
+			order.Status = "submission_unknown"
+			if order.RateLimitRetries < gptpay.XUPayRateLimitRetries {
+				next := time.Now().UTC().Add(gptpay.XUPayRetryAfter(err))
+				order.NextStatusCheckAt = &next
+				order.Error = fmt.Sprintf("序付接口限流，等待后重试原订单（已自动重试 %d/%d 次）", order.RateLimitRetries, gptpay.XUPayRateLimitRetries)
+			} else {
+				order.Error = "序付接口限流，3 次自动重试已用尽；原任务已保留，未切换账号，请稍后核实"
+			}
+		}
 		if apiErr != nil && (snapshot.Provider == gptpay.CMSNav || snapshot.Provider == gptpay.XUPay) {
 			order.Remote.Retryable = apiErr.Retryable
 			order.Remote.RetryHint = gptpay.Redact(apiErr.RetryHint, snapshot)
@@ -488,6 +508,8 @@ func (s *Server) submitGPTPayOrderWithAdmission(ctx context.Context, order gptpa
 			}
 		}
 	} else {
+		order.RateLimited, order.SubmissionUncertain, order.NextStatusCheckAt = false, false, nil
+		gptpay.SanitizeXUPayRemote(&remote, snapshot)
 		order.Remote = remote
 		order.Status = remote.Status
 		order.Error = remote.FailureReason
@@ -601,6 +623,7 @@ func (s *Server) queryGPTPayOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range items {
+		gptpay.SanitizeXUPayRemote(&items[i], gptpay.Snapshot{APIKey: key})
 		items[i].FailureReason = gptpay.Redact(items[i].FailureReason, gptpay.Snapshot{APIKey: key})
 		items[i].RetryHint = gptpay.Redact(items[i].RetryHint, gptpay.Snapshot{APIKey: key})
 	}

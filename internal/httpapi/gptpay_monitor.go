@@ -94,6 +94,10 @@ func (s *Server) pollGPTPayOrder(ctx context.Context, o gptpay.Order, now time.T
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
+	if o.CanRetryRateLimit() {
+		_, _ = s.submitGPTPayOrder(queryCtx, o, snapshot)
+		return
+	}
 	_, _ = s.syncGPTPayOrderStatus(queryCtx, o, snapshot)
 }
 
@@ -101,6 +105,9 @@ func (s *Server) pollGPTPayOrder(ctx context.Context, o gptpay.Order, now time.T
 // Cancellation is separate from purchase success and cannot hold up Pro steps.
 func (s *Server) syncGPTPayOrderStatus(ctx context.Context, o gptpay.Order, snapshot gptpay.Snapshot) (gptpay.Order, error) {
 	before := o
+	if snapshot.Provider == gptpay.XUPay && o.StatusCheckError != "" && o.NextStatusCheckAt != nil && o.NextStatusCheckAt.After(time.Now()) {
+		return o, nil
+	}
 	items, err := s.gptPayClient().StatusForProvider(ctx, snapshot.Provider, snapshot.URL, snapshot.APIKey, []string{o.Remote.ID})
 	if err == nil {
 		found := false
@@ -117,11 +124,13 @@ func (s *Server) syncGPTPayOrderStatus(ctx context.Context, o gptpay.Order, snap
 				err = errors.New("供应商返回未知订单状态，原订单已保留")
 				break
 			}
+			o.CheckPending = false
 			if !o.Active() && remote.Status != o.Status {
 				break
 			}
 			remote.FailureReason = gptpay.Redact(remote.FailureReason, snapshot)
 			remote.RetryHint = gptpay.Redact(remote.RetryHint, snapshot)
+			gptpay.SanitizeXUPayRemote(&remote, snapshot)
 			o.Remote, o.Status, o.Error = remote, remote.Status, remote.FailureReason
 			break
 		}
@@ -138,13 +147,16 @@ func (s *Server) syncGPTPayOrderStatus(ctx context.Context, o gptpay.Order, snap
 	if err != nil {
 		o.StatusCheckError = gptpay.Redact(err.Error(), snapshot)
 	}
-	if o.NeedsStatusPoll() {
+	if o.NeedsStatusPoll() || gptpay.XUPayRetryAfter(err) > 0 {
 		delay := 15 * time.Second
 		if now.Sub(o.CreatedAt) < time.Minute {
 			delay = 5 * time.Second
 		}
 		if err != nil || !o.Active() {
 			delay = time.Minute
+		}
+		if retry := gptpay.XUPayRetryAfter(err); retry > 0 {
+			delay = retry
 		}
 		next := now.Add(delay)
 		o.NextStatusCheckAt = &next

@@ -37,7 +37,7 @@ func configureProAutoFixture(t *testing.T, s *Server) {
 }
 func waitProAutoFinished(t *testing.T, s *Server, email string) model.MailAccountProfile {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(12 * time.Second)
 	for time.Now().Before(deadline) {
 		s.proAutoMu.Lock()
 		preparing := len(s.proRestockStartJobs) > 0
@@ -65,6 +65,7 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 		cancellation string
 		cmsnav       bool
 		xupay        bool
+		running      bool
 		plan         string
 		quantity     int
 	}{
@@ -87,11 +88,13 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 		{name: "cmsnav_pro50_uncertain", cmsnav: true, status: "failed", paymentCode: 503},
 		{name: "xupay_pro20_complete", xupay: true, status: "completed", quota: 100},
 		{name: "xupay_pro5_complete", xupay: true, plan: "pro5", status: "completed", quota: 100},
+		{name: "xupay_running_review", xupay: true, running: true, status: "completed", quota: 100, cancellation: "review"},
 		{name: "xupay_cancel_failed", xupay: true, status: "completed", quota: 100, cancellation: "review"},
 		{name: "xupay_uncertain", xupay: true, status: "failed", paymentCode: 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var purchases, logins, pushes, merges atomic.Int32
+			var xupayReads atomic.Int32
 			var verifyInitialSaved func()
 			s, st, email := gptPayFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				verifyInitialSaved()
@@ -104,6 +107,10 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 						t.Error("wrong XUPay key")
 					}
 					if r.Method == "GET" {
+						if tc.running && xupayReads.Add(1) == 1 {
+							fmt.Fprintf(w, `{"order":{"id":"auto-remote","product_id":%q,"workflow":"subscription","status":"review","activation":"review","renewal":"review"},"payment":{"state":"succeeded","automatic_running":true,"fee_state":"charged"}}`, product)
+							return
+						}
 						renewal := "disabled"
 						if tc.cancellation != "" {
 							renewal = tc.cancellation

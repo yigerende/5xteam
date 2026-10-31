@@ -42,7 +42,7 @@ func TestCMSNavPurchaseConsentAndRetryAdmission(t *testing.T) {
 	if err := st.UpdateGPTPayOrder(old); err != nil {
 		t.Fatal(err)
 	}
-	if rec := payCall(t, s.createGPTPayOrder, "email", email, input); rec.Code != 409 || !strings.Contains(rec.Body.String(), "不允许重试") || calls.Load() != 0 {
+	if rec := payCall(t, s.createGPTPayOrder, "email", email, input); rec.Code != 409 || !strings.Contains(rec.Body.String(), "不允许重新付款") || calls.Load() != 0 {
 		t.Fatalf("denied retry created purchase: %s", rec.Body.String())
 	}
 	yes := true

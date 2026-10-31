@@ -772,6 +772,19 @@ func (s *Server) proAutoRPC(ctx context.Context, email string, cfg gptpay.Settin
 			return nil, err
 		}
 		for {
+			if order.RateLimited {
+				if !order.CanRetryRateLimit() {
+					return nil, errors.New(order.Error)
+				}
+				if err = waitProAuto(ctx, max(time.Second, time.Until(*order.NextStatusCheckAt))); err != nil {
+					return nil, err
+				}
+				order, err = s.submitGPTPayOrder(ctx, order, snap)
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
 			if order.Status == "success" {
 				break
 			}
@@ -791,8 +804,18 @@ func (s *Server) proAutoRPC(ctx context.Context, email string, cfg gptpay.Settin
 			if s.proAutoHooks != nil && s.proAutoHooks.PollDelay > 0 {
 				delay = s.proAutoHooks.PollDelay
 			}
+			if snap.Provider == gptpay.XUPay && order.NextStatusCheckAt != nil {
+				delay = max(delay, time.Until(*order.NextStatusCheckAt))
+			}
 			if err = waitProAuto(ctx, delay); err != nil {
 				return nil, errors.New("开通等待超时或流程已停止；请查询原订单，禁止重复付款")
+			}
+			if snap.Provider == gptpay.XUPay {
+				order, err = s.syncGPTPayOrderStatus(ctx, order, snap)
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				continue
 			}
 			items, e := s.gptPayClient().StatusForProvider(ctx, snap.Provider, snap.URL, snap.APIKey, []string{order.Remote.ID})
 			if e != nil {

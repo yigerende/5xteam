@@ -3,15 +3,46 @@ package gptpay
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// Share a supplier cooldown across orders using the same saved API credentials.
+// Orders also persist their next check time so restarts cannot erase the delay.
+var xupayCooldowns = struct {
+	sync.Mutex
+	until map[[32]byte]time.Time
+}{until: map[[32]byte]time.Time{}}
+
+func XUPayRetryAfter(err error) time.Duration {
+	var e *APIError
+	if errors.As(err, &e) && e.Provider == XUPay && e.HTTPStatus == 429 {
+		if e.RetryAfter > 0 {
+			return e.RetryAfter
+		}
+		return time.Minute
+	}
+	return 0
+}
+
+func xupayRetryDelay(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 32); err == nil && seconds >= 0 {
+		return max(time.Second, time.Duration(seconds)*time.Second)
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return time.Minute
+}
 
 func XUPayCountry(country string) bool {
 	switch country {
@@ -65,6 +96,20 @@ func (e *APIError) xupayMessage() string {
 // XUPay uses a direct JSON body, not the GPTPay code/data envelope. Never
 // propagate arbitrary response text: it may contain credentials or card data.
 func (c *Client) xupayCall(ctx context.Context, base, key, method, path, idem string, input, output any) error {
+	identity := sha256.Sum256([]byte(base + "\x00" + key))
+	xupayCooldowns.Lock()
+	now := time.Now()
+	for id, at := range xupayCooldowns.until {
+		if !at.After(now) {
+			delete(xupayCooldowns.until, id)
+		}
+	}
+	delay := time.Until(xupayCooldowns.until[identity])
+	xupayCooldowns.Unlock()
+	if delay > 0 {
+		return &APIError{Provider: XUPay, HTTPStatus: 429, ErrorCode: "RATE_LIMITED", RetryAfter: delay}
+	}
+	delay = 0
 	var body []byte
 	var err error
 	if input != nil {
@@ -87,9 +132,17 @@ func (c *Client) xupayCall(ctx context.Context, base, key, method, path, idem st
 	}
 	res, err := c.HTTP.Do(req)
 	if err != nil {
-		return &APIError{Provider: XUPay, ErrorCode: "NETWORK_ERROR", Uncertain: idem != ""}
+		return &APIError{Provider: XUPay, ErrorCode: "NETWORK_ERROR", Uncertain: method == http.MethodPost}
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusTooManyRequests {
+		delay = xupayRetryDelay(res.Header.Get("Retry-After"), time.Now())
+		xupayCooldowns.Lock()
+		if until := time.Now().Add(delay); until.After(xupayCooldowns.until[identity]) {
+			xupayCooldowns.until[identity] = until
+		}
+		xupayCooldowns.Unlock()
+	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
 	var object map[string]json.RawMessage
 	valid := err == nil && len(raw) <= 1<<20 && json.Unmarshal(raw, &object) == nil && object != nil
@@ -101,10 +154,10 @@ func (c *Client) xupayCall(ctx context.Context, base, key, method, path, idem st
 		// A conflict may refer to a previously accepted payment. An unreadable
 		// error or a server/network failure must retain the card reservation.
 		definite := valid && len(object["error"]) > 0 && (res.StatusCode == 400 || res.StatusCode == 401 || res.StatusCode == 402 || res.StatusCode == 403 || res.StatusCode == 429)
-		return &APIError{Provider: XUPay, HTTPStatus: res.StatusCode, ErrorCode: code, Uncertain: idem != "" && !definite}
+		return &APIError{Provider: XUPay, HTTPStatus: res.StatusCode, ErrorCode: code, Uncertain: method == http.MethodPost && !definite, RetryAfter: delay}
 	}
 	if err = json.Unmarshal(raw, output); err != nil {
-		return &APIError{Provider: XUPay, HTTPStatus: res.StatusCode, ErrorCode: "INVALID_RESPONSE", Uncertain: idem != ""}
+		return &APIError{Provider: XUPay, HTTPStatus: res.StatusCode, ErrorCode: "INVALID_RESPONSE", Uncertain: method == http.MethodPost}
 	}
 	return nil
 }
@@ -139,6 +192,11 @@ func (c *Client) createXUPay(ctx context.Context, s Snapshot, id string) (Remote
 var xupayOrderID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 type xupayDetail struct {
+	Events []struct {
+		Stage     string `json:"stage"`
+		Message   string `json:"message"`
+		CreatedAt string `json:"created_at"`
+	} `json:"events"`
 	Order struct {
 		ID         string `json:"id"`
 		Product    string `json:"product_id"`
@@ -153,14 +211,17 @@ type xupayDetail struct {
 		UpdatedAt  string `json:"updated_at"`
 	} `json:"order"`
 	Payment struct {
-		State           string `json:"state"`
-		FeeState        string `json:"fee_state"`
-		Amount          *int64 `json:"amount"`
-		Currency        string `json:"currency"`
-		ChargedAmount   *int64 `json:"charged_amount"`
-		ChargedCurrency string `json:"charged_currency"`
-		Last4           string `json:"last4"`
-		ErrorCode       string `json:"error_code"`
+		AutomaticRunning bool   `json:"automatic_running"`
+		CanCheck         *bool  `json:"can_check"`
+		Message          string `json:"message"`
+		State            string `json:"state"`
+		FeeState         string `json:"fee_state"`
+		Amount           *int64 `json:"amount"`
+		Currency         string `json:"currency"`
+		ChargedAmount    *int64 `json:"charged_amount"`
+		ChargedCurrency  string `json:"charged_currency"`
+		Last4            string `json:"last4"`
+		ErrorCode        string `json:"error_code"`
 	} `json:"payment"`
 }
 
@@ -171,6 +232,14 @@ func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 		return RemoteOrder{}, &APIError{Provider: XUPay, ErrorCode: "INVALID_RESPONSE"}
 	}
 	r := RemoteOrder{ID: id, Status: "processing", PlanCode: plan, Country: o.Country, TargetEmail: o.Email, CardLast4: p.Last4, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt, PaymentState: p.State, ActivationStatus: o.Activation, CreditUnit: "cent_R"}
+	r.AutomaticRunning, r.CanCheck = p.AutomaticRunning, p.CanCheck
+	if regexp.MustCompile(`^[a-z0-9_]{1,80}$`).MatchString(p.ErrorCode) {
+		r.ErrorCode = p.ErrorCode
+	}
+	r.Message = xupayScrubText(p.Message)
+	for _, event := range v.Events[max(0, len(v.Events)-20):] {
+		r.Events = append(r.Events, PaymentEvent{Stage: xupayScrubText(event.Stage), Message: xupayScrubText(event.Message), CreatedAt: xupayScrubText(event.CreatedAt)})
+	}
 	switch p.FeeState {
 	case "held":
 		r.SettlementStatus, r.ReservedCredits = "reserved", o.Fee
@@ -204,16 +273,28 @@ func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 		case "pending":
 			r.Status = "processing"
 		default:
-			r.Status, r.FailureReason = "manual_review", "序付已确认付款成功，订阅生效待核实；禁止再次付款，请在序付支付全监控核查"
+			if !p.AutomaticRunning {
+				r.Status, r.FailureReason = "manual_review", "序付已确认付款成功，订阅生效待核实；禁止再次付款，请核实原订单"
+			}
 		}
 	case p.State == "review" || p.State == "action_required" || o.Status == "review" || o.Status == "succeeded" || p.FeeState == "charged":
-		r.Status, r.FailureReason = "manual_review", "序付付款结果或额外验证待核实；保留原订单，请在序付支付全监控核查"
+		if !p.AutomaticRunning {
+			r.Status, r.FailureReason = "manual_review", "序付付款结果或额外验证待核实；保留原订单，请核实原订单"
+		}
 	case p.State == "failed" || p.State == "cancelled" || ((o.Status == "failed" || o.Status == "cancelled") && p.State == ""):
-		r.Status, r.FailureReason, r.CancellationStatus = "failed", "序付确认本次办理失败，未确认付款成功；请在序付支付全监控查看原因", "not_applicable"
+		if !p.AutomaticRunning {
+			r.Status, r.FailureReason, r.CancellationStatus = "failed", "序付确认本次办理失败，未确认付款成功；请在序付支付全监控查看原因", "not_applicable"
+		}
 	case p.State == "preparing" || p.State == "quoted" || p.State == "submitting" || p.State == "checking":
 	case p.State == "" && (o.Status == "queued" || o.Status == "processing" || o.Status == "awaiting_payment"):
 	default:
 		return RemoteOrder{}, &APIError{Provider: XUPay, ErrorCode: "INVALID_RESPONSE"}
+	}
+	if p.AutomaticRunning && o.Renewal == "review" {
+		r.CancellationStatus = "pending"
+	}
+	if r.Status == "failed" && r.ErrorCode != "" {
+		r.FailureReason += "（" + r.ErrorCode + "）"
 	}
 	if r.Status == "success" && r.CancellationStatus == "failed" {
 		r.RetryHint = "订阅已生效，取消自动续费失败；请在序付续费管理接续处理，不得重复付款"
@@ -224,6 +305,82 @@ func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 		r.FailureCategory = "payment_confirmation"
 	}
 	return r, nil
+}
+
+func (c *Client) CheckXUPay(ctx context.Context, base, key, id string) error {
+	if !xupayOrderID.MatchString(id) {
+		return fmt.Errorf("序付订单 ID 格式不正确")
+	}
+	var response struct {
+		Accepted bool `json:"accepted"`
+	}
+	if err := c.xupayCall(ctx, base, key, "POST", "/orders/"+id+"/payment/check", "", map[string]any{}, &response); err != nil {
+		return err
+	}
+	if !response.Accepted {
+		return &APIError{Provider: XUPay, ErrorCode: "INVALID_RESPONSE", Uncertain: true}
+	}
+	return nil
+}
+
+var xupayPublicSecrets = regexp.MustCompile(`(?i)(?:bearer\s+[^\s"'<>]+|(?:access[_-]?token|session[_-]?token|refresh[_-]?token|cookies?|authorization|api[_-]?key|cvc|cvv|password)["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)|__Secure-(?:next-auth|platform)\.session-token(?:\.[0-9]+)?=[^\s;]+|eyJ[A-Za-z0-9_.-]{20,}|(?:\d[ -]?){12,19})`)
+
+func xupayScrubText(value string) string {
+	value = xupayPublicSecrets.ReplaceAllString(value, "[已隐藏]")
+	value = strings.Map(func(r rune) rune {
+		if r < 32 && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, value)
+	return value
+}
+
+func xupayPublicText(value string) string {
+	value = xupayScrubText(value)
+	runes := []rune(value)
+	if len(runes) > 1000 {
+		value = string(runes[:1000]) + "…"
+	}
+	return value
+}
+
+func SanitizeXUPayRemote(r *RemoteOrder, snapshot Snapshot) {
+	// Remove known raw session credentials even if the supplier echoes only a
+	// cookie value without its field name. Never expose the raw session itself.
+	secrets := []string{}
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(snapshot.Input.Session.Raw, &raw)
+	for key, encoded := range raw {
+		lower := strings.ToLower(key)
+		if !strings.Contains(lower, "token") && !strings.Contains(lower, "cookie") {
+			continue
+		}
+		var value string
+		if json.Unmarshal(encoded, &value) != nil || value == "" {
+			continue
+		}
+		secrets = append(secrets, value)
+		if lower == "cookies" {
+			for _, cookie := range (&http.Request{Header: http.Header{"Cookie": {value}}}).Cookies() {
+				if cookie.Value != "" {
+					secrets = append(secrets, cookie.Value)
+				}
+			}
+		}
+	}
+	clean := func(value string) string {
+		for _, secret := range secrets {
+			value = strings.ReplaceAll(value, secret, "[已隐藏]")
+		}
+		return xupayPublicText(Redact(value, snapshot))
+	}
+	r.Message = clean(r.Message)
+	for i := range r.Events {
+		r.Events[i].Message = clean(r.Events[i].Message)
+		r.Events[i].Stage = clean(r.Events[i].Stage)
+		r.Events[i].CreatedAt = clean(r.Events[i].CreatedAt)
+	}
 }
 
 func (c *Client) statusXUPay(ctx context.Context, base, key string, ids []string) ([]RemoteOrder, error) {

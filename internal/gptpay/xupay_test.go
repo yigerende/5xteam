@@ -131,7 +131,7 @@ func TestXUPayWalletCatalogStatusAndErrorPrivacy(t *testing.T) {
 		case "/api/v1/catalog":
 			fmt.Fprint(w, `{"unit":"cent_R","payment_connected":true,"countries":[{"code":"PH","name":"菲律宾","currency":"PHP"}],"items":[{"id":"pro5x","name":"Pro 5x","member_fee":123},{"id":"pro","name":"Pro 20x","member_fee":456},{"id":"team","member_fee":789}]}`)
 		case "/api/v1/orders/order-1":
-			fmt.Fprint(w, `{"order":{"id":"order-1","product_id":"pro","workflow":"subscription","status":"succeeded","activation":"active","renewal":"disabled","fee":456},"payment":{"state":"succeeded","fee_state":"charged","amount":20000,"currency":"USD"},"events":[{"message":"DO-NOT-EXPOSE-raw-secret"}]}`)
+			fmt.Fprint(w, `{"order":{"id":"order-1","product_id":"pro","workflow":"subscription","status":"succeeded","activation":"active","renewal":"disabled","fee":456},"payment":{"state":"succeeded","fee_state":"charged","amount":20000,"currency":"USD"},"events":[{"stage":"payment","message":"付款核实中 accessToken=DO-NOT-EXPOSE-raw-secret"}]}`)
 		default:
 			w.WriteHeader(404)
 			fmt.Fprint(w, `{"error":"DO-NOT-EXPOSE-raw-secret"}`)
