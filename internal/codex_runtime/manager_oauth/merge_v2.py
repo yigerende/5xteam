@@ -33,6 +33,58 @@ class TeamProtocolLogin(ProjectProtocolLogin):
         self.team_session = None
         self.workspace_selected = False
 
+    def inspect_login_step(self, step, phase):
+        # Missing continuation is not evidence that an email code is required.
+        data = step if isinstance(step, dict) else {}
+        page = self.extract_page_type(data).lower()
+        url = self.normalize_auth_url(self.extract_continue_url(data))
+        self.raise_if_passkey_or_challenge(data, url)
+        email_code = page == "email_otp_verification" or "/email-verification" in url.lower()
+        if email_code:
+            if not upstream.login_payload_has_pickup_link(self.payload):
+                # This is an alternative *primary* login method, before any
+                # password/MFA verification. Only restart the ordinary login
+                # when it selected email passwordless despite password+TOTP
+                # credentials. Never apply this to a post-password challenge.
+                if (phase == "identifier" and page == "email_otp_verification"
+                        and self.extract_email_verification_mode(data) == "passwordless_login"
+                        and self.payload.get("selected_login_mode") == "password_totp"
+                        and self.payload.get("password") and self.payload.get("_totp_secret")
+                        and not data.get("error")):
+                    raise upstream.LoginFlowError(
+                        "登录入口返回邮箱免密方式，与已配置的密码和2FA方式不一致，等待按配置重新登录",
+                        code="password_login_restart_required", retryable=False,
+                    )
+                raise upstream.LoginFlowError(
+                    "本次登录要求邮箱验证码，但账号未配置收码链接；请补充收码来源后续跑",
+                    code="email_code_source_missing", retryable=False,
+                )
+            return
+        if not url and page not in {"login_password", "mfa_challenge"}:
+            incomplete = not page and not data.get("error") and not self.needs_phone_verification(data)
+            raise upstream.LoginFlowError(
+                "登录响应缺少下一步，等待按配置重新登录" if incomplete else "登录返回未支持的验证步骤，请检查账号登录要求",
+                code="login_response_incomplete" if incomplete else "login_step_unsupported",
+                retryable=incomplete,
+            )
+
+    def complete_modern_login(self, step, password, issued_after):
+        self.inspect_login_step(step, "identifier")
+        try:
+            return super().complete_modern_login(step, password, issued_after)
+        except RuntimeError as exc:
+            if str(exc) != "no verification code was found in local mailbox credentials":
+                raise
+            raise upstream.LoginFlowError(
+                "已按收码流程查收，但未取得邮箱验证码；请检查收码来源后续跑",
+                code="email_code_unavailable", retryable=False,
+            ) from None
+
+    def submit_modern_password(self, password):
+        step = super().submit_modern_password(password)
+        self.inspect_login_step(step, "password")
+        return step
+
     def trace(self, event, message, **details):
         # Only structural evidence, never an AT, cookie or callback query.
         bridge.emit("merge_v2_team", event, message, details=details)

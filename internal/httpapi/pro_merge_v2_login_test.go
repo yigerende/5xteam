@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"chatgpt-space-merge/internal/gptpay"
 	"chatgpt-space-merge/internal/model"
 )
 
@@ -27,6 +28,62 @@ func mergeV2RecoveryFixture(t *testing.T) (*proExecutionFixture, model.MailAccou
 
 func teamMismatchResult() map[string]any {
 	return map[string]any{"success": false, "retryable": false, "error_code": "team_session_mismatch", "error": "team mismatch"}
+}
+
+func TestProMergeV2IncompleteLoginUsesConfiguredRetryBudget(t *testing.T) {
+	checkProMergeV2ConfiguredLoginRetry(t, "login_response_incomplete", true)
+}
+
+func TestProMergeV2PasswordlessEntryUsesConfiguredRetryBudget(t *testing.T) {
+	checkProMergeV2ConfiguredLoginRetry(t, "password_login_restart_required", false)
+}
+
+func checkProMergeV2ConfiguredLoginRetry(t *testing.T, code string, retryable bool) {
+	for _, retries := range []int{0, 2} {
+		for _, recover := range []bool{false, true} {
+			f, p, ctx := mergeV2RecoveryFixture(t)
+			cfg, _, _, _ := f.s.store.ProSettings()
+			cfg.RetryCount, cfg.RetryIntervalSeconds = retries, 17
+			if _, _, err := f.s.store.SaveProAutomationSettings(cfg, gptpay.Settings{PlanCode: "pro5"}, ""); err != nil {
+				t.Fatal(err)
+			}
+			calls, waits := 0, 0
+			f.s.proMergeV2Login = func(ctx context.Context, email string) (map[string]any, error) {
+				calls++
+				if email != f.email {
+					t.Fatal("changed original account")
+				}
+				if recover && calls == 2 {
+					return mockMergeV2Submit(ctx)
+				}
+				return map[string]any{"success": false, "error_code": code, "retryable": retryable}, nil
+			}
+			result, err := f.s.loginProMergeV2(ctx, p, "sub2api", func(_ context.Context, d time.Duration) error {
+				waits++
+				if d != 17*time.Second {
+					t.Fatal("configuration ignored", d)
+				}
+				latest, _, _ := f.s.store.MailAccountCredential(f.email)
+				if latest.ProMergeV2.SubmittedAt != nil || latest.ProMergeV2.Steps["invite"] != "completed" {
+					t.Fatal("retry changed checkpoints")
+				}
+				return nil
+			})
+			want := retries + 1
+			if recover && retries > 0 {
+				want = 2
+			}
+			if err != nil || calls != want || waits != want-1 {
+				t.Fatal(result, err, calls, waits)
+			}
+			if (result["success"] == true) != (recover && retries > 0) {
+				t.Fatal(result)
+			}
+			if f.calls["invite"] != 0 || f.calls["remove"] != 0 {
+				t.Fatal("repeated invitation or cleanup")
+			}
+		}
+	}
 }
 
 func TestProMergeV2RecoveryCompletesTailWithoutReinvite(t *testing.T) {
@@ -168,7 +225,7 @@ func TestProMergeV2TeamRecoveryBudgetAndSuccess(t *testing.T) {
 }
 
 func TestProMergeV2TeamRecoveryNeverRetriesOtherErrorsOrSubmitted(t *testing.T) {
-	for _, mode := range []string{"identity", "dead", "network", "run_error", "submitted", "accepted"} {
+	for _, mode := range []string{"identity", "dead", "network", "run_error", "submitted", "accepted", "email_code_source_missing", "email_code_unavailable", "submitted_incomplete", "submitted_passwordless"} {
 		t.Run(mode, func(t *testing.T) {
 			f, p, ctx := mergeV2RecoveryFixture(t)
 			calls := 0
@@ -183,9 +240,18 @@ func TestProMergeV2TeamRecoveryNeverRetriesOtherErrorsOrSubmitted(t *testing.T) 
 				case "network":
 					result["error_code"] = "network_error"
 					result["retryable"] = true
+				case "email_code_source_missing", "email_code_unavailable":
+					result["error_code"] = mode
+					result["retryable"] = false
 				case "run_error":
 					return result, errors.New("child exited")
-				case "submitted", "accepted":
+				case "submitted", "accepted", "submitted_incomplete", "submitted_passwordless":
+					if mode == "submitted_incomplete" {
+						result["error_code"], result["retryable"] = "login_response_incomplete", true
+					}
+					if mode == "submitted_passwordless" {
+						result["error_code"], result["retryable"] = "password_login_restart_required", false
+					}
 					o := ctx.Value(mergeV2LoginKey{}).(*mergeV2LoginOptions)
 					for _, method := range []string{"merge_v2_ready", "merge_v2_submitting"} {
 						if _, err := o.Call(method, map[string]any{"team_id": o.TeamID, "user_id": "pro-user"}); err != nil {
@@ -204,7 +270,7 @@ func TestProMergeV2TeamRecoveryNeverRetriesOtherErrorsOrSubmitted(t *testing.T) 
 			if calls != 1 {
 				t.Fatal(calls)
 			}
-			if mode == "submitted" && !errors.Is(err, errMergeV2Unknown) {
+			if (mode == "submitted" || mode == "submitted_incomplete" || mode == "submitted_passwordless") && !errors.Is(err, errMergeV2Unknown) {
 				t.Fatal(err)
 			}
 			if mode == "accepted" && (err != nil || result["success"] != true) {

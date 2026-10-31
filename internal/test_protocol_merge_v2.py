@@ -1,5 +1,7 @@
 """Offline protocol contracts; never sends an account mutation to OpenAI."""
 import base64
+import contextlib
+import io
 import json
 import sys
 import time
@@ -9,6 +11,8 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent / "codex_runtime"))
 from manager_oauth import adapter, merge_v2, upstream
+from manager_oauth.adapter import ProjectProtocolLogin
+from manager_oauth.merge_v2 import TeamProtocolLogin
 
 
 def session(team="target-team", email="child@example.com"):
@@ -253,6 +257,83 @@ class MergeV2ProtocolTests(unittest.TestCase):
         with patch.object(second.web_session,"request",return_value=self.response()) as export,patch.object(merge_v2.bridge,"call",return_value=True):
             self.assertTrue(second.submit_export(value)["success"])
             export.assert_called_once()
+
+
+class MergeLoginStepTests(unittest.TestCase):
+    def flow(self, pickup=False):
+        flow = TeamProtocolLogin.__new__(TeamProtocolLogin)
+        flow.payload = {"generic_accounts": [{"mode": "directurl", "pickup_url": "https://mail.invalid"}] if pickup else [], "_totp_secret": "fixture-secret"}
+        flow.login_details = {"login_method": "not_started"}
+        flow.device_id, flow.proxy_url = "fixture-device", "http://proxy.invalid"
+        return flow
+
+    def test_missing_step_retries_but_unknown_challenges_do_not(self):
+        for data, retry in [({}, True), (None, True), ({"page": {}}, True),
+                            ({"page": {"type": "auth_challenge"}}, False),
+                            ({"page": {"type": "phone_verification"}}, False),
+                            ({"error": {"code": "denied"}}, False)]:
+            with self.subTest(data=data), self.assertRaises(upstream.LoginFlowError) as caught:
+                self.flow().complete_modern_login(data, "password", 0)
+            self.assertEqual(caught.exception.retryable, retry)
+            if retry:
+                self.assertEqual(caught.exception.code, "login_response_incomplete")
+
+    def test_explicit_otp_without_source_does_not_poll_empty_mailbox(self):
+        with patch.object(upstream, "fetch_login_verification_code") as fetch:
+            for data in [{"page": {"type": "email_otp_verification"}}, {"continue_url": "/email-verification"}]:
+                with self.assertRaises(upstream.LoginFlowError) as caught:
+                    self.flow().complete_modern_login(data, "password", 0)
+                self.assertEqual(caught.exception.code, "email_code_source_missing")
+                self.assertFalse(caught.exception.retryable)
+            fetch.assert_not_called()
+
+    def test_only_pre_password_passwordless_mode_can_restart_normal_login(self):
+        step = {"page": {"type": "email_otp_verification", "payload": {"email_verification_mode": "passwordless_login"}}}
+        for scenario in ["identifier", "password", "no_totp", "email_mode", "no_mode", "pickup"]:
+            flow = self.flow(scenario == "pickup")
+            flow.payload.update(password="fixture-password", selected_login_mode="password_totp")
+            data = step
+            if scenario == "no_totp": flow.payload["_totp_secret"] = ""
+            if scenario == "email_mode": flow.payload["selected_login_mode"] = "email_otp"
+            if scenario == "no_mode": data = {"page": {"type": "email_otp_verification"}}
+            if scenario == "pickup":
+                flow.inspect_login_step(data, "identifier")
+                continue
+            with self.subTest(scenario=scenario), self.assertRaises(upstream.LoginFlowError) as caught:
+                flow.inspect_login_step(data, "password" if scenario == "password" else "identifier")
+            self.assertEqual(caught.exception.code, "password_login_restart_required" if scenario == "identifier" else "email_code_source_missing")
+            # The outer merge coordinator alone owns this restart; no immediate
+            # generic network retry/rotation may consume it.
+            self.assertFalse(caught.exception.retryable)
+
+    def test_configured_mailbox_still_polls_and_submits_real_code(self):
+        flow = self.flow(True)
+        flow.submit_modern_code = Mock(return_value={"continue_url": "/consent"})
+        with contextlib.redirect_stderr(io.StringIO()), patch.object(upstream, "fetch_login_verification_code", return_value="123456") as fetch, patch.object(ProjectProtocolLogin, "log"):
+            result = flow.complete_modern_login({"page": {"type": "email_otp_verification"}}, "password", 100)
+        self.assertEqual(result, "https://auth.openai.com/consent")
+        fetch.assert_called_once()
+        flow.submit_modern_code.assert_called_once_with("123456")
+
+    def test_password_totp_unchanged_and_password_response_checked(self):
+        flow = self.flow()
+        flow.complete_totp_challenge = Mock(return_value="fixture-callback")
+        with contextlib.redirect_stderr(io.StringIO()), patch.object(ProjectProtocolLogin, "log"), patch.object(upstream, "generate_openai_sentinel_token"), patch.object(ProjectProtocolLogin, "submit_modern_password", return_value={"page": {"type": "mfa_challenge"}}):
+            self.assertEqual(flow.complete_modern_login({"page": {"type": "login_password"}}, "password", 0), "fixture-callback")
+        flow.complete_totp_challenge.assert_called_once()
+        with patch.object(ProjectProtocolLogin, "submit_modern_password", return_value={}):
+            with self.assertRaises(upstream.LoginFlowError) as caught:
+                flow.submit_modern_password("password")
+        self.assertEqual(caught.exception.code, "login_response_incomplete")
+
+    def test_otp_timeout_is_explicit_without_restarting_login(self):
+        flow = self.flow(True)
+        with contextlib.redirect_stderr(io.StringIO()), patch.object(ProjectProtocolLogin, "log"), patch.object(upstream, "fetch_login_verification_code", return_value="") as fetch:
+            with self.assertRaises(upstream.LoginFlowError) as caught:
+                flow.complete_modern_login({"page": {"type": "email_otp_verification"}}, "password", 0)
+        fetch.assert_called_once()
+        self.assertEqual(caught.exception.code, "email_code_unavailable")
+        self.assertFalse(caught.exception.retryable)
 
 
 if __name__=="__main__":unittest.main()

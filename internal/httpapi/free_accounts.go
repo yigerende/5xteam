@@ -1256,6 +1256,11 @@ func (s *Server) executeOpenAILoginContext(parent context.Context, email, creden
 				}
 			}
 			lastResult, lastErr = result, runErr
+			if _, isMergeV2 := parent.Value(mergeV2LoginKey{}).(*mergeV2LoginOptions); isMergeV2 && result["error_code"] == "login_response_incomplete" {
+				// The merge login coordinator owns the configured delay/budget.
+				// Do not immediately rotate proxies and multiply its attempts here.
+				return result, runErr
+			}
 			if runErr == nil && result != nil && result["success"] == true {
 				return result, nil
 			}
