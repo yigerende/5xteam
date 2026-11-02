@@ -11,6 +11,7 @@ import (
 
 func TestProMergeV2ReloadsMotherTokenAfterChildLogin(t *testing.T) {
 	f := mergeV2Fixture(t)
+	f.existingMember = true
 	// The invitation succeeded earlier, but the workflow starts with an old AT.
 	if _, err := f.s.store.SaveAdminAccountCredentials(f.admin, "old-mother-token", ""); err != nil {
 		t.Fatal(err)
@@ -57,6 +58,7 @@ func TestProMergeV2ExpiredMotherAfterAcceptancePreservesResume(t *testing.T) {
 	if _, err = f.s.store.SaveAdminAccountCredentials(f.admin, "mother-token", ""); err != nil {
 		t.Fatal(err)
 	}
+	dueRecovery(t, f)
 	p, err = f.s.performProMergeV2(t.Context(), f.email)
 	if err != nil || !p.MergeV2Completed() || logins != 1 || f.calls["invite"] != 1 || f.calls["remove"] != 1 || !p.ProMergeV2.AcceptedAt.Equal(acceptedAt) {
 		t.Fatalf("accepted request repeated or resume failed: err=%v state=%+v logins=%d calls=%v", err, p.ProMergeV2, logins, f.calls)

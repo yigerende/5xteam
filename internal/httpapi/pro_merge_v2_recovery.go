@@ -13,12 +13,29 @@ import (
 type mergeV2PlanKey struct{}
 type mergeV2PlanOptions struct{ TeamID, UserID, PersonalID string }
 
+// claimMergeV2Stage persists the first attempt before I/O. Subsequent attempts
+// are claimed by the scheduler; entering a new stage starts its own budget.
+func (s *Server) claimMergeV2Stage(email, phase string) (model.MailAccountProfile, error) {
+	return s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+		m := p.ProMergeV2
+		if m.Recovery == nil {
+			m.Recovery = &model.ProMergeV2Recovery{Cycles: 1}
+		}
+		if m.Recovery.Phase != phase {
+			m.Recovery.SetPhase(phase)
+			m.Recovery.Attempts = 1
+		}
+		now := time.Now()
+		m.Recovery.CheckedAt = &now
+	})
+}
+
 func (s *Server) performProMergeV2(ctx context.Context, email string) (out model.MailAccountProfile, runErr error) {
 	p, _, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return p, err
 	}
-	cfg, _, _, err := s.store.ProSettings()
+	cfg, _, _, err := s.proAccountPushSettings(p)
 	if err != nil {
 		return p, err
 	}
@@ -26,11 +43,14 @@ func (s *Server) performProMergeV2(ctx context.Context, email string) (out model
 	if p.MergeV2Completed() {
 		return p, nil
 	}
-	if p.ProAuto.StopRequested || ctx.Err() != nil {
+	if p.ProAuto.StopRequested && !p.MergeV2DeadCleanupAllowed() || ctx.Err() != nil {
 		return p, context.Canceled
 	}
-	// All retries are separate persisted jobs, so waits hold no mother/worker slot.
+	attempted := false
 	defer func() {
+		if !attempted {
+			return
+		}
 		latest, _, e := s.store.MailAccountCredential(email)
 		if e != nil {
 			runErr = errors.Join(runErr, e)
@@ -40,54 +60,75 @@ func (s *Server) performProMergeV2(ctx context.Context, email string) (out model
 		if m == nil || m.CompletedAt != nil {
 			return
 		}
-		unknown := m.SubmittedAt != nil && !latest.MergeV2Resolved()
-		if !unknown && m.Recovery == nil {
-			return
-		}
 		out, e = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 			m := p.ProMergeV2
 			if m.Recovery == nil {
-				m.Recovery = &model.ProMergeV2Recovery{Phase: "removing", Cycles: 1}
+				m.Recovery = &model.ProMergeV2Recovery{Cycles: 1}
 			}
 			r := m.Recovery
-			if r.OriginalError == "" {
-				r.OriginalError = redactSensitiveText(oauthErrorText(nil, runErr))
+			if r.Exhausted {
+				return
 			}
 			if runErr != nil {
-				r.Error = redactSensitiveText(runErr.Error())
+				r.Error = mergeV2DiagnosticText(runErr.Error())
+				if r.OriginalError == "" {
+					r.OriginalError = r.Error
+				}
 			}
-			if p.MergeV2Resolved() && r.Phase != "tail" {
-				r.Phase = "tail"
-				r.Attempts = 0
+			switch {
+			case p.MergeV2Resolved():
+				r.SetPhase("tail")
+			case m.SubmittedAt != nil:
+				if r.Phase != "checking" && r.Phase != "reinvite" {
+					r.SetPhase("removing")
+				}
+			case r.Phase != "cleanup":
+				var retry *mergeV2RetryError
+				if !errors.As(runErr, &retry) || r.Attempts >= r.Limit(cfg) {
+					if errors.Is(runErr, context.Canceled) || errors.Is(context.Cause(ctx), errProAutoFinalStepPaused) {
+						return
+					}
+					r.Failure = r.Error
+					r.SetPhase("cleanup")
+					if errors.Is(runErr, errProAccountDead) && p.IsProDead() {
+						version := p.ProAuto.StopVersion
+						r.CleanupStopVersion = &version
+					}
+				}
 			}
-			if r.NextAt != nil || r.Exhausted {
+			if r.NextAt != nil {
 				return
 			}
-			if r.Attempts >= rule.MaxAttempts {
-				r.Exhausted = true
-				m.Error = "自动恢复次数已用尽，请核对恢复记录后人工处理"
-				m.Message = m.Error
+			if r.Attempts >= r.Limit(cfg) {
+				r.FinishFailure(m)
 				return
 			}
-			// A stopped job keeps its phase but never silently resumes.
-			if !rule.Enabled || p.ProAuto.StopRequested {
+			if !rule.Enabled || p.ProAuto.StopRequested && !p.MergeV2DeadCleanupAllowed() || errors.Is(context.Cause(ctx), errProAutoFinalStepPaused) {
 				return
 			}
-			next := time.Now().Add(time.Duration(rule.RetrySeconds) * time.Second)
+			delay := r.Delay(cfg)
+			next := time.Now().Add(time.Duration(delay) * time.Second)
 			r.NextAt = &next
-			m.Message = fmt.Sprintf("自动恢复第%d/%d轮，等待%d秒后继续（本轮%d/%d次）", r.Cycles, rule.MaxCycles, rule.RetrySeconds, r.Attempts, rule.MaxAttempts)
+			m.Message = fmt.Sprintf("%s；%d秒后继续（已执行%d/%d次）", mergeV2RecoveryLabel(r.Phase), delay, r.Attempts, r.Limit(cfg))
+			if m.SubmittedAt == nil || p.MergeV2Resolved() {
+				m.Status = "interrupted"
+			}
 		})
 		runErr = errors.Join(runErr, e)
 		if e == nil && out.ProMergeV2.Recovery != nil {
 			r := out.ProMergeV2.Recovery
-			s.auditProEvent(out, "merge_v2_recovery", "waiting", "", out.ProMergeV2.Message, map[string]any{"phase": r.Phase, "cycles": r.Cycles, "attempts": r.Attempts, "exhausted": r.Exhausted, "error": r.Error, "next_at": r.NextAt})
+			status := "waiting"
+			if r.Exhausted {
+				status = "failed"
+			}
+			s.auditProEvent(out, "merge_v2_recovery", status, "", out.ProMergeV2.Message, map[string]any{"phase": r.Phase, "attempts": r.Attempts, "exhausted": r.Exhausted, "error": r.Error, "next_at": r.NextAt, "verification_only": out.ProMergeV2.VerificationOnly})
 		}
 	}()
 	m := p.ProMergeV2
 	if m != nil && m.Recovery != nil {
 		r := m.Recovery
 		if r.Exhausted {
-			return p, errors.New("合并2.0自动恢复次数已用尽，请人工核实")
+			return p, errors.New("合并2.0本轮已结束，请查看执行记录")
 		}
 		if r.NextAt != nil && time.Now().Before(*r.NextAt) {
 			return p, errMergeV2Unknown
@@ -95,16 +136,26 @@ func (s *Server) performProMergeV2(ctx context.Context, email string) (out model
 		if !rule.Enabled && !p.MergeV2Resolved() {
 			return p, errors.New("合并2.0自动恢复已关闭")
 		}
-		if r.Attempts >= rule.MaxAttempts || r.Phase == "reinvite" && r.Cycles >= rule.MaxCycles {
-			p, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
-				p.ProMergeV2.Recovery.Exhausted = true
-				p.ProMergeV2.Recovery.NextAt = nil
-			})
-			return p, errors.Join(err, errors.New("合并2.0恢复已达到配置上限"))
-		}
-		// Claim an attempt durably before any network I/O. A restart cannot reset its budget.
+		attempted = true
+		// A verified fact or a durable verification-only policy always takes priority
+		// over a stale phase left by an interrupted process or an old release.
 		p, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
-			r := p.ProMergeV2.Recovery
+			m := p.ProMergeV2
+			r := m.Recovery
+			if p.MergeV2Resolved() {
+				r.SetPhase("tail")
+			} else if m.VerificationOnly && r.Phase == "reinvite" {
+				r.SetPhase("checking")
+			}
+			if r.Attempts >= r.Limit(cfg) || r.Phase == "reinvite" && r.Cycles >= rule.MaxCycles {
+				if r.PreSubmit() {
+					r.Failure = "邀请或登录重试次数已用尽"
+					r.SetPhase("cleanup")
+				} else {
+					r.FinishFailure(m)
+					return
+				}
+			}
 			r.NextAt = nil
 			r.Attempts++
 			now := time.Now()
@@ -113,9 +164,15 @@ func (s *Server) performProMergeV2(ctx context.Context, email string) (out model
 		if err != nil {
 			return p, err
 		}
+		r = p.ProMergeV2.Recovery
+		if r.Exhausted {
+			return p, errors.New(p.ProMergeV2.Message)
+		}
 		switch r.Phase {
 		case "removing", "checking":
 			return s.recoverProMergeV2Plan(ctx, p, rule)
+		case "cleanup":
+			return s.cleanupFailedProMergeV2(ctx, p)
 		case "reinvite":
 			p, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 				m := p.ProMergeV2
@@ -123,36 +180,97 @@ func (s *Server) performProMergeV2(ctx context.Context, email string) (out model
 				if m.SubmittedAt != nil {
 					r.Submissions = append(r.Submissions, *m.SubmittedAt)
 				}
-				m.SubmittedAt = nil
-				m.InviteAcceptAttemptedAt = nil
-				m.InviteAcceptedAt = nil
+				m.SubmittedAt, m.InviteAcceptAttemptedAt, m.InviteAcceptedAt = nil, nil, nil
 				m.UserID = ""
 				m.Steps = map[string]string{}
-				m.Stage = "invite"
-				m.Status = "interrupted"
-				m.Error = ""
+				m.Stage, m.Status, m.Error = "invite", "interrupted", ""
 				r.Cycles++
-				r.Attempts = 0
-				r.Phase = "resubmit"
+				r.SetPhase("resubmit")
 			})
 			if err != nil {
 				return p, err
 			}
 		}
 	}
-	out, runErr = s.performProMergeV2Attempt(ctx, email)
-	// A renewed uncertain attempt must return through removal/verification, not resubmit.
-	if out.ProMergeV2 != nil && out.ProMergeV2.Recovery != nil && out.ProMergeV2.SubmittedAt != nil && !out.MergeV2Resolved() {
-		out, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
-			r := p.ProMergeV2.Recovery
-			if r.Phase == "resubmit" {
-				r.Phase = "removing"
-				r.Attempts = 0
-			}
-		})
-		runErr = errors.Join(runErr, err)
+	attempted = true
+	return s.performProMergeV2Attempt(ctx, email)
+}
+
+func mergeV2RecoveryLabel(phase string) string {
+	switch phase {
+	case "invite":
+		return "等待重试原团队邀请"
+	case "login", "resubmit":
+		return "等待重新登录原账号"
+	case "removing":
+		return "移出原团队并复查"
+	case "checking":
+		return "核验个人套餐"
+	case "reinvite":
+		return "原单等待重新排队"
+	case "tail":
+		return "继续移出及收尾，不重复提交"
+	case "cleanup":
+		return "本次未完成，清理原团队成员及邀请"
 	}
-	return out, runErr
+	return "等待自动恢复"
+}
+
+func (s *Server) cleanupFailedProMergeV2(ctx context.Context, p model.MailAccountProfile) (model.MailAccountProfile, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	m := p.ProMergeV2
+	v, _ := s.autoAdminLocks.LoadOrStore(m.TeamID, &sync.Mutex{})
+	unlock, err := lockProMutex(ctx, v.(*sync.Mutex))
+	if err != nil {
+		return p, err
+	}
+	defer unlock()
+	release, err := s.proMergeSlot(ctx)
+	if err != nil {
+		return p, err
+	}
+	defer release()
+	token, err := s.mergeV2AdminAccessToken(ctx, m.AdminID, m.TeamID)
+	if err != nil {
+		return p, err
+	}
+	admin, _, err := s.currentAdminCredential(ctx, m.AdminID)
+	if err != nil {
+		return p, err
+	}
+	settings, err := s.settingsForAdmin(s.store.Settings(), admin)
+	if err != nil {
+		return p, err
+	}
+	client, err := workflow.NewClient(settings)
+	if err != nil {
+		return p, err
+	}
+	latest, _, err := s.store.MailAccountCredential(p.Email)
+	if err != nil {
+		return p, err
+	}
+	if latest.ProAuto.StopRequested && !latest.MergeV2DeadCleanupAllowed() || ctx.Err() != nil {
+		return p, context.Canceled
+	}
+	if err = client.RemoveMergeV2Target(ctx, token, m.TeamID, p.Email, m.UserID, true); err != nil {
+		return p, err
+	}
+	p, err = s.store.UpdateProAccount(p.Email, func(p *model.MailAccountProfile) {
+		m := p.ProMergeV2
+		if m.Steps == nil {
+			m.Steps = map[string]string{}
+		}
+		m.Steps["remove"] = "completed"
+		m.Recovery.FinishFailure(m)
+		m.Message += "；已确认移出原团队，本轮已结束"
+		p.ProWorkflowRunning = false
+	})
+	if err != nil {
+		return p, err
+	}
+	return p, errors.New(p.ProMergeV2.Message)
 }
 
 func (s *Server) recoverProMergeV2Plan(ctx context.Context, p model.MailAccountProfile, rule model.ProMergeV2RecoverySettings) (model.MailAccountProfile, error) {
@@ -194,32 +312,17 @@ func (s *Server) recoverProMergeV2Plan(ctx context.Context, p model.MailAccountP
 	if err != nil {
 		return p, err
 	}
-	member, err := client.FindMemberByEmail(ctx, token, m.TeamID, p.Email)
+	latest, _, err := s.store.MailAccountCredential(p.Email)
 	if err != nil {
 		return p, err
 	}
-	if member != nil {
-		if member.ID != m.UserID || (member.Role != "standard-user" && member.Role != "member" && member.Role != "user") {
-			return p, errors.New("原团队成员身份或权限不匹配，禁止移出")
-		}
-		if err = ctx.Err(); err != nil {
-			return p, err
-		}
-		latest, _, e := s.store.MailAccountCredential(p.Email)
-		if e != nil {
-			return p, e
-		}
-		if latest.ProAuto.StopRequested {
-			return p, context.Canceled
-		}
-		_, removeErr := client.Kick(ctx, token, m.TeamID, m.UserID)
-		// A lost DELETE response is reconciled by the full member+invite lists.
-		if err = client.ConfirmMergeV2Removed(ctx, token, m.TeamID, p.Email, m.UserID); err != nil {
-			return p, errors.Join(removeErr, err)
-		}
-	} else if err = client.ConfirmMergeV2Removed(ctx, token, m.TeamID, p.Email, m.UserID); err != nil {
+	if latest.ProAuto.StopRequested || ctx.Err() != nil {
+		return p, context.Canceled
+	}
+	if err = client.RemoveMergeV2Target(ctx, token, m.TeamID, p.Email, m.UserID, false); err != nil {
 		return p, err
 	}
+
 	p, err = s.store.UpdateProAccount(p.Email, func(p *model.MailAccountProfile) {
 		m := p.ProMergeV2
 		m.Steps["remove"] = "completed"
@@ -249,7 +352,7 @@ func (s *Server) recoverProMergeV2Plan(ctx context.Context, p model.MailAccountP
 	if err = ctx.Err(); err != nil {
 		return p, err
 	}
-	latest, _, err := s.store.MailAccountCredential(p.Email)
+	latest, _, err = s.store.MailAccountCredential(p.Email)
 	if err != nil {
 		return p, err
 	}
@@ -277,6 +380,11 @@ func (s *Server) recoverProMergeV2Plan(ctx context.Context, p model.MailAccountP
 		p, err = s.store.UpdateProAccount(p.Email, func(p *model.MailAccountProfile) {
 			m := p.ProMergeV2
 			r := m.Recovery
+			if m.VerificationOnly {
+				r.Phase = "checking"
+				m.Message = "个人套餐仍为付费，仅继续核验原提交，不重新邀请或提交"
+				return
+			}
 			r.Phase = "reinvite"
 			r.Attempts = 0
 			m.Message = "个人套餐仍为付费，原账号原单等待重新排队办理"

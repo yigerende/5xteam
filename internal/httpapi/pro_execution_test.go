@@ -25,6 +25,7 @@ type proExecutionFixture struct {
 	failStage            string
 	failCount            int
 	loseTransferResponse bool
+	existingMember       bool
 	entered, release     chan struct{}
 }
 
@@ -43,6 +44,20 @@ func newProExecutionFixture(t *testing.T) *proExecutionFixture {
 	f := &proExecutionFixture{s: s, email: "pro-log@example.com", calls: map[string]int{}}
 	handler := func(mother bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "GET" && (strings.HasSuffix(r.URL.Path, "/users") || strings.HasSuffix(r.URL.Path, "/invites")) {
+				if !mother || r.Header.Get("Authorization") != "Bearer mother-token" || r.Header.Get("chatgpt-account-id") != "original-team" {
+					t.Error("wrong roster principal")
+				}
+				f.mu.Lock()
+				present := (f.existingMember || f.calls["invite"] > 0 && (f.failStage != "invite" || f.calls["invite"] > f.failCount)) && (f.calls["remove"] == 0 || f.failStage == "remove" && f.calls["remove"] <= f.failCount)
+				f.mu.Unlock()
+				if strings.HasSuffix(r.URL.Path, "/users") && present {
+					fmt.Fprintf(w, `{"items":[{"id":"pro-user","email":%q,"role":"standard-user"}],"total":1}`, f.email)
+				} else {
+					fmt.Fprint(w, `{"items":[],"total":0}`)
+				}
+				return
+			}
 			stage := ""
 			switch {
 			case r.Method == "DELETE":

@@ -1256,8 +1256,8 @@ func (s *Server) executeOpenAILoginContext(parent context.Context, email, creden
 				}
 			}
 			lastResult, lastErr = result, runErr
-			if _, isMergeV2 := parent.Value(mergeV2LoginKey{}).(*mergeV2LoginOptions); isMergeV2 && result["error_code"] == "login_response_incomplete" {
-				// The merge login coordinator owns the configured delay/budget.
+			if _, isMergeV2 := parent.Value(mergeV2LoginKey{}).(*mergeV2LoginOptions); isMergeV2 {
+				// The durable merge scheduler owns all login retries and delays.
 				// Do not immediately rotate proxies and multiply its attempts here.
 				return result, runErr
 			}
@@ -1424,7 +1424,7 @@ func (s *Server) executeOpenAILoginWithProxy(parent context.Context, email, prox
 		payload["allow_sms"] = false
 	}
 	if opts, ok := parent.Value(mergeV2LoginKey{}).(*mergeV2LoginOptions); ok {
-		payload["merge_v2"] = map[string]any{"team_id": opts.TeamID}
+		payload["merge_v2"] = map[string]any{"team_id": opts.TeamID, "verification_http_statuses": opts.VerificationHTTPStatuses}
 	}
 	if opts, ok := parent.Value(proOAILoginKey{}).(*proOAILoginOptions); ok {
 		payload["help_oai"] = opts.Config

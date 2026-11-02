@@ -1,6 +1,7 @@
 """Pro-only Team login and export/deactivate; original login mechanics stay shared."""
 import re
 import time
+from curl_cffi import CurlInfo
 from urllib.parse import urlsplit, urljoin, quote
 
 from . import bridge, upstream
@@ -8,6 +9,16 @@ from .adapter import ProjectProtocolLogin
 
 EXPORT_URL = "https://chatgpt.com/backend-api/accounts/export_and_deactivate"
 SAFARI_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
+
+
+def tls_request_not_sent(exc):
+    response = getattr(exc, "response", None)
+    infos = getattr(response, "infos", None)
+    if getattr(exc, "code", None) != 35 or not isinstance(infos, dict):
+        return False
+    values = [getattr(response, "status_code", None), infos.get(CurlInfo.REQUEST_SIZE),
+              infos.get(CurlInfo.APPCONNECT_TIME_T), infos.get(CurlInfo.REDIRECT_COUNT)]
+    return all(type(value) is int and value == 0 for value in values)
 
 
 def invitation_response_evidence(data):
@@ -246,6 +257,8 @@ class TeamProtocolLogin(ProjectProtocolLogin):
         bridge.emit("merge_v2_submit", "export_start", "提交导出停用请求，已保存提交检查点",
                     request={"method": "POST", "url": EXPORT_URL, "timeout_seconds": 60,
                              "impersonate": upstream.OPENAI_IMPERSONATE, "allow_redirects": False})
+        original_infos = self.web_session.curl_infos
+        self.web_session.curl_infos = list(dict.fromkeys([*original_infos, CurlInfo.REQUEST_SIZE, CurlInfo.APPCONNECT_TIME_T, CurlInfo.REDIRECT_COUNT]))
         try:
             # Inherit login TLS settings so a floating Chrome alias does not
             # force another connection (and another dynamic proxy exit).
@@ -258,7 +271,13 @@ class TeamProtocolLogin(ProjectProtocolLogin):
                         level="error", duration_ms=int((time.monotonic()-started)*1000),
                         details={"error_type": type(exc).__name__, "error": bridge.redact(exc)[:500],
                                  "curl_code": int(getattr(exc, "code", 0) or 0), "retryable": False})
+            code = getattr(exc, "code", 0)
+            if (type(code) is int and code in {5, 6, 7}) or tls_request_not_sent(exc):
+                bridge.call("merge_v2_rejected")
+                return {"success": False, "retryable": True, "error_code": "export_not_sent", "error": "连接在提交前失败，按配置重试原账号"}
             return {"success": False, "retryable": False, "error_code": "export_uncertain", "error": "导出停用请求中断，结果待确认，保留团队成员"}
+        finally:
+            self.web_session.curl_infos = original_infos
         try:
             data = resp.json()
         except (ValueError, TypeError):
@@ -274,6 +293,13 @@ class TeamProtocolLogin(ProjectProtocolLogin):
         if 200 <= status < 300 and isinstance(data, dict) and data.get("success") is True:
             bridge.call("merge_v2_accepted")
             return {"success": True, "accepted": True, "http_status": status}
+        verify_statuses = self.payload.get("merge_v2", {}).get("verification_http_statuses")
+        if verify_statuses is None:
+            verify_statuses = [404]
+        if 400 <= status <= 599 and status in verify_statuses:
+            bridge.call("merge_v2_verify", http_status=status)
+            return {"success": False, "retryable": False, "error_code": "export_verification_required", "http_status": status,
+                    "error": f"导出停用返回 HTTP {status}，进入原单核验，不重复提交"}
         # Only a definite rejection clears the submission checkpoint.
         if status in {400, 401, 403, 404, 422, 429}:
             error = data.get("error") if isinstance(data, dict) else None

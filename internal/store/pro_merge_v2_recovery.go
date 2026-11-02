@@ -40,8 +40,11 @@ func (s *Store) DueProMergeV2Recovery(now time.Time) ([]model.MailAccountProfile
  AND json_extract(profile,'$.pro_merge_v2.completed_at') IS NULL
  AND json_type(profile,'$.pro_merge_v2')='object'
  AND COALESCE(json_extract(profile,'$.pro_workflow_running'),0)=0
- AND COALESCE(json_extract(profile,'$.pro_auto.stop_requested'),0)=0
- AND COALESCE(json_extract(profile,'$.pro_auto.status'),'')<>'stopped'
+ AND ((COALESCE(json_extract(profile,'$.pro_auto.stop_requested'),0)=0
+ AND COALESCE(json_extract(profile,'$.pro_auto.status'),'')<>'stopped')
+ OR (json_type(profile,'$.pro_dead')='object'
+ AND json_extract(profile,'$.pro_merge_v2.recovery.phase')='cleanup'
+ AND json_extract(profile,'$.pro_merge_v2.recovery.cleanup_stop_version')=json_extract(profile,'$.pro_auto.stop_version')))
  AND COALESCE(json_extract(profile,'$.pro_migration.paused'),0)=0
  AND COALESCE(json_extract(profile,'$.pro_merge_v2.recovery.exhausted'),0)=0
  AND ((julianday(json_extract(profile,'$.pro_merge_v2.recovery.next_at'))<=julianday(?))

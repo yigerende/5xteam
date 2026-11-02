@@ -195,3 +195,126 @@ func TestProMergeV2RecoveryFailuresStopDisableAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestProMergeV2Configured404OnlyVerifiesAcrossRestart(t *testing.T) {
+	for _, plan := range []string{"free", "paid"} {
+		t.Run(plan, func(t *testing.T) {
+			f, calls := planRecoveryFixture(t, plan)
+			if _, err := f.s.mergeV2Checkpoint(t.Context(), f.email, "original-team", "merge_v2_verify", map[string]any{"http_status": 404}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.s.mergeV2Checkpoint(t.Context(), f.email, "original-team", "merge_v2_rejected", nil); err == nil {
+				t.Fatal("verification checkpoint cleared")
+			}
+			cfg, _, _, _ := f.s.store.ProSettings()
+			rule := cfg.MergeV2RecoveryConfig()
+			rule.VerificationHTTPStatuses = "409"
+			cfg.MergeV2Recovery = &rule
+			if _, _, err := f.s.store.SaveProAutomationSettings(cfg, gptpay.Settings{PlanCode: "pro5"}, ""); err != nil {
+				t.Fatal(err)
+			}
+			f.s.proMergeV2Login = func(context.Context, string) (map[string]any, error) {
+				t.Fatal("verification resubmitted")
+				return nil, nil
+			}
+			for i := 1; i <= rule.MaxAttempts; i++ {
+				if err := f.s.store.RecoverProWorkflows(); err != nil {
+					t.Fatal(err)
+				}
+				dueRecovery(t, f)
+				p, err := f.s.performProMergeV2(t.Context(), f.email)
+				if p.ProMergeV2.SubmittedAt == nil || p.MergeV2Accepted() || !p.ProMergeV2.VerificationOnly || f.calls["invite"] != 0 {
+					t.Fatal("lost original submission", p.ProMergeV2)
+				}
+				if plan == "free" {
+					if err != nil || !p.MergeV2Completed() || p.ProMergeV2.CompletionBasis != "plan_free" {
+						t.Fatal(p.ProMergeV2, err)
+					}
+					break
+				}
+				if err == nil || *calls != i || p.ProMergeV2.Recovery.Phase != "checking" {
+					t.Fatal(p.ProMergeV2, err)
+				}
+				if i == rule.MaxAttempts && (!p.ProMergeV2.Recovery.Exhausted || p.ProMergeV2.Recovery.NextAt != nil) {
+					t.Fatal("unbounded verification", p.ProMergeV2)
+				}
+			}
+		})
+	}
+}
+
+func TestProMergeV2AcceptedCleanupUsesDurableRetryOnly(t *testing.T) {
+	f := mergeV2Fixture(t)
+	f.failStage, f.failCount = "remove", 1
+	logins := 0
+	f.s.proMergeV2Login = func(ctx context.Context, _ string) (map[string]any, error) { logins++; return mockMergeV2Submit(ctx) }
+	p, err := f.s.performProMergeV2(t.Context(), f.email)
+	if err == nil || !p.MergeV2Accepted() || p.MergeV2Completed() || p.ProMergeV2.Recovery.Phase != "tail" || p.ProMergeV2.Recovery.NextAt == nil || f.s.proMergeRunning != 0 {
+		t.Fatal(p.ProMergeV2, err)
+	}
+	if err = f.s.store.RecoverProWorkflows(); err != nil {
+		t.Fatal(err)
+	}
+	dueRecovery(t, f)
+	p, err = f.s.performProMergeV2(t.Context(), f.email)
+	if err != nil || !p.MergeV2Completed() || logins != 1 || f.calls["invite"] != 1 || f.calls["remove"] != 2 {
+		t.Fatal(p.ProMergeV2, err, f.calls, logins)
+	}
+}
+
+func TestProMergeV2DeadAccountOnlyCleansMotherAndHonorsNewStop(t *testing.T) {
+	for _, stop := range []bool{false, true} {
+		t.Run(fmt.Sprint(stop), func(t *testing.T) {
+			f := mergeV2Fixture(t)
+			f.s.proMergeV2Login = func(context.Context, string) (map[string]any, error) {
+				return map[string]any{"success": false, "dead": true, "error_code": "account_deactivated", "error": "account_deactivated"}, nil
+			}
+			p, err := f.s.performProMergeV2(t.Context(), f.email)
+			if !errors.Is(err, errProAccountDead) || !p.MergeV2DeadCleanupAllowed() || p.ProMergeV2.Recovery.NextAt == nil {
+				t.Fatal("dead cleanup not scheduled", p.ProMergeV2, err)
+			}
+			dueRecovery(t, f)
+			if stop {
+				_, _ = f.s.store.UpdateProAccount(f.email, func(p *model.MailAccountProfile) { p.ProAuto.StopVersion++ })
+			}
+			items, err := f.s.store.DueProMergeV2Recovery(time.Now())
+			if err != nil || len(items) != map[bool]int{false: 1, true: 0}[stop] {
+				t.Fatal(items, err)
+			}
+			p, err = f.s.performProMergeV2(t.Context(), f.email)
+			if stop {
+				if !errors.Is(err, context.Canceled) || f.calls["remove"] != 0 {
+					t.Fatal(err, f.calls)
+				}
+			} else if err == nil || p.ProMergeV2.Steps["remove"] != "completed" || !p.ProMergeV2.Recovery.Exhausted || p.MergeV2Completed() || !p.IsProDead() {
+				t.Fatal(p.ProMergeV2, err)
+			}
+		})
+	}
+}
+
+func TestProMergeV2InvitationRetriesUsePersistedBudget(t *testing.T) {
+	f := mergeV2Fixture(t)
+	f.failStage, f.failCount = "invite", 99
+	cfg, _, _, _ := f.s.store.ProSettings()
+	cfg.RetryCount, cfg.RetryIntervalSeconds = 1, 19
+	if _, _, err := f.s.store.SaveProAutomationSettings(cfg, gptpay.Settings{PlanCode: "pro5"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.s.proMergeV2Login = func(context.Context, string) (map[string]any, error) {
+		t.Fatal("login after failed invitation")
+		return nil, nil
+	}
+	p, err := f.s.performProMergeV2(t.Context(), f.email)
+	if err == nil || p.ProMergeV2.Recovery.Phase != "invite" || p.ProMergeV2.Recovery.Attempts != 1 || f.calls["invite"] != 1 || time.Until(*p.ProMergeV2.Recovery.NextAt) < 18*time.Second {
+		t.Fatal(p.ProMergeV2, err)
+	}
+	if _, err = f.s.performProMergeV2(t.Context(), f.email); err == nil || f.calls["invite"] != 1 {
+		t.Fatal("immediate invitation retry")
+	}
+	dueRecovery(t, f)
+	p, err = f.s.performProMergeV2(t.Context(), f.email)
+	if err == nil || p.ProMergeV2.Recovery.Phase != "cleanup" || f.calls["invite"] != 2 {
+		t.Fatal(p.ProMergeV2, err, f.calls)
+	}
+}

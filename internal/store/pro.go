@@ -468,12 +468,10 @@ func (s *Store) RecoverProWorkflows() error {
 
 		if m := p.ProMergeV2; m != nil && m.CompletedAt == nil && m.Recovery != nil && !m.Recovery.Exhausted && m.Recovery.NextAt == nil {
 			r := m.Recovery
-			if r.Attempts >= settings.MergeV2RecoveryConfig().MaxAttempts {
-				r.Exhausted = true
-			} else {
-				next := time.Now().Add(time.Duration(settings.MergeV2RecoveryConfig().RetrySeconds) * time.Second)
-				r.NextAt = &next
-			}
+			// The coordinator decides exhaustion/cleanup after restart. Do not
+			// strand a pre-submit job at its budget limit before cleaning its seat.
+			next := time.Now().Add(time.Duration(r.Delay(settings)) * time.Second)
+			r.NextAt = &next
 			merchantReconciled = true
 		}
 		stopReconciled := p.ReconcileProStop()

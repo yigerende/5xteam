@@ -18,7 +18,7 @@ function change(key,label,event){const status=event.target.value;event.target.va
     <small v-if="state.completed_at">完成：{{formatTime(state.completed_at)}}</small>
     <small v-if="account.pro_auto?.stop_requested && !state.completed_at">已停止。已发出的上游请求无法撤回，续跑仅处理剩余步骤。</small>
     <small v-else-if="state.recovery?.next_at">自动恢复：第 {{state.recovery.cycles}} 轮，本轮已执行 {{state.recovery.attempts}} 次；下次 {{formatTime(state.recovery.next_at)}}</small>
-    <small v-if="state.recovery">恢复阶段：{{({removing:'移出核对',checking:'个人套餐核验',reinvite:'等待原单重新办理',resubmit:'原单重新办理',tail:'完成收尾'})[state.recovery.phase] || state.recovery.phase}}<b v-if="state.recovery.exhausted"> · 已达上限，请人工处理</b></small>
+    <small v-if="state.recovery">恢复阶段：{{({invite:'重试邀请',login:'重试登录',cleanup:'失败后移出清理',removing:'移出核对',checking:'个人套餐核验',reinvite:'等待原单重新办理',resubmit:'原单重新办理',tail:'完成收尾'})[state.recovery.phase] || state.recovery.phase}}<b v-if="state.recovery.exhausted"> · 本轮已结束，详见记录</b></small>
     <small v-if="state.completion_basis==='plan_free'">完成依据：个人套餐核验为 Free（非上游受理回执）</small>
     <small v-if="state.recovery && !state.completed_at">{{state.message}}</small>
     <small>受理及流程完成不代表上游停用或退款完成。</small>

@@ -41,68 +41,68 @@ func TestProMergeV2PasswordlessEntryUsesConfiguredRetryBudget(t *testing.T) {
 func checkProMergeV2ConfiguredLoginRetry(t *testing.T, code string, retryable bool) {
 	for _, retries := range []int{0, 2} {
 		for _, recover := range []bool{false, true} {
-			f, p, ctx := mergeV2RecoveryFixture(t)
+			f := mergeV2Fixture(t)
 			cfg, _, _, _ := f.s.store.ProSettings()
 			cfg.RetryCount, cfg.RetryIntervalSeconds = retries, 17
 			if _, _, err := f.s.store.SaveProAutomationSettings(cfg, gptpay.Settings{PlanCode: "pro5"}, ""); err != nil {
 				t.Fatal(err)
 			}
-			calls, waits := 0, 0
+			calls := 0
 			f.s.proMergeV2Login = func(ctx context.Context, email string) (map[string]any, error) {
 				calls++
 				if email != f.email {
-					t.Fatal("changed original account")
+					t.Fatal("account changed")
 				}
 				if recover && calls == 2 {
 					return mockMergeV2Submit(ctx)
 				}
 				return map[string]any{"success": false, "error_code": code, "retryable": retryable}, nil
 			}
-			result, err := f.s.loginProMergeV2(ctx, p, "sub2api", func(_ context.Context, d time.Duration) error {
-				waits++
-				if d != 17*time.Second {
-					t.Fatal("configuration ignored", d)
+			for n := 1; n <= retries+1; n++ {
+				p, err := f.s.performProMergeV2(t.Context(), f.email)
+				if calls != n || f.s.proMergeRunning != 0 {
+					t.Fatal("unbounded or occupied retry", calls, n)
 				}
-				latest, _, _ := f.s.store.MailAccountCredential(f.email)
-				if latest.ProMergeV2.SubmittedAt != nil || latest.ProMergeV2.Steps["invite"] != "completed" {
-					t.Fatal("retry changed checkpoints")
+				if recover && n == 2 {
+					if err != nil || !p.MergeV2Completed() {
+						t.Fatal(p.ProMergeV2, err)
+					}
+					break
 				}
-				return nil
-			})
-			want := retries + 1
-			if recover && retries > 0 {
-				want = 2
+				if err == nil || p.ProMergeV2.Recovery.NextAt == nil {
+					t.Fatal("missing durable retry", p.ProMergeV2, err)
+				}
+				if n <= retries {
+					if p.ProMergeV2.Recovery.Phase != "login" || time.Until(*p.ProMergeV2.Recovery.NextAt) < 16*time.Second {
+						t.Fatal("wrong budget/delay", p.ProMergeV2.Recovery)
+					}
+					if _, e := f.s.performProMergeV2(t.Context(), f.email); e == nil || calls != n {
+						t.Fatal("early retry")
+					}
+					if e := f.s.store.RecoverProWorkflows(); e != nil {
+						t.Fatal(e)
+					}
+					dueRecovery(t, f)
+				} else {
+					if p.ProMergeV2.Recovery.Phase != "cleanup" {
+						t.Fatal("exhausted login not cleaned", p.ProMergeV2.Recovery)
+					}
+					dueRecovery(t, f)
+					p, err = f.s.performProMergeV2(t.Context(), f.email)
+					if err == nil || !p.ProMergeV2.Recovery.Exhausted || p.MergeV2Completed() || p.ProMergeV2.Steps["remove"] != "completed" {
+						t.Fatal("failed workflow not terminated truthfully", p.ProMergeV2, err)
+					}
+				}
 			}
-			if err != nil || calls != want || waits != want-1 {
-				t.Fatal(result, err, calls, waits)
-			}
-			if (result["success"] == true) != (recover && retries > 0) {
-				t.Fatal(result)
-			}
-			if f.calls["invite"] != 0 || f.calls["remove"] != 0 {
-				t.Fatal("repeated invitation or cleanup")
+			if f.calls["invite"] != 1 {
+				t.Fatal("reinvited during login retry", f.calls)
 			}
 		}
 	}
 }
 
 func TestProMergeV2RecoveryCompletesTailWithoutReinvite(t *testing.T) {
-	f := mergeV2Fixture(t)
-	calls := 0
-	f.s.proMergeV2Login = func(ctx context.Context, _ string) (map[string]any, error) {
-		calls++
-		if calls == 1 {
-			return teamMismatchResult(), nil
-		}
-		return mockMergeV2Submit(ctx)
-	}
-	if _, err := f.s.performProMergeV2(t.Context(), f.email); err != nil {
-		t.Fatal(err)
-	}
-	p, _, _ := f.s.store.MailAccountCredential(f.email)
-	if !p.MergeV2Completed() || calls != 2 || f.calls["invite"] != 1 || f.calls["remove"] != 1 {
-		t.Fatal(p.ProMergeV2, calls, f.calls)
-	}
+	checkProMergeV2ConfiguredLoginRetry(t, "team_session_mismatch", false)
 }
 
 func TestProMergeV2InvitationRecoveryCheckpointsAndFreshLogin(t *testing.T) {
@@ -125,7 +125,12 @@ func TestProMergeV2InvitationRecoveryCheckpointsAndFreshLogin(t *testing.T) {
 		}
 		return mockMergeV2Submit(ctx)
 	}
-	result, err := f.s.loginProMergeV2(ctx, p, "sub2api", func(context.Context, time.Duration) error { return nil })
+	_, firstErr := f.s.loginProMergeV2(ctx, p, "sub2api", nil)
+	var retry *mergeV2RetryError
+	if !errors.As(firstErr, &retry) {
+		t.Fatal(firstErr)
+	}
+	result, err := f.s.loginProMergeV2(ctx, p, "sub2api", nil)
 	if err != nil || result["success"] != true || calls != 2 {
 		t.Fatal(result, err, calls)
 	}
@@ -168,59 +173,8 @@ func TestProMergeV2InvitationAcceptanceHonorsStopAndTarget(t *testing.T) {
 }
 
 func TestProMergeV2TeamRecoveryBudgetAndSuccess(t *testing.T) {
-	for _, recover := range []bool{false, true} {
-		t.Run(map[bool]string{false: "exhausted", true: "recovered"}[recover], func(t *testing.T) {
-			f, p, ctx := mergeV2RecoveryFixture(t)
-			calls, waits := 0, 0
-			f.s.proMergeV2Login = func(ctx context.Context, email string) (map[string]any, error) {
-				calls++
-				if email != f.email {
-					t.Fatal("changed child")
-				}
-				if recover && calls == 3 {
-					return mockMergeV2Submit(ctx)
-				}
-				return teamMismatchResult(), nil
-			}
-			result, err := f.s.loginProMergeV2(ctx, p, "sub2api", func(_ context.Context, d time.Duration) error {
-				waits++
-				if d != 5*time.Second {
-					t.Fatalf("unexpected delay: %s", d)
-				}
-				latest, _, _ := f.s.store.MailAccountCredential(f.email)
-				if latest.ProMergeV2.SubmittedAt != nil || latest.ProMergeV2.Steps["invite"] != "completed" {
-					t.Fatal("recovery changed completed invite or submitted early")
-				}
-				return nil
-			})
-			if err != nil || calls != 3 || waits != 2 || result["success"] != recover {
-				t.Fatalf("result=%v error=%v calls=%d waits=%d", result, err, calls, waits)
-			}
-			latest, _, _ := f.s.store.MailAccountCredential(f.email)
-			if latest.MergeV2Accepted() != recover || f.calls["remove"] != 0 {
-				t.Fatal("unexpected destructive tail")
-			}
-			if err = f.s.flushAuditEvents(t.Context()); err != nil {
-				t.Fatal(err)
-			}
-			starts, waitEvents, results := 0, 0, 0
-			for _, e := range f.s.store.AutoRotationEventsByAccount(p.ID) {
-				switch e.Details["protocol_event"] {
-				case "team_login_start":
-					starts++
-				case "team_relogin_wait":
-					waitEvents++
-				case "team_login_result":
-					results++
-				}
-				if e.Type == "pro_merge_v2_protocol" && (e.Email != p.Email || e.Details["execution_id"] == nil) {
-					t.Fatal("missing trace identity")
-				}
-			}
-			if starts != 3 || waitEvents != 2 || results != 3 {
-				t.Fatalf("trace missing: %d %d %d", starts, waitEvents, results)
-			}
-		})
+	for _, code := range []string{"email_code_source_missing", "email_code_unavailable", "team_session_expired", "export_not_sent", "network_error"} {
+		t.Run(code, func(t *testing.T) { checkProMergeV2ConfiguredLoginRetry(t, code, true) })
 	}
 }
 
@@ -288,26 +242,20 @@ func TestProMergeV2TeamRecoveryStopDuringWait(t *testing.T) {
 			defer cancel()
 			calls := 0
 			f.s.proMergeV2Login = func(context.Context, string) (map[string]any, error) { calls++; return teamMismatchResult(), nil }
-			_, err := f.s.loginProMergeV2(ctx, p, "sub2api", func(ctx context.Context, d time.Duration) error {
-				if mode == "context" {
-					cancel()
-					return waitProAuto(ctx, d)
-				}
-				_, err := f.s.store.UpdateProAccount(f.email, func(p *model.MailAccountProfile) {
+			_, _ = f.s.loginProMergeV2(ctx, p, "sub2api", nil)
+			if mode == "context" {
+				cancel()
+			} else {
+				_, _ = f.s.store.UpdateProAccount(f.email, func(p *model.MailAccountProfile) {
 					if mode == "stop" {
 						p.ProAuto.StopRequested = true
 					} else {
 						p.ProMergeV2.TeamID = "changed"
 					}
 				})
-				return err
-			})
-			if err == nil || calls != 1 {
-				t.Fatal(err, calls)
 			}
-			latest, _, _ := f.s.store.MailAccountCredential(f.email)
-			if latest.ProMergeV2.SubmittedAt != nil {
-				t.Fatal("stop allowed submission")
+			if _, err := f.s.loginProMergeV2(ctx, p, "sub2api", nil); err == nil || calls != 1 {
+				t.Fatal("stop allowed another login", err, calls)
 			}
 		})
 	}

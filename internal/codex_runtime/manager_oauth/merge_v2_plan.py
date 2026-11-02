@@ -83,6 +83,7 @@ def parse_plan(data, account_id):
                "chatgptplusplan": "plus", "chatgptplus": "plus",
                "chatgptproplan": "pro", "chatgptpro": "pro",
                "chatgptproliteplan": "prolite", "chatgptprolite": "prolite",
+               "chatgptpromaxplan": "promax", "chatgptpromax": "promax", "pro_max": "promax",
                "chatgptgoplan": "go", "chatgptgo": "go", "pro_lite": "prolite"}
 
     def normalize(raw):
@@ -91,7 +92,7 @@ def parse_plan(data, account_id):
         if not isinstance(raw, str):
             raise ValueError("invalid plan")
         value = aliases.get(raw.strip().lower(), raw.strip().lower())
-        if value not in {"free", "plus", "pro", "prolite", "go"}:
+        if value not in {"free", "plus", "pro", "prolite", "promax", "go"}:
             raise ValueError("unknown personal plan")
         return value
 

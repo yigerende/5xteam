@@ -68,3 +68,19 @@ func TestProMergeV2RecoverySettingsValidation(t *testing.T) {
 		t.Fatal("invalid interval saved")
 	}
 }
+
+func TestProMergeV2VerificationStatusSettings(t *testing.T) {
+	cfg := model.DefaultProSettings().MergeV2RecoveryConfig()
+	for _, raw := range []string{"", "404", "404, 409,502", "404,404"} {
+		cfg.VerificationHTTPStatuses = raw
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(raw, err)
+		}
+	}
+	for _, raw := range []string{"200", "600", "404,", "false", "404;409"} {
+		cfg.VerificationHTTPStatuses = raw
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("invalid status list", raw)
+		}
+	}
+}

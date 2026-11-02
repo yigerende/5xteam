@@ -56,6 +56,10 @@ func (s *Server) updateProMergeV2Stage(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 409, nil, "已受理或已完成的事实不可重置；不会重复提交")
 		return
 	}
+	if m.VerificationOnly && input.Stage == "submit" && input.Status != "completed" {
+		writeAPI(w, 409, nil, "该原单已进入仅核验流程，不能清除提交记录或重复提交")
+		return
+	}
 	if input.Stage == "submit" && m.SubmittedAt != nil && input.Status != "completed" && !input.ConfirmNotAccepted {
 		writeAPI(w, 400, nil, "请先确认上游确实未受理，才能重置提交步骤")
 		return
@@ -85,6 +89,10 @@ func (s *Server) updateProMergeV2Stage(w http.ResponseWriter, r *http.Request) {
 		p.ProLastError = ""
 		m.UpdatedAt = now
 		m.Message = "手动修正" + labels[input.Stage] + "；续跑仅执行剩余步骤"
+		if p.MergeV2Resolved() && (input.Stage == "remove" || input.Stage == "groups") && m.Recovery != nil {
+			m.Recovery.SetPhase("tail")
+			m.Recovery.Attempts, m.Recovery.Exhausted, m.Recovery.NextAt = 0, false, nil
+		}
 		if input.Stage == "submit" {
 			if input.Status == "completed" {
 				if m.SubmittedAt == nil {

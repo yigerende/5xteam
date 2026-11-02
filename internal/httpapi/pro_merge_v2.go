@@ -17,8 +17,9 @@ var errMergeV2Unknown = errors.New("导出停用结果待确认；自动恢复�
 
 type mergeV2LoginKey struct{}
 type mergeV2LoginOptions struct {
-	TeamID string
-	Call   func(string, map[string]any) (any, error)
+	TeamID                   string
+	VerificationHTTPStatuses []int
+	Call                     func(string, map[string]any) (any, error)
 }
 
 // Queue waits and child login can outlive the mother's AT. Read the current
@@ -82,7 +83,7 @@ func (s *Server) mergeV2Checkpoint(ctx context.Context, email, team string, meth
 				checkpointErr = context.Canceled
 				return
 			}
-			if m.SubmittedAt != nil || p.MergeV2Resolved() || p.MergeV2Completed() {
+			if m.SubmittedAt != nil || m.VerificationOnly || p.MergeV2Resolved() || p.MergeV2Completed() {
 				checkpointErr = errMergeV2Unknown
 				return
 			}
@@ -144,8 +145,20 @@ func (s *Server) mergeV2Checkpoint(ctx context.Context, email, team string, meth
 			m.Steps["submit"], m.Status, m.Error = "completed", "running", ""
 			m.Message = "上游已受理导出并停用请求；不代表停用或退款已完成"
 			m.UpdatedAt = now
+		case "merge_v2_verify":
+			if m.SubmittedAt == nil || p.MergeV2Resolved() {
+				checkpointErr = errors.New("缺少待核验提交检查点")
+				return
+			}
+			m.VerificationOnly = true
+			if m.Recovery == nil {
+				m.Recovery = &model.ProMergeV2Recovery{Cycles: 1}
+			}
+			m.Recovery.SetPhase("removing")
+			m.Status, m.Steps["submit"], m.Message = "unknown", "unknown", "提交返回配置的核验状态码，仅核验原单，禁止重复提交"
+			m.UpdatedAt = time.Now()
 		case "merge_v2_rejected":
-			if p.MergeV2Resolved() {
+			if p.MergeV2Resolved() || m.VerificationOnly {
 				checkpointErr = errors.New("已受理请求不可撤销检查点")
 				return
 			}
@@ -189,7 +202,7 @@ func (s *Server) performProMergeV2Attempt(ctx context.Context, email string) (ou
 	if err = check(); err != nil {
 		return p, err
 	}
-	if p.ProMergeV2 != nil && p.ProMergeV2.SubmittedAt != nil && !p.MergeV2Resolved() {
+	if p.ProMergeV2 != nil && (p.ProMergeV2.SubmittedAt != nil || p.ProMergeV2.VerificationOnly) && !p.MergeV2Resolved() {
 		return p, errMergeV2Unknown
 	}
 	settings, _, _, err := s.proAccountPushSettings(p)
@@ -339,17 +352,22 @@ func (s *Server) performProMergeV2Attempt(ctx context.Context, email string) (ou
 		if _, err = s.mergeV2Update(email, "invite", "running", "邀请子号进入目标团队"); err != nil {
 			return p, err
 		}
-		err = retryProStep(ctx, settings.RetryCount, settings.RetryIntervalSeconds, func() error {
-			if e := check(); e != nil {
-				return e
+		p, err = s.claimMergeV2Stage(email, "invite")
+		if err != nil {
+			return p, err
+		}
+		token, e := s.mergeV2AdminAccessToken(ctx, admin.ID, admin.TeamAccountID)
+		if e == nil {
+			var present bool
+			present, e = client.MergeV2TargetPresent(ctx, token, admin.TeamAccountID, email)
+			if e == nil && !present {
+				_, e = client.Invite(ctx, token, admin.TeamAccountID, email, settings.TargetSeatType)
 			}
-			token, e := s.mergeV2AdminAccessToken(ctx, admin.ID, admin.TeamAccountID)
-			if e != nil {
-				return e
-			}
-			_, e = client.Invite(ctx, token, admin.TeamAccountID, email, settings.TargetSeatType)
-			return e
-		})
+		}
+		if e != nil {
+			return p, &mergeV2RetryError{cause: e}
+		}
+
 		if err != nil {
 			return p, err
 		}
@@ -362,7 +380,15 @@ func (s *Server) performProMergeV2Attempt(ctx context.Context, email string) (ou
 		if _, err = s.mergeV2Update(email, "login", "running", "重新登录并选择受邀团队"); err != nil {
 			return p, err
 		}
-		opts := &mergeV2LoginOptions{TeamID: admin.TeamAccountID, Call: func(method string, args map[string]any) (any, error) {
+		p, err = s.claimMergeV2Stage(email, "login")
+		if err != nil {
+			return p, err
+		}
+		statuses, err := settings.MergeV2RecoveryConfig().VerificationStatuses()
+		if err != nil {
+			return p, err
+		}
+		opts := &mergeV2LoginOptions{TeamID: admin.TeamAccountID, VerificationHTTPStatuses: statuses, Call: func(method string, args map[string]any) (any, error) {
 			return s.mergeV2Checkpoint(ctx, email, admin.TeamAccountID, method, args)
 		}}
 		loginCtx := context.WithValue(ctx, mergeV2LoginKey{}, opts)
@@ -405,17 +431,13 @@ func (s *Server) performProMergeV2Attempt(ctx context.Context, email string) (ou
 		if e != nil {
 			return p, e
 		}
-		err = retryProStep(ctx, settings.RetryCount, settings.RetryIntervalSeconds, func() error {
-			if e := check(); e != nil {
-				return e
+		if err = check(); err == nil {
+			var token string
+			token, err = s.mergeV2AdminAccessToken(ctx, admin.ID, admin.TeamAccountID)
+			if err == nil {
+				err = client.RemoveMergeV2Target(ctx, token, admin.TeamAccountID, email, p.ProMergeV2.UserID, false)
 			}
-			token, e := s.mergeV2AdminAccessToken(ctx, admin.ID, admin.TeamAccountID)
-			if e != nil {
-				return e
-			}
-			_, e = client.Kick(ctx, token, admin.TeamAccountID, p.ProMergeV2.UserID)
-			return e
-		})
+		}
 		unlockRemove()
 		if err != nil {
 			return p, err

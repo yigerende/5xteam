@@ -33,6 +33,28 @@ class MergeV2ProtocolTests(unittest.TestCase):
         r.json.return_value={"success":True} if body is None else body
         return r
 
+    def test_configured_response_retains_submission_for_verification(self):
+        for configured, status, verifies in [(None,404,True),([409],409,True),([409],404,False)]:
+            with self.subTest(configured=configured,status=status):
+                f=self.flow()
+                if configured is not None: f.payload["merge_v2"]["verification_http_statuses"]=configured
+                with patch.object(f.web_session,"request",return_value=self.response(status,{})) as req,patch.object(merge_v2.bridge,"call") as rpc:
+                    result=f.submit_export(session())
+                methods=[c.args[0] for c in rpc.call_args_list]
+                self.assertEqual("merge_v2_verify" in methods,verifies)
+                self.assertEqual("merge_v2_rejected" in methods,not verifies)
+                self.assertFalse(result["success"]);self.assertFalse(result["retryable"])
+                self.assertNotIn("merge_v2_accepted",methods);req.assert_called_once()
+
+    def test_transport_retry_requires_no_request_evidence(self):
+        from curl_cffi.requests.exceptions import ConnectionError
+        for code,not_sent in [(5,True),(6,True),(7,True),(28,False),(35,False),(56,False)]:
+            f=self.flow()
+            with patch.object(f.web_session,"request",side_effect=ConnectionError("fixture",code=code)),patch.object(merge_v2.bridge,"call") as rpc:
+                result=f.submit_export(session())
+            self.assertEqual(result["retryable"],not_sent)
+            self.assertEqual("merge_v2_rejected" in [c.args[0] for c in rpc.call_args_list],not_sent)
+
     def test_exact_single_request_and_same_session(self):
         f=self.flow();rpc=[]
         with patch.object(f.web_session,"request",return_value=self.response()) as request,patch.object(merge_v2.bridge,"call",side_effect=lambda method,**kw:rpc.append(method) or True):

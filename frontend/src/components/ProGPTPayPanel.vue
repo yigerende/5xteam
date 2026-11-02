@@ -36,7 +36,7 @@ function setProviderRole(provider, role) {
   else if (role === 'disabled' && settings.backup_provider === provider) settings.backup_provider = ''
 }
 const queryProvider = ref('tokenseek')
-const automation = reactive({ merge_v2_recovery:{enabled:true,retry_seconds:30,max_cycles:2,max_attempts:3}, balance_fallback_enabled:false,purchase_schedule_enabled:false,purchase_windows:[],ejh_plan_templates:{},nexovcc_plan_templates:{}, scheduled_enabled:false,max_unmerged:5,schedule_interval_seconds:120,quota_enabled: false, quota_used_threshold: 100, quota_check_interval_seconds: 120, auto_merge_enabled: false, auto_delete_enabled: false, auto_merchant_enabled:false,auto_merge_v2_enabled:false,merchant_success_fee_usd:'0.00', merchant_api_url:'https://refunds.llmrefund.com/v1/refunds', merchant_key_present:false, deletion_check_interval_seconds: 300, target_admin_id: '', target_seat_type: 'default', concurrency: 2, merge_concurrency: 2, retry_count: 2,recharge_replacement_count: 2,recharge_failover_count: 0, retry_interval_seconds: 3 })
+const automation = reactive({ merge_v2_recovery:{enabled:true,retry_seconds:30,max_cycles:2,max_attempts:3,verification_http_statuses:'404'}, balance_fallback_enabled:false,purchase_schedule_enabled:false,purchase_windows:[],ejh_plan_templates:{},nexovcc_plan_templates:{}, scheduled_enabled:false,max_unmerged:5,schedule_interval_seconds:120,quota_enabled: false, quota_used_threshold: 100, quota_check_interval_seconds: 120, auto_merge_enabled: false, auto_delete_enabled: false, auto_merchant_enabled:false,auto_merge_v2_enabled:false,merchant_success_fee_usd:'0.00', merchant_api_url:'https://refunds.llmrefund.com/v1/refunds', merchant_key_present:false, deletion_check_interval_seconds: 300, target_admin_id: '', target_seat_type: 'default', concurrency: 2, merge_concurrency: 2, retry_count: 2,recharge_replacement_count: 2,recharge_failover_count: 0, retry_interval_seconds: 3 })
 automation.oai_confirmation=normalizeOAISettings()
 automation.oai_confirmation_concurrency=2
 automation.oai_inquiry={...defaultOAIInquiry}
@@ -262,9 +262,10 @@ onBeforeUnmount(() => { disposed = true; purchaseGroupsController?.abort(); edit
         <label class="toggle-row wide"><div><strong>查额度达标后合并空间2.0</strong><small>邀请 → 重新登录受邀团队 → 提交导出停用 → 移出团队 → 调整分组。受理后移出并收尾；结果不明时按下方配置移出、核验个人套餐。退款仍以卡台流水为准。</small></div><input v-model="automation.auto_merge_v2_enabled" @change="selectDisposition('auto_merge_v2_enabled')" type="checkbox"/><i></i></label>
         <section class="oai-confirmation-settings wide" aria-label="合并2.0自动恢复设置">
           <h4>合并2.0 · 移出后套餐核验</h4>
-          <label class="toggle-row"><div><strong>提交结果不明时自动恢复</strong><small>沿用原账号、原团队和代理，先移出并复查，再重新登录个人空间。明确 Free 则完成收尾；明确仍付费才重新排队办理。等待期间释放执行名额，超限保留证据等待人工处理。</small></div><input v-model="automation.merge_v2_recovery.enabled" type="checkbox"/><i></i></label>
+          <label class="toggle-row"><div><strong>合并2.0失败自动恢复</strong><small>沿用原账号、原团队和代理。邀请及登录使用高级设置中的重试次数和间隔；已提交的核验结果，已受理的只做收尾。等待期间释放执行名额，次数耗尽结束本轮并保留记录。</small></div><input v-model="automation.merge_v2_recovery.enabled" type="checkbox"/><i></i></label>
           <div class="settings-fields">
-            <label class="field"><span>恢复间隔（秒）</span><input v-model.number="automation.merge_v2_recovery.retry_seconds" type="number" min="5" max="3600" required/></label>
+            <label class="field"><span>提交后仅核验的 HTTP 状态码</span><input v-model="automation.merge_v2_recovery.verification_http_statuses" placeholder="404"/><small>默认 404；多个用英文逗号分隔。这类原单只核验，不重新提交。</small></label>
+            <label class="field"><span>核验/移出重试间隔（秒）</span><input v-model.number="automation.merge_v2_recovery.retry_seconds" type="number" min="5" max="3600" required/></label>
             <label class="field"><span>最多恢复轮次</span><input v-model.number="automation.merge_v2_recovery.max_cycles" type="number" min="1" max="5" required/></label>
             <label class="field"><span>每轮最多核验次数</span><input v-model.number="automation.merge_v2_recovery.max_attempts" type="number" min="1" max="10" required/></label>
           </div>

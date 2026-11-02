@@ -45,14 +45,14 @@ func (s *Server) startProEndJob(email string, unlock func(), quality *proQuality
 	if err != nil {
 		return p, err
 	}
-	if p.IsProDead() {
+	if p.IsProDead() && !(action == "merge_v2" && p.MergeV2DeadCleanupAllowed()) {
 		return p, errProAccountDead
 	}
 	if !p.ProActionsAllowed() {
 		return p, errors.New("账号不在 Pro 管理中")
 	}
 	manual := action == "manual_deactivate" || action == "manual_merge" || action == "manual_merchant" || action == "manual_merge_v2"
-	if !manual && (p.ProAuto.StopRequested || p.ProAuto.Status == "stopped") {
+	if !manual && (p.ProAuto.StopRequested || p.ProAuto.Status == "stopped") && !p.MergeV2DeadCleanupAllowed() {
 		return p, errors.New("用户已停止该账号流程，请手动续跑")
 	}
 	if action == "manual_merge_v2" {

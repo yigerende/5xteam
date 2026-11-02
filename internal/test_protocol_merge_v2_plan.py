@@ -10,6 +10,8 @@ class PlanTests(unittest.TestCase):
     def test_strict_plan(self):
         self.assertEqual(f.parse_plan(self.data(),'personal'),'free')
         self.assertEqual(f.parse_plan(self.data('pro','chatgptpro',True),'personal'),'paid')
+        self.assertEqual(f.parse_plan(self.data('promax','chatgptpromax',True),'personal'),'paid')
+        self.assertEqual(f.parse_plan(self.data('free','chatgptpromax',False),'personal'),'free')
         for d in ({},self.data('free','chatgptpro',True),self.data('free','chatgptpro',None),self.data('pro','chatgptpro',False),self.data('free','chatgptpro','false')):
             with self.assertRaises(ValueError):f.parse_plan(d,'personal')
         with self.assertRaises(ValueError):f.parse_plan(self.data(),'another')
