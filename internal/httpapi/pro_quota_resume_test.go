@@ -37,6 +37,9 @@ func quotaResumeFixture(t *testing.T, orderStatus string) *proExecutionFixture {
 		p.ProAuto = model.ProAutoState{ID: "stopped-flow", OrderID: "paid-order", CardID: "original-card", Status: "stopped", Stage: "login", StopRequested: true, StopVersion: 1, Error: "用户已停止全自动流程", StartedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-3 * time.Minute), QuotaUsedThreshold: 100, QuotaIntervalSeconds: 60, Steps: map[string]string{"login": "interrupted", "recharge": "completed", "oauth": "failed"}}
 		p.ProManualStages = map[string]model.ProStageProgress{"oauth": {Status: "completed", StartedAt: oauthAt.Add(-time.Minute), UpdatedAt: oauthAt}, "push": {Status: "completed", StartedAt: pushAt.Add(-time.Second), UpdatedAt: pushAt}}
 		p.ProStageOverrides = map[string]model.ProStageOverride{"quota": {Status: "waiting", UpdatedAt: now}}
+		// A stopped replacement chain can retain a successor now outside Pro.
+		// Recover only this paid account, preserving the successor's stop/history.
+		p.ProAuto.Replacement = &model.ProRechargeReplacement{RootEmail: f.email, NextEmail: "stopped-successor@example.com", Limit: 1, Message: "用户已停止整条换号流程"}
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -133,6 +136,9 @@ func TestProQuotaResumeOnlyMonitorsOriginalPaidAccount(t *testing.T) {
 			}
 			if p.ProAuto.ID != before.ProAuto.ID || p.ProAuto.OrderID != before.ProAuto.OrderID || p.ProAuto.CardID != before.ProAuto.CardID || !p.ProPushStartedAt.Equal(*before.ProPushStartedAt) || !p.ProPushDeadline().Equal(*before.ProPushDeadline()) {
 				t.Fatal("changed original flow/payment/deadline")
+			}
+			if p.ProAuto.Replacement.NextEmail != before.ProAuto.Replacement.NextEmail || p.ProAuto.Replacement.Pending || p.ProAuto.Replacement.Queued {
+				t.Fatal("changed replacement history or restarted replacement work")
 			}
 			if _, ok := p.ProStageOverrides["quota"]; ok {
 				t.Fatal("stale quota display override")

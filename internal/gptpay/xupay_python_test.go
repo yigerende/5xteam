@@ -61,8 +61,12 @@ func TestXUPayPythonOrderStatusWithoutLegacyCapabilities(t *testing.T) {
 		{"processing", "processing", "preparing", "pending", "pending", "processing", true},
 		{"in_progress_review", "processing", "review", "pending", "review", "processing", true},
 		{"payment_unknown", "review", "review", "review", "not_started", "manual_review", false},
-		{"paid_activation_unknown", "succeeded", "succeeded", "review", "review", "manual_review", false},
-		{"paid_activation_pending", "succeeded", "succeeded", "pending", "pending", "processing", true},
+		{"paid_activation_unknown", "succeeded", "succeeded", "review", "review", "success", false},
+		{"paid_activation_pending", "succeeded", "succeeded", "pending", "pending", "success", true},
+		{"paid_activation_missing", "review", "succeeded", "", "review", "success", false},
+		{"paid_followup_running", "processing", "succeeded", "review", "pending", "success", true},
+		{"paid_followup_failed", "failed", "succeeded", "review", "review", "success", false},
+		{"order_success_without_paid", "succeeded", "review", "active", "disabled", "manual_review", false},
 		{"renewal_failed", "succeeded", "succeeded", "active", "review", "success", false},
 		{"renewal_disabled", "succeeded", "succeeded", "active", "disabled", "success", false},
 		{"renewal_kept", "succeeded", "succeeded", "active", "kept", "success", false},
@@ -82,6 +86,9 @@ func TestXUPayPythonOrderStatusWithoutLegacyCapabilities(t *testing.T) {
 			}
 			if tc.payment == "succeeded" && !o.RetryBlocked() {
 				t.Fatal("confirmed payment allowed resubmission")
+			}
+			if tc.payment == "succeeded" && tc.activation != "active" && (r.ActivationStatus != tc.activation || !strings.Contains(r.RetryHint, "订阅核实尚未完成") || r.FailureReason != "") {
+				t.Fatal("activation diagnostics lost or blocked a confirmed payment")
 			}
 			if tc.name == "renewal_failed" && (r.CancellationStatus != "failed" || r.RetryHint == "") {
 				t.Fatal("missing renewal failure diagnostics")

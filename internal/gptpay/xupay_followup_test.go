@@ -14,7 +14,7 @@ import (
 func TestXUPayAutomaticRunningAndOriginalCheck(t *testing.T) {
 	for _, tc := range []struct{ payment, activation, renewal, want string }{
 		{"action_required", "pending", "not_started", "processing"},
-		{"succeeded", "review", "review", "processing"},
+		{"succeeded", "review", "review", "success"},
 		{"succeeded", "active", "review", "success"},
 		{"succeeded", "active", "disabled", "success"},
 		{"failed", "pending", "not_started", "processing"},

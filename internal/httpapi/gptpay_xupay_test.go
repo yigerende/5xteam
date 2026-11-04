@@ -90,12 +90,12 @@ func TestXUPayEndToEndOriginalOrderAndPaidFence(t *testing.T) {
 		t.Fatal(o)
 	}
 	o = payOrder(t, payCall(t, s.refreshGPTPayOrder, "id", o.ID, map[string]any{}))
-	if o.Status != "processing" || o.Remote.PaymentState != "succeeded" {
-		t.Fatal("paid not yet active misclassified", o)
+	if o.Status != "success" || o.Remote.PaymentState != "succeeded" || o.Remote.ActivationStatus != "pending" || o.Remote.RetryHint == "" {
+		t.Fatal("activation check blocked confirmed payment", o)
 	}
 	activation = "review"
 	o = payOrder(t, payCall(t, s.refreshGPTPayOrder, "id", o.ID, map[string]any{}))
-	if o.Status != "manual_review" || !o.RetryBlocked() {
+	if o.Status != "success" || !o.RetryBlocked() || o.Remote.ActivationStatus != "review" {
 		t.Fatal(o)
 	}
 	_ = payOrder(t, payCall(t, s.retryGPTPayOrder, "id", o.ID, map[string]any{}))

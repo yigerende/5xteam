@@ -63,6 +63,7 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 		paymentCode  int
 		loseSession  bool
 		cancellation string
+		activation   string
 		cmsnav       bool
 		xupay        bool
 		running      bool
@@ -90,6 +91,8 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 		{name: "xupay_pro5_complete", xupay: true, plan: "pro5", status: "completed", quota: 100},
 		{name: "xupay_running_review", xupay: true, running: true, status: "completed", quota: 100, cancellation: "review"},
 		{name: "xupay_cancel_failed", xupay: true, status: "completed", quota: 100, cancellation: "review"},
+		{name: "xupay_activation_review", xupay: true, status: "completed", quota: 100, activation: "review", cancellation: "review"},
+		{name: "xupay_activation_pending", xupay: true, status: "completed", quota: 100, activation: "pending", cancellation: "pending"},
 		{name: "xupay_uncertain", xupay: true, status: "failed", paymentCode: 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,7 +118,11 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 						if tc.cancellation != "" {
 							renewal = tc.cancellation
 						}
-						fmt.Fprintf(w, `{"order":{"id":"auto-remote","product_id":%q,"workflow":"subscription","status":"succeeded","activation":"active","renewal":%q},"payment":{"state":"succeeded","fee_state":"charged"}}`, product, renewal)
+						activation := "active"
+						if tc.activation != "" {
+							activation = tc.activation
+						}
+						fmt.Fprintf(w, `{"order":{"id":"auto-remote","product_id":%q,"workflow":"subscription","status":"succeeded","activation":%q,"renewal":%q},"payment":{"state":"succeeded","fee_state":"charged"}}`, product, activation, renewal)
 						return
 					}
 					purchases.Add(1)

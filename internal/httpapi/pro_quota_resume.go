@@ -50,6 +50,9 @@ func (s *Server) resumeProQuota(w http.ResponseWriter, r *http.Request, expected
 		v.ProAuto.Status, v.ProAuto.Stage, v.ProAuto.Error = "waiting_quota", "quota", ""
 		v.ProAuto.NextCheckAt, v.ProAuto.RetryAt = &now, nil
 		v.ProAuto.UpdatedAt = now
+		if v.ProAuto.Replacement != nil {
+			v.ProAuto.Replacement.Message = "原账号已付款，已恢复原账号额度监控；换号记录保留"
+		}
 		if v.ProAuto.Steps == nil {
 			v.ProAuto.Steps = map[string]string{}
 		}

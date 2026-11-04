@@ -121,11 +121,11 @@ func TestXUPayOriginalCheckAcceptanceAndUncertainRecovery(t *testing.T) {
 			s, st, email := gptPayFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == "GET":
-					activation, renewal := "review", "review"
+					activation, renewal, payment := "review", "review", "review"
 					if active {
-						activation = "active"
+						activation, payment = "active", "succeeded"
 					}
-					fmt.Fprintf(w, `{"order":{"id":"existing","product_id":"pro","workflow":"subscription","status":"succeeded","activation":%q,"renewal":%q},"payment":{"state":"succeeded","can_check":%t,"fee_state":"charged"}}`, activation, renewal, allowed)
+					fmt.Fprintf(w, `{"order":{"id":"existing","product_id":"pro","workflow":"subscription","status":"succeeded","activation":%q,"renewal":%q},"payment":{"state":%q,"can_check":%t,"fee_state":"charged"}}`, activation, renewal, payment, allowed)
 				case r.URL.Path == "/api/v1/orders/existing/payment/check":
 					checks++
 					if uncertain {
@@ -224,7 +224,7 @@ func TestXUPayPythonMissingCheckCapabilityUsesOnlyStatus(t *testing.T) {
 			reads++
 			status, payment, activation := "review", "review", "review"
 			if paid {
-				status, payment, activation = "succeeded", "succeeded", "active"
+				status, payment, activation = "succeeded", "succeeded", "review"
 			}
 			fmt.Fprintf(w, `{"order":{"id":"existing","product_id":"pro20x","workflow":"subscription","status":%q,"activation":%q,"renewal":"review"},"payment":{"state":%q,"message":"请查看原订单"}}`, status, activation, payment)
 		case r.Method == "POST" && r.URL.Path == "/api/v1/orders":

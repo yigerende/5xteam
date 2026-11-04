@@ -172,19 +172,6 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 409, nil, errProAccountDead.Error())
 		return
 	}
-	if replacement := p.ProAuto.Replacement; replacement != nil {
-		if replacement.NextEmail != "" || replacement.Pending || (p.ProAuto.Stage == "recharge" && p.ProAuto.Status == "failed") {
-			writeAPI(w, 409, nil, firstNonEmpty(replacement.Message, "第二步失败后仅换号，不再重试原账号"))
-			return
-		}
-		if replacement.Queued {
-			root, _, e := s.store.MailAccountCredential(replacement.RootEmail)
-			if e != nil || root.ProAuto.StopRequested {
-				writeAPI(w, 409, nil, "换号流程已停止")
-				return
-			}
-		}
-	}
 	if p.MergeV2Started() {
 		writeAPI(w, 409, nil, "该账号已进入合并空间2.0，请从该流程续跑")
 		return
@@ -212,6 +199,21 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 	if input.RetryCurrent && !automatic && p.CanResumeProQuota() {
 		s.resumeProQuota(w, r, p)
 		return
+	}
+	// Quota-only recovery uses the original paid account; historical successor
+	// pointers must still block a new purchase, not this explicit recovery.
+	if replacement := p.ProAuto.Replacement; replacement != nil {
+		if replacement.NextEmail != "" || replacement.Pending || (p.ProAuto.Stage == "recharge" && p.ProAuto.Status == "failed") {
+			writeAPI(w, 409, nil, firstNonEmpty(replacement.Message, "第二步失败后仅换号，不再重试原账号"))
+			return
+		}
+		if replacement.Queued {
+			root, _, e := s.store.MailAccountCredential(replacement.RootEmail)
+			if e != nil || root.ProAuto.StopRequested {
+				writeAPI(w, 409, nil, "换号流程已停止")
+				return
+			}
+		}
 	}
 	s.proAutoMu.Lock()
 	_, running := s.proAutoJobs[email]

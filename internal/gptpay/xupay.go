@@ -338,15 +338,11 @@ func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 	}
 	switch {
 	case p.State == "succeeded":
-		switch o.Activation {
-		case "active":
-			r.Status = "success"
-		case "pending":
-			r.Status = "processing"
-		default:
-			if !running {
-				r.Status, r.FailureReason = "manual_review", "序付已确认付款成功，订阅生效待核实；禁止再次付款，请核实原订单"
-			}
+		// Confirmed payment completes Space's purchase step. Activation and
+		// renewal checks remain diagnostics; neither may block RT/AT or repay.
+		r.Status = "success"
+		if o.Activation != "active" {
+			r.RetryHint = "序付已确认付款成功，订阅核实尚未完成；请在序付支付全监控查看，不得重复付款"
 		}
 	case p.State == "review" || p.State == "action_required" || o.Status == "review" || o.Status == "succeeded" || p.FeeState == "charged":
 		if !running {
@@ -368,7 +364,10 @@ func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 		r.FailureReason += "（" + r.ErrorCode + "）"
 	}
 	if r.Status == "success" && r.CancellationStatus == "failed" {
-		r.RetryHint = "订阅已生效，取消自动续费失败；请在序付续费管理接续处理，不得重复付款"
+		if r.RetryHint != "" {
+			r.RetryHint += "；"
+		}
+		r.RetryHint += "付款已成功，取消自动续费失败；请在序付续费管理接续处理，不得重复付款"
 	}
 	retry := r.Status == "failed"
 	r.Retryable = &retry

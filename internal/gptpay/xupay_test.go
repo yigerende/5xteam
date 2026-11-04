@@ -68,9 +68,9 @@ func TestXUPayPaymentActivationAndRenewal(t *testing.T) {
 	for _, tc := range []struct{ name, payment, activation, renewal, order, status, cancel string }{
 		{"queued", "preparing", "pending", "not_started", "queued", "processing", "waiting"},
 		{"payment_unknown", "checking", "pending", "not_started", "processing", "processing", "waiting"},
-		{"paid_pending", "succeeded", "pending", "pending", "succeeded", "processing", "pending"},
-		{"paid_review", "succeeded", "review", "review", "succeeded", "manual_review", "failed"},
-		{"legacy_paid", "succeeded", "not_checked", "disabled", "succeeded", "manual_review", "success"},
+		{"paid_pending", "succeeded", "pending", "pending", "succeeded", "success", "pending"},
+		{"paid_review", "succeeded", "review", "review", "succeeded", "success", "failed"},
+		{"legacy_paid", "succeeded", "not_checked", "disabled", "succeeded", "success", "success"},
 		{"done", "succeeded", "active", "disabled", "succeeded", "success", "success"},
 		{"renewal_failed", "succeeded", "active", "review", "succeeded", "success", "failed"},
 		{"renewal_running", "succeeded", "active", "retrying", "processing", "success", "pending"},

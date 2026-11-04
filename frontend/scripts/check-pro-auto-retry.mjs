@@ -54,3 +54,18 @@ await replaced.refresh();assert.equal(replaced.email.value,'new@example.com');as
 const exhausted=fixture();exhausted.state.value={id:'old',stage:'recharge',status:'failed',replacement:{limit:0,attempts:0}}
 assert.equal(exhausted.retryCurrent.value,false);assert.equal(exhausted.canStart.value,false)
 console.log('Passed: replacement progress follows successor and exhausted step two cannot restart the original account')
+
+for(const original of [
+ {status:'stopped',stop_requested:true},
+ {status:'failed',payment_status:'success',quota_resume_available:true},
+ {status:'waiting_quota',stage:'quota'},
+]){
+ const f=fixture();f.email.value='paid@example.com'
+ const state={id:'paid-flow',...original,replacement:{next_email:'removed@example.com'}}
+ f.state.value=state
+ f.replies.set('/api/pro-accounts/paid%40example.com/auto-pro',state)
+ await f.refresh()
+ assert.equal(f.calls.length,1);assert.equal(f.email.value,'paid@example.com');assert.equal(f.state.value.id,'paid-flow')
+ assert.equal(f.active.value,original.status==='waiting_quota')
+}
+console.log('Passed: stopped and paid quota recovery stays on the original account instead of a historical successor')
