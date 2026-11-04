@@ -4,7 +4,7 @@ import { reconciliationStatus } from '../ejh-reconciliation-view'
 import { usdToR } from '../ejh-profit'
 const props=defineProps({data:{type:Object,required:true},masked:Boolean})
 const display=value=>props.masked?'---':value
-const report=computed(()=>reconciliationStatus(props.data))
+const report=computed(()=>props.data._overview?.reconciliation || reconciliationStatus(props.data))
 const value=computed(()=>report.value.value)
 const state=computed(()=>props.masked?'unknown':report.value.state)
 </script>

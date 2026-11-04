@@ -129,3 +129,24 @@ for (const input of [jsonAccount, [jsonAccount], { accounts: [jsonAccount] }]) {
 
 
 console.log('mail import parser: ok')
+
+
+// Import success must not wait for a slow refresh or be reported as failed when
+// the committed data's subsequent read fails.
+const { readFileSync } = await import('node:fs')
+const { default: vm } = await import('node:vm')
+const { default: ts } = await import('typescript')
+const component=readFileSync(new URL('../src/components/MailManagementView.vue',import.meta.url),'utf8').split('<script setup>')[1].split('</script>')[0]
+const parsed=ts.createSourceFile('mail.js',component,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS)
+const fn=parsed.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text==='importAccounts').getText(parsed)
+for(const failed of [false,true]){
+ let release;const blocked=new Promise((resolve,reject)=>{release=()=>failed?reject(Error('read unavailable')):resolve()})
+ const messages=[],calls=[]
+ const ctx=vm.createContext({busy:{value:''},importForm:{enterPro:true,group:'free',raw:'input'},importProgress:{},selectedEmails:{value:new Set()},accountEmailKey:r=>r.email,parseImport:()=>Array.from({length:26},(_,i)=>({email:`${i}@example.com`})),api:async(path,options)=>{calls.push(options);return {imported:options.body.accounts.length,entered_pro:options.body.accounts.length}},loadAccounts:()=>blocked,setMessage:(...v)=>messages.push(v),emit(){}})
+ vm.runInContext(fn+';this.run=importAccounts',ctx);await ctx.run()
+ assert.equal(ctx.busy.value,'');assert.equal(ctx.importProgress.complete,true);assert.equal(ctx.importProgress.enteredPro,26)
+ assert.deepEqual(calls.map(c=>c.body.accounts.length),[25,1]);assert.ok(calls.every(c=>c.body.enter_pro===true))
+ assert.match(messages[0][0],/导入完成/);release();await new Promise(resolve=>setImmediate(resolve))
+ assert.equal(ctx.importProgress.error,'');if(failed)assert.match(messages.at(-1)[0],/导入已完成；列表更新失败/)
+}
+console.log('Passed: import-to-Pro batches, immediate committed success, separate list-read errors')

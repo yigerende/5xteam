@@ -42,10 +42,14 @@ type AdminAccountCredentials struct {
 }
 
 type Store struct {
-	mu   sync.Mutex
-	path string
-	key  []byte
-	db   *sql.DB
+	revisionMu       sync.Mutex
+	revisionDB       *sql.DB
+	revisionEpoch    uint64
+	revisionIdentity string
+	mu               sync.Mutex
+	path             string
+	key              []byte
+	db               *sql.DB
 }
 
 func Open(dataDir string) (*Store, error) {
@@ -143,7 +147,15 @@ func Open(dataDir string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.revisionMu.Lock()
+	if s.revisionDB != nil {
+		_ = s.revisionDB.Close()
+		s.revisionDB = nil
+	}
+	s.revisionMu.Unlock()
+	return s.db.Close()
+}
 
 func (s *Store) initSchema() error {
 	_, err := s.db.Exec(`
@@ -460,7 +472,15 @@ func (s *Store) SaveMailAccountToPro(profile model.MailAccountProfile, credentia
 	return s.saveImportedMailAccount(profile, credentials, true)
 }
 
-func (s *Store) saveImportedMailAccount(profile model.MailAccountProfile, credentials model.MailAccountCredentials, enterPro bool) (model.MailAccountProfile, error) {
+// ImportMailAccount reports creation from the same locked lookup/save, avoiding
+// a full MailAccounts projection for each row in an import batch.
+func (s *Store) ImportMailAccount(profile model.MailAccountProfile, credentials model.MailAccountCredentials, enterPro bool) (model.MailAccountProfile, bool, error) {
+	created := false
+	saved, err := s.saveImportedMailAccount(profile, credentials, enterPro, &created)
+	return saved, created, err
+}
+
+func (s *Store) saveImportedMailAccount(profile model.MailAccountProfile, credentials model.MailAccountCredentials, enterPro bool, created ...*bool) (model.MailAccountProfile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	profile.Email = strings.ToLower(strings.TrimSpace(profile.Email))
@@ -494,6 +514,9 @@ func (s *Store) saveImportedMailAccount(profile model.MailAccountProfile, creden
 				profile.CreatedAt = now
 			}
 		case errors.Is(err, sql.ErrNoRows):
+			if len(created) > 0 && created[0] != nil {
+				*created[0] = true
+			}
 			var identity [16]byte
 			if _, err = rand.Read(identity[:]); err != nil {
 				return model.MailAccountProfile{}, err

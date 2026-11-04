@@ -93,8 +93,15 @@ func (s *Server) listOutsideInvalidATMailEmails(w http.ResponseWriter, r *http.R
 
 func (s *Server) listMailAccounts(w http.ResponseWriter, r *http.Request) {
 	if paginationRequested(r) {
-		page := s.parsePagination(r)
-		result, err := s.store.MailAccountsPageContext(r.Context(), "mail", r.URL.Query().Get("query"), r.URL.Query().Get("space_state"), page.Limit, page.Offset)
+		reader, err := s.store.ProListReader(r.Context())
+		if err != nil {
+			writeAPI(w, 500, nil, "读取邮件账号失败")
+			return
+		}
+		view := &Server{store: reader}
+		page := view.parsePagination(r)
+		result, err := reader.MailAccountsPageContext(r.Context(), "mail", r.URL.Query().Get("query"), r.URL.Query().Get("space_state"), page.Limit, page.Offset)
+		reader.Close()
 		if err != nil {
 			writeAPI(w, http.StatusInternalServerError, nil, "读取邮件账号失败: "+err.Error())
 			return
@@ -235,17 +242,12 @@ func (s *Server) importMailAccounts(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		creds := model.MailAccountCredentials{Email: email, MailPassword: importedString(raw, "mail_password"), ClientID: importedString(raw, "client_id"), MailRefreshToken: importedString(raw, "mail_refresh_token"), PickupURL: importedString(raw, "pickup_url"), GptPassword: importedString(raw, "gpt_password"), TotpSecret: importedString(raw, "totp_secret"), AccessToken: importedString(raw, "access_token")}
-		_, existed := findLocalMailAccount(s.store, email)
-		save := s.store.SaveMailAccount
-		if input.EnterPro {
-			save = s.store.SaveMailAccountToPro
-		}
-		_, err := save(model.MailAccountProfile{Email: email, Label: email, Group: strings.TrimSpace(input.Group)}, creds)
+		_, created, err := s.store.ImportMailAccount(model.MailAccountProfile{Email: email, Label: email, Group: strings.TrimSpace(input.Group)}, creds, input.EnterPro)
 		if err != nil {
 			writeAPI(w, http.StatusBadRequest, nil, err.Error())
 			return
 		}
-		if existed {
+		if !created {
 			updated++
 		} else {
 			imported++

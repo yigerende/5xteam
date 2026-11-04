@@ -682,8 +682,14 @@ type proSettingsInput struct {
 	VM2APIKey    string `json:"vm2api_key"`
 }
 
-func (s *Server) getProSettings(w http.ResponseWriter, _ *http.Request) {
-	v, _, _, err := s.store.ProSettings()
+func (s *Server) getProSettings(w http.ResponseWriter, r *http.Request) {
+	reader, err := s.store.ProListReader(r.Context())
+	if err != nil {
+		writeAPI(w, 500, nil, "读取开通设置失败")
+		return
+	}
+	defer reader.Close()
+	v, _, _, err := reader.ProSettings()
 	if err != nil {
 		writeAPI(w, 500, nil, err.Error())
 		return

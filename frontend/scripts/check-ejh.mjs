@@ -15,10 +15,10 @@ import { returnTypes, operationStates, caseSummary, summarizeCardBalances, retur
 const source=readFileSync(new URL('../src/components/EJHManagementView.vue',import.meta.url),'utf8')
 const script=source.split('<script setup>')[1].split('</script>')[0]
 const parsed=ts.createSourceFile('ejh.js',script,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS)
-const methods=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&['action','show','cardAction','openCards','cancelSelected'].includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n')
+const methods=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&['action','show','cardAction','readCard','openCards','cancelSelected'].includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n')
 function fixture(result){
  const calls=[],message={text:'',type:''},openForm={count:3,request_id:'',input:{cardAmount:'20',cardCurrency:'USD'}},detail={value:null}
- const ctx=vm.createContext({refreshEJHSync,initializing:{value:false},initialError:{value:''},settingsRequest:createLatestRequest(),dataRequest:createLatestRequest(),applyRefundFeeOverrides,detail:{value:null},applyPaymentPolicies,cardOrigin,savedEnabled:{value:false},savedRefreshSeconds:{value:30},isClosedCard,cardState,ejhRefreshGate:createEJHRefreshGate({storage:()=>null}),setInterval,clearInterval,progress:{value:null},selectedCards:{value:[]},openUncertain:{value:false},page:{value:1},disposed:false,runEJHBatch,refreshCancellationProgress,cancelReason:()=>String(),message,openForm,detail,busy:{value:false},operationStates,window:{confirm:()=>true,prompt:()=> '20'},crypto:{randomUUID:()=> 'fixture-id'},load:async()=>{},api:async(path,options)=>{calls.push({path,options});return result}})
+ const ctx=vm.createContext({refreshEJHSync,refreshSaved(){},cardReading:{},refreshing:{value:false},refreshProgress:{value:null},initializing:{value:false},initialError:{value:''},settingsRequest:createLatestRequest(),dataRequest:createLatestRequest(),applyRefundFeeOverrides,detail:{value:null},applyPaymentPolicies,cardOrigin,savedEnabled:{value:false},savedRefreshSeconds:{value:30},isClosedCard,cardState,ejhRefreshGate:createEJHRefreshGate({storage:()=>null}),setInterval,clearInterval,progress:{value:null},selectedCards:{value:[]},openUncertain:{value:false},page:{value:1},disposed:false,runEJHBatch,refreshCancellationProgress,cancelReason:()=>String(),message,openForm,detail,busy:{value:false},operationStates,window:{confirm:()=>true,prompt:()=> '20'},crypto:{randomUUID:()=> 'fixture-id'},reloadCard:async id=>ctx.data.value.cards.find(c=>c.id===id),load:async()=>{},api:async(path,options)=>{calls.push({path,options});return result}})
  vm.runInContext(methods+'\nthis.methods={cardAction,openCards,cancelSelected}',ctx)
  return {ctx,calls,message,openForm,detail}
 }
@@ -41,12 +41,11 @@ assert.deepEqual(summary.totals,[{currency:'EUR',count:1,amount:'20.00'},{curren
 assert.equal(summary.missing,3);assert.equal(summary.failed,1);assert.equal(summary.known,6)
 assert.equal(summarizeCardBalances([snapshot('999999999999.999999'),snapshot('0.000001')]).totals[0].amount,'1000000000000.00')
 assert.deepEqual(summarizeCardBalances([]).totals,[])
-const balanceMethods=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&['action','show','load','refreshAllBalances','queryAccountBalance','historicalBalance'].includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n')
+const balanceMethods=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&['action','show','refreshAllBalances','historicalBalance'].includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n')
 for(const stop of [false,true]){
  const calls=[],allCards=[{id:'one',remote:{orderNo:'one'}},{id:'two',remote:{orderNo:'two'}},{id:'closed',remote:{status:'2',orderNo:'closed'}},{id:'closing',remote:{status:'8',orderNo:'closing'}}]
- const ctx=vm.createContext({refreshEJHSync,initializing:{value:false},initialError:{value:''},settingsRequest:createLatestRequest(),dataRequest:createLatestRequest(),applyRefundFeeOverrides,detail:{value:null},applyPaymentPolicies,cardOrigin,savedEnabled:{value:false},savedRefreshSeconds:{value:30},isClosedCard,cardState,ejhRefreshGate:createEJHRefreshGate({storage:()=>null}),setInterval,clearInterval,progress:{value:null},selectedCards:{value:[]},openUncertain:{value:false},page:{value:1},disposed:false,runEJHBatch,refreshCancellationProgress,cancelReason:()=>String(),message:{text:'',type:''},busy:{value:false},disposed:false,data:{value:{cards:allCards}},balanceProgress:{value:null},balanceFailures:{value:[]},api:async(path,options)=>{calls.push({path,options});if(path==='/api/ejh/dashboard')return {cards:allCards};if(path.includes('/one/')){if(stop)ctx.disposed=true;throw Error('fixture card failure')}return {}}})
- vm.runInContext(balanceMethods+'\nthis.run=refreshAllBalances;this.load=load',ctx)
- await ctx.load();assert.equal(calls.length,1,'Reading saved snapshots must not query supplier balances')
+ const ctx=vm.createContext({refreshEJHSync,refreshSaved(){},cardReading:{},refreshing:{value:false},refreshProgress:{value:null},initializing:{value:false},initialError:{value:''},settingsRequest:createLatestRequest(),dataRequest:createLatestRequest(),applyRefundFeeOverrides,detail:{value:null},applyPaymentPolicies,cardOrigin,savedEnabled:{value:false},savedRefreshSeconds:{value:30},isClosedCard,cardState,ejhRefreshGate:createEJHRefreshGate({storage:()=>null}),setInterval,clearInterval,progress:{value:null},selectedCards:{value:[]},openUncertain:{value:false},page:{value:1},disposed:false,runEJHBatch,refreshCancellationProgress,cancelReason:()=>String(),message:{text:'',type:''},busy:{value:false},disposed:false,data:{value:{cards:allCards}},balanceProgress:{value:null},balanceFailures:{value:[]},api:async(path,options)=>{calls.push({path,options});if(path==='/api/ejh/view?section=balance_targets')return {cards:allCards.filter(c=>!['2','8'].includes(c.remote.status))};if(path.includes('/one/')){if(stop)ctx.disposed=true;throw Error('fixture card failure')}return {}}})
+ vm.runInContext(balanceMethods+'\nthis.run=refreshAllBalances',ctx)
  await ctx.run()
  assert.equal(calls.filter(c=>c.path==='/api/ejh/balance').length,1)
  assert.equal(calls.filter(c=>c.options?.body?.action==='balance').length,stop?1:2,'Refresh must include all cards, continue on failure, stop when leaving')
@@ -133,7 +132,7 @@ console.log('Passed: searchable currencies, code/name/region matching, legacy an
 const currencyMethods=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&['save','action','show','chooseTemplate','cardStatus'].includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n')
 const settings={templates:[{id:'currency-template',name:'币种测试',valid_days:30,cardType:'fixture',cardAmount:'20',cardCurrency:'CNH',billCurrency:'EUR'}]}
 const calls=[]
-const currencyContext=vm.createContext({refreshEJHSync,initializing:{value:false},initialError:{value:''},settingsRequest:createLatestRequest(),dataRequest:createLatestRequest(),applyRefundFeeOverrides,detail:{value:null},applyPaymentPolicies,cardOrigin,savedEnabled:{value:false},savedRefreshSeconds:{value:30},isClosedCard,cardState,ejhRefreshGate:createEJHRefreshGate({storage:()=>null}),setInterval,clearInterval,progress:{value:null},selectedCards:{value:[]},openUncertain:{value:false},page:{value:1},disposed:false,runEJHBatch,refreshCancellationProgress,cancelReason:()=>String(),cardStates,cardState,settings,data:{value:{}},openForm:{template:'currency-template',input:null},busy:{value:false},message:{},api:async(path,options)=>{const body=JSON.parse(JSON.stringify(options.body));calls.push({path,body});return body}})
+const currencyContext=vm.createContext({refreshEJHSync,refreshSaved(){},cardReading:{},refreshing:{value:false},refreshProgress:{value:null},initializing:{value:false},initialError:{value:''},settingsRequest:createLatestRequest(),dataRequest:createLatestRequest(),applyRefundFeeOverrides,detail:{value:null},applyPaymentPolicies,cardOrigin,savedEnabled:{value:false},savedRefreshSeconds:{value:30},isClosedCard,cardState,ejhRefreshGate:createEJHRefreshGate({storage:()=>null}),setInterval,clearInterval,progress:{value:null},selectedCards:{value:[]},openUncertain:{value:false},page:{value:1},disposed:false,runEJHBatch,refreshCancellationProgress,cancelReason:()=>String(),cardStates,cardState,settings,data:{value:{}},openForm:{template:'currency-template',input:null},busy:{value:false},message:{},api:async(path,options)=>{const body=JSON.parse(JSON.stringify(options.body));calls.push({path,body});return body}})
 vm.runInContext(currencyMethods+'\nthis.run={save,chooseTemplate,cardStatus}',currencyContext)
 await currencyContext.run.save()
 assert.equal(calls[0].path,'/api/ejh/settings')
@@ -162,27 +161,8 @@ assert.ok(cardViewSource.includes('card_type: card.card_type'))
 assert.ok(cardViewSource.includes('/api/gptpay/card-cases'))
 console.log('Passed: EJH switch false/true payloads, card type column/default/selector, separate associations and unlinked-card action guard')
 
-// Entering EJH refreshes supplier read endpoints once; cache remains usable on errors.
-const entryMethods=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&['action','show','load','refreshAllBalances','refreshCardsAndTrades','refreshPage','initialize','historicalBalance'].includes(s.name?.text)).map(s=>s.getText(parsed)).join(';')
-for(const enabled of [false,true]) for(const syncFails of [false,true]) {
- const calls=[], cards=[{id:'one',remote:{orderNo:'one'}},{id:'local',issuer_linked:false,remote:{}}]
- const ctx=vm.createContext({refreshEJHSync,initializing:{value:false},initialError:{value:''},settingsRequest:createLatestRequest(),dataRequest:createLatestRequest(),applyRefundFeeOverrides,detail:{value:null},applyPaymentPolicies,cardOrigin,savedEnabled:{value:false},savedRefreshSeconds:{value:30},isClosedCard,cardState,ejhRefreshGate:createEJHRefreshGate({storage:()=>null}),setInterval,clearInterval,progress:{value:null},selectedCards:{value:[]},openUncertain:{value:false},page:{value:1},disposed:false,runEJHBatch,refreshCancellationProgress,cancelReason:()=>String(),message:{text:'',type:''},busy:{value:false},ready:{value:false},settings:{enabled:false},disposed:false,data:{value:{cards:[]}},balanceProgress:{value:null},balanceFailures:{value:[]},api:async(path,options)=>{
-  calls.push({path,options});if(path==='/api/ejh/settings')return {enabled};if(path==='/api/ejh/dashboard')return {cards};if(path==='/api/ejh/sync'){if(syncFails)throw Error('sync unavailable');return {synced:true}};return {}
- }})
- vm.runInContext(entryMethods+';this.initialize=initialize;this.refreshPage=refreshPage',ctx)
- await ctx.initialize()
- assert.equal(ctx.ready.value,true);assert.equal(ctx.data.value.cards.length,2)
- assert.equal(calls.filter(c=>c.path==='/api/ejh/sync').length,enabled?1:0)
- assert.equal(calls.filter(c=>c.path==='/api/ejh/balance').length,enabled?1:0)
- assert.equal(calls.filter(c=>c.options?.body?.action==='balance').length,enabled?1:0)
- assert.ok(!calls.some(c=>c.options?.body?.action&&c.options.body.action!=='balance'),'No automatic card mutation or sensitive detail request')
- assert.equal(ctx.balanceFailures.value.length,enabled&&syncFails?1:0)
- const count=calls.length;ctx.busy.value=true;await ctx.refreshPage();assert.equal(calls.length,count,'Busy refresh cannot overlap')
- ctx.busy.value=false;ctx.disposed=true;await ctx.refreshPage();assert.equal(calls.length,count,'Disposed view cannot refresh')
-}
-assert.ok(source.includes('onMounted(initialize)'))
-console.log('Passed: EJH entry refresh, disabled guard, read-only endpoints, partial-failure retention, busy and disposal guards')
-
+// Entry, cancellation, failed-only refresh and concurrent navigation are exercised
+// through the complete component in check-ejh-page.mjs.
 const sorted=newestCards([{id:'old',local:{created_at:'2026-10-01'},synced_at:'2026-10-20'},{id:'new',local:{created_at:'2026-10-15'}},{id:'missing'}])
 assert.deepEqual(sorted.map(c=>c.id),['new','old','missing'])
 const usable={id:'card',remote:{status:'1',orderNo:'order'},local:{active_accounts:0,pending_accounts:0}}

@@ -15,9 +15,9 @@ import EJHExternalTransfer from './EJHExternalTransfer.vue'
 const props = defineProps({ data: { type: Object, required: true }, busy: Boolean, ready: Boolean, enabled: Boolean, progress: { type: Object, default: null }, failures: { type: Array, default: () => [] } })
 const display = value => props.enabled ? value : '---'
 const emit = defineEmits(['refresh', 'retry-failed', 'ledger-updated', 'refund-fee-saved'])
-const balances = computed(() => summarizeCardBalances(props.data.cards))
-const usd = computed(() => summarizeCardBalancesUSD(props.data.cards, props.data.operations))
-const inFlight = computed(() => summarizeInFlightPayments(props.data.cases, props.data.cards, props.data.operations, props.data.trades))
+const balances = computed(() => props.data._overview?.balances || summarizeCardBalances(props.data.cards))
+const usd = computed(() => props.data._overview?.usd || summarizeCardBalancesUSD(props.data.cards, props.data.operations))
+const inFlight = computed(() => props.data._overview?.inFlight || summarizeInFlightPayments(props.data.cases, props.data.cards, props.data.operations, props.data.trades))
 const ledger = computed(() => props.data.recharge_ledger || { amount: '' })
 const editing = ref(false), saving = ref(false), draft = ref(''), error = ref(''), amountInput = ref(null)
 const valid = computed(() => draft.value.trim() === '' || /^\d{1,12}(\.\d{1,2})?$/.test(draft.value.trim()))

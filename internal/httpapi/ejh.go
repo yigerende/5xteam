@@ -30,6 +30,7 @@ type ejhRuntime struct {
 	syncMu       sync.Mutex
 	syncJobs     map[string]*ejhSyncTask
 	ctx          context.Context
+	views        ejhViewCache
 	syncClosed   bool // guarded by lifecycle; prevents Add racing shutdown Wait
 }
 
@@ -68,6 +69,10 @@ func (s *Server) ejhRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/ejh/test", s.testEJH)
 	m.HandleFunc("POST /api/ejh/balance", s.testEJH)
 	m.HandleFunc("GET /api/ejh/dashboard", s.ejhDashboard)
+	m.HandleFunc("GET /api/ejh/view", s.ejhView)
+	m.HandleFunc("GET /api/ejh/overview", s.ejhOverview)
+	m.HandleFunc("GET /api/ejh/revision", s.ejhRevision)
+	m.HandleFunc("GET /api/ejh/operations", s.ejhOperationProgress)
 	m.HandleFunc("GET /api/ejh/finance", s.ejhFinance)
 	m.HandleFunc("POST /api/ejh/sync", s.syncEJH)
 	m.HandleFunc("GET /api/ejh/sync/{id}", s.getEJHSyncTask)
@@ -173,49 +178,53 @@ func (s *Server) ejhDashboard(w http.ResponseWriter, r *http.Request) {
 	view.ejhDashboardSnapshot(w, r)
 }
 
+type ejhDisplayCard struct {
+	ejh.CardRecord
+	AutoCancelCheck *ejhAutoCancelCheck `json:"auto_cancel_check,omitempty"`
+	Local           *gptpay.Card        `json:"local,omitempty"`
+	Linked          bool                `json:"issuer_linked"`
+}
+
 func (s *Server) ejhDashboardSnapshot(w http.ResponseWriter, r *http.Request) {
+	data, err := s.readEJHDashboard(true)
+	if err != nil {
+		writeAPI(w, 500, nil, err.Error())
+		return
+	}
+	writeAPI(w, 200, data, "")
+}
+
+func (s *Server) readEJHDashboard(includeAudit bool) (map[string]any, error) {
 	cards, e := store.EJHRecords[ejh.CardRecord](s.store, "card")
 	if e != nil {
-		writeAPI(w, 500, nil, e.Error())
-		return
+		return nil, e
 	}
 	ops, e := store.EJHRecords[ejh.Operation](s.store, "operation")
 	if e != nil {
-		writeAPI(w, 500, nil, e.Error())
-		return
+		return nil, e
 	}
 	trades, e := store.EJHRecords[ejh.TradeRecord](s.store, "trade")
 	if e != nil {
-		writeAPI(w, 500, nil, e.Error())
-		return
+		return nil, e
 	}
 	cases, e := s.store.EJHCases()
 	if e != nil {
-		writeAPI(w, 500, nil, e.Error())
-		return
+		return nil, e
 	}
 	ejh.ApplyReversalFeeRates(trades, cases)
 	checks, e := store.EJHRecords[ejhAutoCancelCheck](s.store, "auto_cancel_check")
 	if e != nil {
-		writeAPI(w, 500, nil, e.Error())
-		return
+		return nil, e
 	}
 	checkByCard := map[string]ejhAutoCancelCheck{}
 	for _, check := range checks {
 		checkByCard[check.CardID] = check
 	}
-	type row struct {
-		ejh.CardRecord
-		AutoCancelCheck *ejhAutoCancelCheck `json:"auto_cancel_check,omitempty"`
-		Local           *gptpay.Card        `json:"local,omitempty"`
-		Linked          bool                `json:"issuer_linked"`
-	}
-	rows := []row{}
+	rows := []ejhDisplayCard{}
 	visibleCards := map[string]bool{}
 	locals, e := s.store.GPTPayCardsByType("ejh")
 	if e != nil {
-		writeAPI(w, 500, nil, e.Error())
-		return
+		return nil, e
 	}
 	localByID := make(map[string]gptpay.Card, len(locals))
 	for _, local := range locals {
@@ -224,15 +233,14 @@ func (s *Server) ejhDashboardSnapshot(w http.ResponseWriter, r *http.Request) {
 	for _, c := range cards {
 		kind, err := s.store.ProCardTypeForNumber(c.Remote.Number)
 		if err != nil {
-			writeAPI(w, 500, nil, err.Error())
-			return
+			return nil, err
 		}
 		if kind != "ejh" {
 			continue
 		}
 		c.Remote.Number = maskEJH(c.Remote.Number)
 		c.Remote.CVV = ""
-		v := row{CardRecord: c, Linked: true}
+		v := ejhDisplayCard{CardRecord: c, Linked: true}
 		if check, ok := checkByCard[c.ID]; ok {
 			v.AutoCancelCheck = &check
 		}
@@ -247,7 +255,7 @@ func (s *Server) ejhDashboardSnapshot(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		copy := local
-		rows = append(rows, row{CardRecord: ejh.CardRecord{ID: local.ID, Remote: ejh.Card{Number: "**** " + local.Last4, Validity: fmt.Sprintf("%02d%02d", local.ExpMonth, local.ExpYear%100)}}, Local: &copy})
+		rows = append(rows, ejhDisplayCard{CardRecord: ejh.CardRecord{ID: local.ID, Remote: ejh.Card{Number: "**** " + local.Last4, Validity: fmt.Sprintf("%02d%02d", local.ExpMonth, local.ExpYear%100)}}, Local: &copy})
 		visibleCards[local.ID] = true
 	}
 	filteredCases := []ejh.Case{}
@@ -286,10 +294,12 @@ func (s *Server) ejhDashboardSnapshot(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.EJHGet("sync", "latest", &syncState)
 	var balance any
 	_ = s.store.EJHGet("balance", "latest", &balance)
-	audit, e := store.EJHRecords[map[string]any](s.store, "match_audit")
+	audit := []map[string]any{}
+	if includeAudit {
+		audit, e = store.EJHRecords[map[string]any](s.store, "match_audit")
+	}
 	if e != nil {
-		writeAPI(w, 500, nil, e.Error())
-		return
+		return nil, e
 	}
 	for _, a := range audit {
 		for _, key := range []string{"before", "after"} {
@@ -317,38 +327,32 @@ func (s *Server) ejhDashboardSnapshot(w http.ResponseWriter, r *http.Request) {
 	audit = filteredAudit
 	ledger, err := s.store.EJHRechargeLedger()
 	if err != nil {
-		writeAPI(w, 500, nil, err.Error())
-		return
+		return nil, err
 	}
 	settings, _, err := s.store.EJHSettings()
 	if err != nil {
-		writeAPI(w, 500, nil, err.Error())
-		return
+		return nil, err
 	}
 	usage, err := store.EJHRecords[store.EJHConsumption](s.store, "finance_usage")
 	if err != nil {
-		writeAPI(w, 500, nil, err.Error())
-		return
+		return nil, err
 	}
 	applyEJHFinancialConsumption(cases, usage)
 	refundFees, err := s.store.EJHRefundFees()
 	if err != nil {
-		writeAPI(w, 500, nil, err.Error())
-		return
+		return nil, err
 	}
 	merchantFees, feeErr := s.store.ProMerchantFees("ejh")
 	if feeErr != nil {
-		writeAPI(w, 500, nil, "读取 API 收费失败")
-		return
+		return nil, feeErr
 	}
 	policies, policyErr := s.store.CardPaymentPolicies("ejh")
 	if policyErr != nil {
-		writeAPI(w, 500, nil, "读取卡片回款方式失败")
-		return
+		return nil, policyErr
 	}
 	var autoCancel ejhAutoCancelState
 	_ = s.store.EJHGet("auto_cancel", "latest", &autoCancel)
-	writeAPI(w, 200, map[string]any{"auto_cancel": autoCancel, "payment_policies": policies, "merchant_fees": merchantFees, "cards": rows, "operations": ops, "trades": trades, "cases": cases, "sync": syncState, "balance": balance, "recharge_ledger": ledger, "refund_fees": refundFees, "reversal_fee_percent": settings.ReversalFeePercent, "page_refresh_seconds": settings.PageRefreshSeconds, "consumption_history": usage, "audit": audit, "server_time": time.Now()}, "")
+	return map[string]any{"auto_cancel": autoCancel, "payment_policies": policies, "merchant_fees": merchantFees, "cards": rows, "operations": ops, "trades": trades, "cases": cases, "sync": syncState, "balance": balance, "recharge_ledger": ledger, "refund_fees": refundFees, "reversal_fee_percent": settings.ReversalFeePercent, "page_refresh_seconds": settings.PageRefreshSeconds, "consumption_history": usage, "audit": audit, "server_time": time.Now()}, nil
 }
 func maskEJH(n string) string {
 	if len(n) > 4 {

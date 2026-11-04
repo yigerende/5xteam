@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { financeOverview } from '../ejh-finance'
 const props=defineProps({data:{type:Object,required:true},masked:Boolean,collapsible:Boolean})
 const display=value=>props.masked?'---':value
-const totals=computed(()=>financeOverview(props.data))
+const totals=computed(()=>props.data._overview?.finance || financeOverview(props.data))
 const earnings=computed(()=>totals.value.earnings)
 </script>
 <template>

@@ -34,6 +34,13 @@ func (s *Server) defaultPageSize() int {
 }
 
 func (s *Server) parsePagination(r *http.Request) paginationParams {
+	// Explicit valid sizes need no settings read or shared writer lock.
+	if size, err := strconv.Atoi(r.URL.Query().Get("page_size")); err == nil {
+		switch size {
+		case 10, 50, 100, 500:
+			return parsePagination(r)
+		}
+	}
 	defaultSize := s.defaultPageSize()
 	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
 	pageSize := parsePositiveInt(r.URL.Query().Get("page_size"), defaultSize)

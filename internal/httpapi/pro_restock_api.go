@@ -61,7 +61,7 @@ func (s *Server) registerProRestock(mux *http.ServeMux) {
 			return
 		}
 		defer reader.Close()
-		page := s.parsePagination(r)
+		page := (&Server{store: reader}).parsePagination(r)
 		v, e := reader.ProRestockDecisions(page.Limit, page.Offset)
 		if e != nil {
 			writeAPI(w, 500, nil, e.Error())

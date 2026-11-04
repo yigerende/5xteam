@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { api } from '../src/api.js'
 
+const counts=new Map()
 const server = http.createServer((req, res) => {
+  const n=(counts.get(req.url)||0)+1;counts.set(req.url,n)
+  if(req.url==='/drop-always'||req.url==='/drop-once'&&n===1||req.url==='/post-drop'){req.socket.destroy();return}
+  if(req.url==='/drop-body'&&n===1){res.writeHead(200,{'Content-Type':'application/json','Content-Length':'300'});res.write('{');setTimeout(()=>res.destroy(),10);return}
   if (req.url === '/stall') return
   res.setHeader('Content-Type', 'application/json')
   if (req.url === '/body-stall') { res.write('{"ok":'); return }
@@ -22,6 +26,17 @@ try {
   await assert.rejects(api(base+'/failure', {timeoutMs:1000}), error => error.status === 409 && error.message === 'conflict')
   assert.deepEqual(await api(base+'/', {timeoutMs:1000}), {method:'GET'})
   assert.deepEqual(await api(base+'/', {method:'POST',body:{}}), {method:'POST'})
+  assert.deepEqual(await api(base+'/drop-once',{timeoutMs:2000}),{method:'GET'})
+  assert.equal(counts.get('/drop-once'),2)
+  assert.deepEqual(await api(base+'/drop-body',{timeoutMs:2000}),{method:'GET'})
+  assert.equal(counts.get('/drop-body'),2)
+  await assert.rejects(api(base+'/drop-always',{timeoutMs:2000}),e=>e.network&&e.message.includes('网络连接中断'))
+  assert.equal(counts.get('/drop-always'),2)
+  await assert.rejects(api(base+'/post-drop',{method:'POST',body:{}}),/避免重复提交/)
+  assert.equal(counts.get('/post-drop'),1,'write replayed after lost response')
+  assert.equal(counts.get('/failure'),1,'business error retried')
+  assert.ok(counts.get('/stall')<=2,'timeout/cancellation retried')
+  console.log('Passed: transport loss retry once for reads, shared deadline, no write or HTTP error replay')
   console.log('Passed: real HTTP header/body timeout, navigation cancellation, status preservation, normal reads and unchanged writes')
 } finally {
   server.closeAllConnections()

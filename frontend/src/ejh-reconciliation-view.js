@@ -5,8 +5,8 @@ import { isClosedCard } from './card-status.js'
 
 // A display tolerance only. Never write off the difference or deduct it as cost.
 export const reconciliationToleranceUSD = '1.00'
-export function reconciliationStatus(data, now = Date.now(), maxAgeSeconds = 600) {
-  const value = financeOverview(data), issues = [...value.lossReasons]
+export function reconciliationStatus(data, now = Date.now(), maxAgeSeconds = 600, overview = null) {
+  const value = overview || financeOverview(data), issues = [...value.lossReasons]
   if (value.earnings.costIncomplete) issues.push('部分费用缺少金额或折算依据')
   if (data.sync?.error) issues.push('卡片或交易同步失败，保留上次数据')
   if (value.stale) issues.push(`${value.stale} 张卡余额查询失败`)

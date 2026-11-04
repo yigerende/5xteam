@@ -745,7 +745,9 @@ async function importAccounts() {
     }
     importProgress.complete = true;
     importForm.raw = "";
-    await loadAccounts();
+    // The import is already committed. A slow list read must not hold the
+    // import button or turn a successful import into a reported failure.
+    loadAccounts().catch(error => setMessage(`导入已完成；列表更新失败：${error.message}`, "error"));
     setMessage(
       `导入完成：新增 ${importProgress.imported}，更新 ${importProgress.updated}，跳过 ${importProgress.skipped}${enterPro ? `；已直接进入 Pro 管理 ${importProgress.enteredPro} 个` : ""}`,
       "success",

@@ -1,17 +1,15 @@
-import { applyPaymentPolicies } from '../src/payment-only.js'
-import { applyRefundFeeOverrides } from '../src/ejh-refund-cost.js'
-import { sortCardsByReturnState } from '../src/card-workflow-sort.js'
-import {cardOrigin} from '../src/card-platform.js'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import {readFileSync} from 'node:fs'
 import vm from 'node:vm'
-import { ref, reactive, computed, watch } from 'vue'
+import {ref,shallowRef,reactive,computed,watch} from 'vue'
 import * as ejh from '../src/ejh.js'
-import { createEJHRefreshGate } from '../src/ejhRefresh.js'
-import { refreshEJHSync } from '../src/ejhSync.js'
-import { createLatestRequest } from '../src/latestRequest.js'
-import { activationPlan } from '../src/proActivationPlan.js'
-
+import {applyPaymentPolicies} from '../src/payment-only.js'
+import {applyRefundFeeOverrides} from '../src/ejh-refund-cost.js'
+import {cardOrigin} from '../src/card-platform.js'
+import {createLatestRequest} from '../src/latestRequest.js'
+import {createEJHRefreshGate} from '../src/ejhRefresh.js'
+import {refreshEJHSync} from '../src/ejhSync.js'
+import {activationPlan} from '../src/proActivationPlan.js'
 const paid = (id, plan, created_at, payment_status = 'success') => ({ id, plan, created_at, payment_status })
 const account = { current_plan_type:'free', financial_cases:[paid('old','pro5','2026-10-01'),paid('paid','pro20','2026-10-02'),paid('retry','pro50','2026-10-03','failed'),paid('points','codex_point','2026-10-04')] }
 assert.equal(activationPlan(account).label,'Pro 20x')
@@ -20,222 +18,116 @@ assert.equal(activationPlan({current_plan_type:'pro',financial_cases:[]}).label,
 assert.equal(activationPlan({financial_cases:[paid('missing','','2026-10-01')]}).label,'套餐未记录')
 assert.equal(activationPlan({financial_cases:[paid('cmsnav','pro5x','2026-10-01')]}).label,'Pro 5x')
 
-const code = readFileSync(new URL('../src/components/EJHManagementView.vue',import.meta.url),'utf8').split('<script setup>')[1].split('</script>')[0].replace(/^import .*$/gm,'')
-const tick = () => new Promise(resolve=>setImmediate(resolve))
-let time=100000
-const saved = new Map(), storage={getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)}
-const gate=createEJHRefreshGate({now:()=>time,storage:()=>storage})
-function fixture({enabled=true,defaultPageSize=10,failSync=false,holdSync=false,confirmDelete=true,deleteResult={deleted:1,deleted_ids:['unopened']},savedCases=[],savedCards=[],failURLs=new Set(),holdDashboard=false,holdSettings=false,failDashboard=false}={}) {
- const calls=[],mounts=[],unmounts=[],confirmations=[]
- let release,savedPercent=6,failSave=false
+
+const code=readFileSync(new URL('../src/components/EJHManagementView.vue',import.meta.url),'utf8').split('<script setup>')[1].split('</script>')[0].replace(/^import .*$/gm,'')
+const tick=()=>new Promise(resolve=>setImmediate(resolve))
+const storage={getItem:()=>null,setItem(){}}
+const gate=createEJHRefreshGate({storage:()=>storage})
+const plain=v=>JSON.parse(JSON.stringify(v))
+const card=id=>({id,issuer_linked:true,remote:{orderNo:id,status:'1'},local:{}})
+function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=false,holdSync=false,holdSettings=false,holdView=false,failView=false,failURLs=new Set(),confirmDelete=true}={}){
+ const calls=[],unmounts=[],confirmations=[],timers=[],workers=[]
+ let release,percent=6,failSave=false,revision='1'
  const blocked=new Promise(resolve=>{release=resolve})
- const context=vm.createContext({refreshEJHSync,createLatestRequest,applyPaymentPolicies,applyRefundFeeOverrides,sortCardsByReturnState,cardOrigin,...ejh,ref,reactive,computed,watch(){},nextTick:tick,onMounted:fn=>mounts.push(fn),onBeforeUnmount:fn=>unmounts.push(fn),defineProps:()=>({defaultPageSize}),defineEmits:()=>()=>{},window:{localStorage:storage,addEventListener(){},removeEventListener(){},confirm:text=>{confirmations.push(text);return confirmDelete}},ejhRefreshGate:gate,setInterval:()=>0,clearInterval(){},CreditCard:{},CircleDashed:{},Clock3:{},CheckCircle2:{},isClosedCard:()=>false,
- async api(url,options={}){
-  calls.push({url,options});if(failURLs.has(url))throw Error("query failed")
-  if(url==='/api/ejh/settings'){
-   if(holdSettings)await blocked
-   if(options.method==='PUT'){if(failSave)throw Error('save failed');savedPercent=options.body.reversal_fee_percent}
-   return {enabled,reversal_fee_percent:savedPercent}
+ const source=()=>({cards,cases,trades:[],operations:[],audit:[],sync:{},reversal_fee_percent:percent,revision})
+ const document={hidden:false,addEventListener(){},removeEventListener(){}}
+ const context=vm.createContext({ref,shallowRef,reactive,computed,watch,URLSearchParams,AbortController,...ejh,applyPaymentPolicies,applyRefundFeeOverrides,cardOrigin,createLatestRequest,refreshEJHSync,ejhRefreshGate:gate,
+  createEJHOverviewWorker:()=>({calculate:async s=>{workers.push(s);return {fullHistoryCount:s.cases.length}},dispose(){}}),
+  nextTick:tick,onMounted(){},onBeforeUnmount:fn=>unmounts.push(fn),defineProps:()=>({defaultPageSize}),defineEmits:()=>()=>{},document,
+  window:{localStorage:storage,addEventListener(){},removeEventListener(){},confirm:t=>{confirmations.push(t);return confirmDelete}},
+  setInterval:()=>0,clearInterval(){},setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length},clearTimeout(){},CreditCard:{},CircleDashed:{},Clock3:{},CheckCircle2:{},isClosedCard:c=>c.remote?.status==='2',
+  async api(url,options={}){
+   calls.push({url,options});if(failURLs.has(url))throw Error('query failed')
+   if(url==='/api/ejh/settings'){
+    if(holdSettings)await blocked
+    if(options.method==='PUT'){if(failSave)throw Error('save failed');percent=options.body.reversal_fee_percent}
+    return {enabled,reversal_fee_percent:percent,page_refresh_seconds:300,templates:[]}
+   }
+   if(url==='/api/ejh/revision')return {revision}
+   if(url==='/api/ejh/overview')return source()
+   if(url.startsWith('/api/ejh/view?')){
+    const p=new URLSearchParams(url.split('?')[1]),section=p.get('section')
+    if(holdView)await blocked
+    if(failView)throw Error('read timed out')
+    if(section==='balance_targets')return {cards:cards.filter(c=>!c.normal_pending&&!['2','8'].includes(c.remote.status))}
+    if(section==='pending_targets')return {cards:cards.filter(c=>c.normal_pending)}
+    let rows=section==='cases'?cases.filter(c=>p.get('category')==='unopened'?c.state==='unopened':c.state!=='unopened'):section==='cards'?cards.filter(c=>p.get('card_id')?c.id===p.get('card_id'):ejh.cardLifecycle(c)===(p.get('lifecycle')||'normal')):section==='card'?cards.filter(c=>c.id===p.get('card_id')):[]
+    if(section==='cards')rows=rows.filter(c=>ejh.cardMatchesFilters(c,cases,p.get('card_state'),p.get('return_state'))&&ejh.cardMatchesSearch(c,cases,p.get('q'),p.get('card_id')))
+    else if(p.get('q'))rows=rows.filter(c=>JSON.stringify(c).includes(p.get('q')))
+    if(section==='cases'&&p.get('status'))rows=rows.filter(c=>c.state===p.get('status'))
+    const size=Number(p.get('page_size'))||10,page=Math.min(Number(p.get('page'))||1,Math.max(1,Math.ceil(rows.length/size)))
+    return {...source(),items:rows.slice((page-1)*size,page*size),page,total:rows.length,page_size:size,counts:Object.fromEntries(Object.keys(ejh.returnStates).map(k=>[k,cases.filter(c=>c.state===k).length])),card_total:cards.length,lifecycle_counts:{normal:cards.filter(c=>ejh.cardLifecycle(c)==='normal').length,closed:cards.filter(c=>ejh.cardLifecycle(c)==='closed').length},case_counts:{normal:cases.filter(c=>c.state!=='unopened').length,unopened:cases.filter(c=>c.state==='unopened').length}}
+   }
+   if(options.method==='DELETE'){
+    const removed=cases.filter(c=>c.state==='unopened'&&(url.endsWith('/unopened')||url.endsWith('/'+c.id)));cases=cases.filter(c=>!removed.includes(c));revision+='d'
+    return {deleted:removed.length,deleted_ids:removed.map(c=>c.id)}
+   }
+   if(url==='/api/ejh/sync'){if(holdSync)await blocked;if(failSync)throw Error('sync failed');return {synced:true}}
+   if(url.endsWith('/action'))return {status:'completed'}
+   if(url.startsWith('/api/ejh/operations'))return {items:[]}
+   return {}
   }
-  if(url==='/api/ejh/dashboard'){if(holdDashboard)await blocked;if(failDashboard)throw Error('read timed out');return {cards:savedCards,cases:savedCases,trades:[],operations:[],audit:[],sync:{},reversal_fee_percent:savedPercent}}
-  if(options.method==='DELETE')return deleteResult
-  if(url==='/api/ejh/sync'){if(holdSync)await blocked;if(failSync)throw Error('sync failed');return {synced:true}}
-  return {}
- }})
- context.watch=watch
- vm.runInContext(code+';globalThis.exposed={retryFailedRefresh,progress,initialize,refreshPage,refreshAllBalances,busy,message,balanceFailures,editLimit,saveLimit,data,limitID,limitValue,lifecycleFilter,filtered,setLifecycle,clearFilters,cardStatusFilter,targetCardID,changeTab,showCaseState,tab,status,query,accountReturnStates,caseCategory,caseCounts,setCaseCategory,deleteUnopenedCase,page,pageSize,visible,settings,save,load,ready,loading,initializing,initialError,pollSavedData};',context)
- return {...context.exposed,calls,confirmations,release,setFailSync:value=>{failSync=value},setFailSave:value=>{failSave=value},unmount:()=>unmounts.forEach(fn=>fn())}
+ })
+ vm.runInContext(code+';globalThis.exposed={retryFailedRefresh,progress,refreshProgress,refreshing,initialize,refreshPage,refreshAllBalances,busy,message,balanceFailures,editLimit,saveLimit,data,limitID,limitValue,lifecycleFilter,filtered,setLifecycle,clearFilters,cardStatusFilter,targetCardID,changeTab,showCaseState,tab,status,query,accountReturnStates,caseCategory,caseCounts,setCaseCategory,deleteUnopenedCase,page,pageSize,visible,settings,save,load,ready,loading,initializing,initialError,pollSavedData,overview,loadOverview,readError,refreshSaved,cardAction,cardReading,detail};',context)
+ return {...context.exposed,calls,workers,timers,document,confirmations,release,setHoldView:v=>holdView=v,setFailView:v=>failView=v,setRevision:v=>revision=v,setFailSync:v=>failSync=v,setFailSave:v=>failSave=v,unmount:()=>unmounts.forEach(fn=>fn())}
 }
-let f=fixture();await f.initialize()
-assert.equal(fixture({defaultPageSize:50}).pageSize.value,50,'EJH lists must use the global page size')
-assert.equal(f.calls.filter(r=>r.url==='/api/ejh/sync').length,1)
+let f=fixture();await f.initialize();await tick()
+assert.equal(f.calls.filter(c=>c.options.method).length,0,'entry must not invoke upstream')
+assert.equal(f.calls.filter(c=>c.url.includes('/dashboard')).length,0,'legacy full-list poll remains')
+assert.ok(f.timers.some(t=>t.ms===300000),'configured display interval ignored')
+assert.equal(f.busy.value,false)
+let before=f.calls.length;await f.pollSavedData()
+assert.deepEqual(f.calls.slice(before).map(c=>c.url),['/api/ejh/revision'],'unchanged data reloaded')
+f.document.hidden=true;before=f.calls.length;await f.pollSavedData();assert.equal(f.calls.length,before)
+f.document.hidden=false;f.setRevision('2');await f.pollSavedData();await tick()
+assert.ok(f.calls.slice(before).some(c=>c.url.startsWith('/api/ejh/view?')))
 f.unmount()
-let second=fixture();await second.initialize()
-assert.equal(second.calls.filter(r=>r.options.method).length,0,'remount repeated supplier refresh')
-await second.refreshPage()
-assert.equal(second.calls.filter(r=>r.url==='/api/ejh/sync').length,1,'manual retry was throttled')
-second.unmount()
-time+=30000
-f=fixture({holdSync:true});const original=f.initialize();await tick();f.unmount()
-second=fixture();const remount=second.initialize();await tick()
-assert.equal(second.calls.filter(r=>r.options.method).length,0,'in-flight refresh duplicated')
-f.release();await original;await remount
-assert.equal(f.calls.filter(r=>r.url==='/api/ejh/balance').length,0,'unmount started another supplier request')
-second.unmount()
-time+=30000
-f=fixture({failSync:true});await f.initialize();assert.equal(f.balanceFailures.value.length,1);f.unmount()
-second=fixture();await second.initialize();assert.equal(second.calls.filter(r=>r.options.method).length,0)
-await second.refreshPage();assert.equal(second.calls.filter(r=>r.url==='/api/ejh/sync').length,1)
-second.unmount()
-assert.equal(createEJHRefreshGate({now:()=>time,storage:()=>storage}).begin(true).reason,'cooldown','reload lost cooldown')
-time+=30000
-const renewed=createEJHRefreshGate({now:()=>time,storage:()=>storage}).begin(true)
-assert.equal(renewed.reason,undefined);renewed.finish()
-const noStorage=createEJHRefreshGate({now:()=>time,storage:()=>{throw Error('blocked storage')}})
-const lease=noStorage.begin(true);lease.finish();assert.equal(noStorage.begin(true).reason,'cooldown')
+assert.equal(fixture({defaultPageSize:50}).pageSize.value,50)
+console.log('Passed: saved-data entry, configured revision polling, no 5-second full reload, hidden-page pause')
 
-f=fixture();f.data.value.cards=[{id:'card1',local:{max_accounts:2},remote:{}}]
-f.editLimit(f.data.value.cards[0]);assert.equal(f.limitValue.value,2)
-f.limitValue.value='';await f.saveLimit();assert.equal(f.calls.length,0)
-f.limitValue.value=4;await f.saveLimit()
-assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0])),{url:'/api/gptpay/cards/card1',options:{method:'PUT',body:{max_accounts:4}}})
-assert.equal(f.limitID.value,'')
-f.unmount()
-console.log('Passed: saved activation plans, remount cooldown, manual retry, failed/interrupted/in-flight refresh, per-card limit form')
-f=fixture()
-f.data.value.cards=['1','2','5','8'].map(state=>({id:state,remote:{status:state},local:{}}))
-assert.equal(f.lifecycleFilter.value,'normal')
-assert.deepEqual(Array.from(f.filtered.value,c=>c.id),['1','5'])
-f.setLifecycle('closed');assert.deepEqual(Array.from(f.filtered.value,c=>c.id),['8','2'])
-f.cardStatusFilter.value='5';assert.equal(f.lifecycleFilter.value,'normal');assert.equal(f.filtered.value.length,1)
-f.cardStatusFilter.value='2';assert.equal(f.lifecycleFilter.value,'closed');assert.equal(f.filtered.value[0].id,'2')
-f.clearFilters();assert.equal(f.lifecycleFilter.value,'normal')
-f.targetCardID.value='8';assert.equal(f.lifecycleFilter.value,'closed');assert.equal(f.filtered.value[0].id,'8')
-f.setLifecycle('normal');assert.equal(f.targetCardID.value,'');assert.equal(f.cardStatusFilter.value,'')
-f.unmount()
-console.log('Passed: normal default, closed/closing category, detailed filter changes, reset and exact-card navigation')
-f=fixture()
-f.data.value.cases=['unopened','opened','waiting','returned'].map(state=>({id:state,email:state+'@example.com',state}))
-f.changeTab('cases')
-assert.deepEqual(Array.from(f.filtered.value,c=>c.id),['opened','waiting','returned'])
-assert.equal(Object.hasOwn(f.accountReturnStates,'unopened'),false)
-f.query.value='unopened@example.com';assert.equal(f.filtered.value.length,0)
-f.clearFilters();assert.equal(f.filtered.value.length,3)
-f.showCaseState('unopened');assert.equal(f.tab.value,'cases');assert.equal(f.caseCategory.value,'unopened');assert.equal(f.filtered.value[0].id,'unopened')
-assert.equal(f.caseCounts.value.normal,3);assert.equal(f.caseCounts.value.unopened,1)
-f.status.value='waiting';f.page.value=5;f.setCaseCategory('normal')
-assert.equal(f.status.value,'');assert.equal(f.page.value,1);assert.equal(f.filtered.value.length,3)
-f.showCaseState('waiting');assert.equal(f.tab.value,'cases');assert.equal(f.filtered.value[0].id,'waiting')
-f.changeTab('cards');f.changeTab('cases');assert.equal(f.caseCategory.value,'normal');assert.equal(f.filtered.value.length,3)
-f.unmount()
-console.log('Passed: normal returns default, separate unopened category, counts, search, summary navigation and category reset')
-
-const unopenedRows=Array.from({length:12},(_,i)=>({id:'unopened-'+i,email:'account-'+i+'@example.com',state:'unopened'}))
-const normalRow={id:'normal',email:'normal@example.com',state:'opened'}
-f=fixture({deleteResult:{deleted:12,deleted_ids:unopenedRows.map(c=>c.id)},savedCases:[normalRow]})
-f.data.value.cases=[...unopenedRows,normalRow];f.changeTab('cases');f.setCaseCategory('unopened')
-f.query.value='account-11@example.com'
-assert.equal(f.filtered.value.length,1)
-await f.deleteUnopenedCase()
-assert.match(f.confirmations[0],/全部 12 条.*其他分页和搜索范围外/)
-assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0])),{url:'/api/ejh/cases/unopened',options:{method:'DELETE',body:{confirm:true}}})
-assert.equal(f.caseCounts.value.unopened,0);assert.equal(f.caseCounts.value.normal,1)
-assert.match(f.message.text,/已删除 12 条/)
-f.unmount()
-f=fixture({deleteResult:{deleted:1,deleted_ids:['unopened-10']},savedCases:unopenedRows.slice(0,10)})
-f.data.value.cases=unopenedRows.slice(0,11);f.changeTab('cases');f.setCaseCategory('unopened');f.page.value=2
-await f.deleteUnopenedCase(f.visible.value[0])
-assert.equal(f.calls[0].url,'/api/ejh/cases/unopened-10');assert.equal(f.page.value,1)
-assert.match(f.confirmations[0],/account-10@example.com.*unopened-10/)
-f.unmount()
-f=fixture({confirmDelete:false});f.data.value.cases=unopenedRows;await f.deleteUnopenedCase()
-assert.equal(f.calls.length,0);assert.equal(f.data.value.cases.length,12);f.unmount()
-f=fixture();f.data.value.cases=unopenedRows;f.busy.value=true;await f.deleteUnopenedCase();f.busy.value=false;await f.deleteUnopenedCase(normalRow)
-assert.equal(f.calls.length,0);assert.equal(f.confirmations.length,0);f.unmount()
-console.log('Passed: delete all across search/pages, single deletion, last-page clamping, confirmation cancellation and busy/state guards')
-
-{
- const f=fixture();await f.initialize()
- assert.equal(f.data.value.reversal_fee_percent,6)
- f.settings.reversal_fee_percent=8
- assert.equal(f.data.value.reversal_fee_percent,6,'unsaved draft must not recalculate fee displays')
- await f.load()
- assert.equal(f.settings.reversal_fee_percent,8,'polling must retain the settings draft')
- assert.equal(f.data.value.reversal_fee_percent,6)
- f.setFailSave(true);await f.save()
- assert.equal(f.data.value.reversal_fee_percent,6,'failed save must not change displayed fees')
- assert.equal(f.settings.reversal_fee_percent,8)
- f.setFailSave(false);await f.save()
- assert.equal(f.data.value.reversal_fee_percent,8)
- f.settings.reversal_fee_percent=0;await f.save();await f.load()
- assert.equal(f.data.value.reversal_fee_percent,0,'explicit zero survives saving and refresh')
- f.unmount()
-}
-console.log('Passed: saved reversal fee rate, draft isolation, refresh retention, save failure and zero rate')
-
-let configuredNow=0
-const configuredGate=createEJHRefreshGate({now:()=>configuredNow,storage:()=>null})
-configuredGate.begin(true,120).finish()
-configuredNow=31000
-assert.equal(configuredGate.begin(true,120).reason,'cooldown','configured interval was ignored')
-const manual=configuredGate.begin(false,120);assert.equal(manual.reason,undefined);manual.finish()
-configuredNow+=120000
-const expired=configuredGate.begin(true,120);assert.equal(expired.reason,undefined);expired.finish()
-configuredNow+=6000
-const shorter=configuredGate.begin(true,5);assert.equal(shorter.reason,undefined);shorter.finish()
-console.log('Passed: configurable refresh interval and immediate manual refresh')
-
-// A disabled issuer must not refresh on entry or claim a refresh cooldown.
-time+=30000
-f=fixture({enabled:false});await f.initialize()
-assert.equal(f.calls.filter(r=>r.options.method).length,0,'disabled issuer auto queried')
-await f.refreshPage(true)
-assert.equal(f.calls.filter(r=>r.options.method).length,0,'automatic refresh bypassed switch')
-await f.refreshPage()
-assert.equal(f.calls.filter(r=>r.url==='/api/ejh/sync').length,1,'disabled manual sync blocked')
-assert.equal(f.calls.filter(r=>r.url==='/api/ejh/balance').length,1,'disabled manual balance blocked')
-f.unmount()
-console.log('Passed: disabled EJH skips automatic refresh and permits manual refresh')
-
-// Reading saved data is independent of settings and slow supplier refreshes.
-time+=30000
-f=fixture({holdSettings:true,savedCases:[normalRow]})
-let pending=f.initialize();await tick()
-assert.equal(f.data.value.cases.length,1,'slow settings hid available dashboard')
-assert.equal(f.busy.value,false,'initial reads locked card operations')
-assert.equal(f.calls.find(c=>c.url==='/api/ejh/dashboard').options.timeoutMs,15000)
-f.release();await pending;f.unmount()
-time+=30000
-f=fixture({holdSync:true,savedCases:[normalRow]})
-pending=f.initialize();await tick()
-assert.equal(f.ready.value,true);assert.equal(f.data.value.cases.length,1)
-const before=f.calls.filter(c=>c.url==='/api/ejh/dashboard').length
-f.pollSavedData();await tick()
-assert.equal(f.calls.filter(c=>c.url==='/api/ejh/dashboard').length,before+1,'supplier refresh stopped saved-data polling')
-f.release();await pending;f.unmount()
-f=fixture({enabled:false,holdDashboard:true})
-pending=f.initialize();await tick()
+f=fixture({holdView:true,cards:[card('old')]});let pending=f.initialize();await tick()
 const reads=Array.from({length:20},()=>f.load({background:true}));await tick()
-assert.equal(f.calls.filter(c=>c.url==='/api/ejh/dashboard').length,1,'slow dashboard produced overlapping polls')
-const signal=f.calls.find(c=>c.url==='/api/ejh/dashboard').options.signal
-f.unmount();assert.equal(signal.aborted,true)
-f.release();await pending;await Promise.all(reads)
-assert.equal(f.data.value.cases.length,0)
-f=fixture({enabled:false,failDashboard:true});await f.initialize()
-assert.match(f.initialError.value,/read timed out/)
-assert.equal(f.initializing.value,false);assert.equal(f.busy.value,false)
-assert.equal(f.ready.value,false);f.unmount()
-console.log('Passed: independent first load, visible data during sync, no overlapping polling, bounded reads and unmount cancellation')
+assert.equal(f.calls.filter(c=>c.url.startsWith('/api/ejh/view?')).length,1,'read storm')
+let signal=f.calls.find(c=>c.url.startsWith('/api/ejh/view?')).options.signal
+f.unmount();assert.equal(signal.aborted,true);f.release();await pending;await Promise.all(reads)
+assert.equal(f.data.value.cards.length,0,'unmounted response applied')
+f=fixture({holdView:true,cards:[card('old')]});pending=f.initialize();await tick()
+f.changeTab('cases');const newer=f.load();await tick()
+assert.equal(f.visible.value.length,0,'old section rendered as new rows')
+f.release();await pending;await newer;assert.equal(f.visible.value.length,0);f.unmount()
+f=fixture({failView:true});await f.initialize();assert.match(f.initialError.value,/timed out/);assert.equal(f.ready.value,false);assert.equal(f.busy.value,false);f.unmount()
+f=fixture({holdSettings:true,cards:[card('first')]});pending=f.initialize();await tick();assert.equal(f.visible.value.length,1,'settings hid current rows');f.release();await pending;f.unmount()
+console.log('Passed: repeated-read coalescing, navigation/unmount cancellation, stale response guard, independent settings')
 
-// Failed queries retry independently, with the same reentry and stop guards.
-time+=30000
-f=fixture({failSync:true});await f.initialize()
-let start=f.calls.length
-await f.retryFailedRefresh()
-assert.equal(f.balanceFailures.value.length,1,'failed retry must remain visible')
-assert.deepEqual(f.calls.slice(start).filter(c=>c.options.method).map(c=>c.url),['/api/ejh/sync'])
-f.setFailSync(false);start=f.calls.length;await f.retryFailedRefresh()
-assert.equal(f.balanceFailures.value.length,0)
-assert.deepEqual(f.calls.slice(start).filter(c=>c.options.method).map(c=>c.url),['/api/ejh/sync'])
-f.unmount()
-time+=30000
+f=fixture({cards:[card('normal'),{...card('closed'),remote:{status:'2'}},{...card('pending'),normal_pending:true}]});await f.initialize()
+assert.deepEqual(Array.from(f.visible.value,c=>c.id),['normal']);f.setLifecycle('closed');await f.load();assert.deepEqual(Array.from(f.visible.value,c=>c.id),['closed'])
+f.cardStatusFilter.value='normal_pending';assert.equal(f.lifecycleFilter.value,'normal_pending');await f.load();assert.equal(f.visible.value[0].id,'pending')
+f.clearFilters();f.targetCardID.value='closed';await f.load();assert.equal(f.visible.value[0].id,'closed');f.setLifecycle('normal');assert.equal(f.targetCardID.value,'');f.unmount()
+const unopened=Array.from({length:12},(_,i)=>({id:'u'+i,email:'test'+i+'@example.com',state:'unopened'})),normal={id:'normal',email:'normal@example.com',state:'opened'}
+f=fixture({cases:[...unopened,normal]});await f.initialize();await tick();assert.equal(f.overview.value._overview.fullHistoryCount,13,'overview paginated')
+f.showCaseState('unopened');f.query.value='test11@';await f.load();assert.equal(f.visible.value.length,1);assert.equal(f.caseCounts.value.unopened,12)
+await f.deleteUnopenedCase();await tick();assert.match(f.confirmations[0],/全部 12 条.*其他分页和搜索范围外/);assert.match(f.message.text,/已删除 12 条/);assert.equal(f.caseCounts.value.unopened,0);assert.equal(f.caseCounts.value.normal,1);f.unmount()
+f=fixture({cases:unopened.slice(0,11)});await f.initialize();f.showCaseState('unopened');f.page.value=2;await f.load();await f.deleteUnopenedCase(f.visible.value[0]);await tick();assert.equal(f.page.value,1);assert.equal(f.caseCounts.value.unopened,10);f.unmount()
+f=fixture({cases:unopened,confirmDelete:false});await f.initialize();await f.deleteUnopenedCase();assert.equal(f.calls.filter(c=>c.options.method==='DELETE').length,0);f.unmount()
+console.log('Passed: section/filter navigation, full-scope overview, delete across pages, clamp and confirmation')
+
+f=fixture({cards:[card('a')]});await f.initialize();f.settings.reversal_fee_percent=8;await f.load();assert.equal(f.settings.reversal_fee_percent,8);assert.equal(f.data.value.reversal_fee_percent,6)
+f.setFailSave(true);await f.save();assert.equal(f.data.value.reversal_fee_percent,6)
+f.setFailSave(false);await f.save();await tick();assert.equal(f.data.value.reversal_fee_percent,8)
+f.settings.reversal_fee_percent=0;await f.save();await tick();assert.equal(f.data.value.reversal_fee_percent,0)
+f.editLimit(f.data.value.cards[0]);f.limitValue.value='';before=f.calls.length;await f.saveLimit();assert.equal(f.calls.length,before)
+f.limitValue.value=4;f.setHoldView(true);await f.saveLimit();assert.equal(f.busy.value,false,'successful action waits for follow-up read');assert.equal(f.limitID.value,'');assert.match(f.message.text,/已保存/)
+f.release();await tick();f.unmount()
+f=fixture({cards:[card('a')]});await f.initialize();f.setFailView(true);f.editLimit(f.data.value.cards[0]);f.limitValue.value=4;await f.saveLimit();await tick();assert.match(f.message.text,/已保存/);assert.match(f.readError.value,/页面更新失败/);f.unmount()
+console.log('Passed: settings drafts/zero fee, immediate success, separate follow-up failure')
+
+f=fixture({holdSync:true,cards:[card('a')]});await f.initialize();pending=f.refreshPage();await tick();assert.equal(f.refreshing.value,true);assert.equal(f.busy.value,false,'refresh disabled all writes/views')
+await f.refreshPage();assert.equal(f.calls.filter(c=>c.url==='/api/ejh/sync').length,1,'double click duplicated sync')
+f.unmount();f.release();await pending;assert.equal(f.calls.filter(c=>c.url==='/api/ejh/balance').length,0,'unmount started further requests')
+f=fixture({enabled:false});await f.initialize();await f.refreshPage(true);assert.equal(f.calls.filter(c=>c.options.method).length,0);await f.refreshPage();assert.equal(f.calls.filter(c=>c.url==='/api/ejh/sync').length,1);f.unmount()
+f=fixture({failSync:true});await f.initialize();await f.refreshPage();assert.equal(f.balanceFailures.value.length,1);before=f.calls.length;await f.retryFailedRefresh();assert.equal(f.balanceFailures.value.length,1);assert.deepEqual(f.calls.slice(before).filter(c=>c.options.method).map(c=>c.url),['/api/ejh/sync']);f.setFailSync(false);await f.retryFailedRefresh();assert.equal(f.balanceFailures.value.length,0);f.unmount()
 const failURLs=new Set(['/api/ejh/cards/b/action'])
-f=fixture({savedCards:['a','b','c'].map(id=>({id,remote:{orderNo:id,status:'1'},local:{}})),failURLs})
-await f.initialize();assert.equal(f.balanceFailures.value.length,1)
-failURLs.clear();start=f.calls.length;await f.retryFailedRefresh()
-assert.deepEqual(f.calls.slice(start).filter(c=>c.options.method).map(c=>c.url),['/api/ejh/cards/b/action'])
-assert.equal(f.balanceFailures.value.length,0);f.unmount()
-time+=30000
-f=fixture({failSync:true,failURLs:new Set(['/api/ejh/balance'])});await f.initialize()
-f.setFailSync(false);f.calls.length=0
-const retry=f.retryFailedRefresh();f.progress.value.stopRequested=true;await f.retryFailedRefresh();await retry
-assert.equal(f.calls.filter(c=>c.options.method).length,1,'overlap or stop dispatched more queries')
-assert.equal(f.balanceFailures.value.length,1,'unattempted item must remain')
-assert.equal(f.balanceFailures.value[0].kind,'account_balance')
-f.unmount();start=f.calls.length;await f.retryFailedRefresh();assert.equal(f.calls.length,start)
-f=fixture();f.data.value.cards=[{id:'pending',normal_pending:true,remote:{status:'1'},local:{}}]
-f.cardStatusFilter.value='normal_pending';assert.equal(f.lifecycleFilter.value,'normal_pending');assert.equal(f.filtered.value[0].id,'pending');f.unmount()
-const overview=readFileSync(new URL('../src/components/EJHBalanceOverview.vue',import.meta.url),'utf8')
-assert.ok(overview.indexOf('@click="emit(\'retry-failed\')"')<overview.indexOf('@click="emit(\'refresh\')"'))
-assert.ok(code.includes('async function retryFailedRefresh'))
-console.log('Passed: targeted failure retry, retained failures, stop/unmount/reentry guards and pending filter')
+f=fixture({cards:['a','b','c'].map(card),failURLs});await f.initialize();await f.refreshPage();assert.equal(f.balanceFailures.value.length,1);failURLs.clear();before=f.calls.length;await f.retryFailedRefresh();assert.deepEqual(f.calls.slice(before).filter(c=>c.options.method).map(c=>c.url),['/api/ejh/cards/b/action']);f.unmount()
+f=fixture({failSync:true,failURLs:new Set(['/api/ejh/balance'])});await f.initialize();await f.refreshPage();f.setFailSync(false);f.calls.length=0;pending=f.retryFailedRefresh();f.refreshProgress.value.stopRequested=true;await f.retryFailedRefresh();await pending;assert.equal(f.calls.filter(c=>c.options.method).length,1);assert.equal(f.balanceFailures.value.length,1);f.unmount()
+f=fixture({cards:[card('a')]});await f.initialize();f.busy.value=true;await f.cardAction(card('a'),'details');assert.ok(f.detail.value,'write busy blocked pure viewing');f.unmount()
+console.log('Passed: local refresh scope, no duplicate sync, stop/unmount guards, manual disabled-issuer refresh and failed-only retry')
