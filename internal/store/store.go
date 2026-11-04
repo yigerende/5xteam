@@ -945,6 +945,15 @@ func (s *Store) DeleteMailAccount(email string) error {
 	return s.deleteMailAccountLocked(email, false)
 }
 
+// DeleteMailAccountFromManagement is the operator's explicit local deletion.
+// Business workflows must not block it; payment and workspace history remain.
+// Automated cleanup and Pro management continue using their guarded entrypoints.
+func (s *Store) DeleteMailAccountFromManagement(email string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteMailAccountRecordsLocked(strings.ToLower(strings.TrimSpace(email)), false, false)
+}
+
 func (s *Store) deleteMailAccountLocked(email string, pro bool) error {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if err := s.checkActiveRestockDeletionLocked(email); err != nil {
@@ -968,6 +977,10 @@ func (s *Store) deleteMailAccountLocked(email string, pro bool) error {
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	return s.deleteMailAccountRecordsLocked(email, pro, true)
+}
+
+func (s *Store) deleteMailAccountRecordsLocked(email string, pro, checkPayment bool) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -976,14 +989,16 @@ func (s *Store) deleteMailAccountLocked(email string, pro bool) error {
 	if err = lockProCardAdmission(tx); err != nil {
 		return err
 	}
-	var pending bool
-	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM gptpay_orders WHERE email=? AND active=1)
+	if checkPayment {
+		var pending bool
+		if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM gptpay_orders WHERE email=? AND active=1)
  OR EXISTS(SELECT 1 FROM pro_card_usage WHERE email=? AND status NOT IN ('success','failed'))
  OR (?=0 AND EXISTS(SELECT 1 FROM pro_card_reservations WHERE email=?))`, email, email, pro, email).Scan(&pending); err != nil {
-		return err
-	}
-	if pending {
-		return errors.New("账号有未结束的开通订单或在途占位，请确认开通结果后再删除")
+			return err
+		}
+		if pending {
+			return errors.New("账号有未结束的开通订单或在途占位，请确认开通结果后再删除")
+		}
 	}
 	// Remove the current Team-rotation projection with the mailbox. Keep the
 	// permanent workspace ledger so a later re-import cannot reuse old Teams.

@@ -263,7 +263,7 @@ func (s *Server) deleteMailAccount(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, nil, "邮箱地址无效")
 		return
 	}
-	if err := s.store.DeleteMailAccount(email); err == nil {
+	if err := s.store.DeleteMailAccountFromManagement(email); err == nil {
 		writeAPI(w, http.StatusOK, map[string]any{"deleted": true, "pipeline_deleted": 0}, "")
 		return
 	} else if _, ok := findLocalMailAccount(s.store, email); ok {
