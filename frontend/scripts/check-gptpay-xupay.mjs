@@ -23,7 +23,10 @@ assert(canCheckXUPay(order))
 order.remote.canCheck = false
 assert(!canCheckXUPay(order))
 delete order.remote.canCheck
-assert(canCheckXUPay(order))
+assert(!canCheckXUPay(order), 'Python API omits can_check; do not expose payment/check')
+order.remote.canCheck = 'true'
+assert(!canCheckXUPay(order), 'Only an explicit boolean true grants the capability')
+delete order.remote.canCheck
 order.check_pending = true
 assert(needsPayPoll(order))
 assert(!canCheckXUPay(order))

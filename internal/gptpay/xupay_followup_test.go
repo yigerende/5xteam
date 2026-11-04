@@ -34,8 +34,8 @@ func TestXUPayAutomaticRunningAndOriginalCheck(t *testing.T) {
 		}
 	}
 	r := RemoteOrder{ID: "original", PaymentState: "review"}
-	if !r.CanCheckXUPay() {
-		t.Fatal("documented absent-field fallback lost")
+	if r.CanCheckXUPay() {
+		t.Fatal("missing capability enabled undocumented payment/check")
 	}
 	no := false
 	r.CanCheck = &no

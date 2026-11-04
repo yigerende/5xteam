@@ -39,7 +39,7 @@ func (s *Server) checkXUPayOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !o.Remote.CanCheckXUPay() {
-		writeAPI(w, 409, nil, "序付当前不可核实原单，请查看最新订单状态")
+		writeAPI(w, 409, nil, "序付当前未提供核实原单操作，请查询状态或前往序付支付全监控处理")
 		return
 	}
 	// Persist intent before I/O. A lost response or restart must first query

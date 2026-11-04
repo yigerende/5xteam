@@ -99,7 +99,7 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 			s, st, email := gptPayFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				verifyInitialSaved()
 				if tc.xupay {
-					product := "pro"
+					product := "pro20x"
 					if tc.plan == "pro5" {
 						product = "pro5x"
 					}
@@ -120,14 +120,15 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 					}
 					purchases.Add(1)
 					var input struct {
-						Product  string         `json:"product_id"`
-						Session  gptpay.Session `json:"session"`
-						Workflow string         `json:"workflow"`
+						Product     string         `json:"product_id"`
+						Session     gptpay.Session `json:"session"`
+						Workflow    string         `json:"workflow"`
+						KeepRenewal bool           `json:"keep_renewal"`
 					}
 					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 						t.Error(err)
 					}
-					if r.URL.Path != "/api/v1/orders" || input.Product != product || input.Workflow != "subscription" || input.Session.AccessToken != proAutoToken("pro-test@example.com", "before") {
+					if r.URL.Path != "/api/v1/orders" || input.Product != product || input.Workflow != "subscription" || input.KeepRenewal || input.Session.AccessToken != proAutoToken("pro-test@example.com", "before") {
 						t.Error("automatic XUPAY request mismatch")
 					}
 					if tc.paymentCode != 0 {

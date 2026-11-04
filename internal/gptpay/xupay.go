@@ -83,6 +83,16 @@ func (e *APIError) xupayMessage() string {
 		"ORDER_CONFLICT":  "存在冲突或未结束的申请，请在序付支付全监控核实原申请",
 		"ORDER_NOT_FOUND": "未找到订单，原订单已保留", "NETWORK_ERROR": "网络请求失败",
 		"INVALID_RESPONSE": "返回数据不完整或状态不一致", "UNAVAILABLE": "服务暂不可用",
+		"API_UNAVAILABLE":       "序付未提供此 API 接口，请确认已部署新版客户 API",
+		"PRODUCT_UNAVAILABLE":   "套餐不存在或已下架，请检查序付套餐配置",
+		"SESSION_INVALID":       "Session 无效或账号信息不完整，请重新获取完整 Session",
+		"SESSION_EXPIRED":       "Session 已过期，请重新获取完整 Session",
+		"CARD_INVALID":          "银行卡参数不完整或格式不正确",
+		"PARAMETERS_INVALID":    "请求参数类型、必填项或取值范围不正确",
+		"BILLING_UNAVAILABLE":   "序付暂无可用账单资料，请检查序付后台配置",
+		"PROXY_UNAVAILABLE":     "序付暂无可用代理，请检查序付后台配置",
+		"ORDER_LIMIT":           "未结束的订单已达上限，请查询原订单",
+		"SUBSCRIPTION_DISABLED": "序付订阅办理暂未开放，请检查序付后台配置",
 	}[e.ErrorCode]
 	if message == "" {
 		message = "请求失败，请在序付支付全监控核查"
@@ -91,6 +101,54 @@ func (e *APIError) xupayMessage() string {
 		message += "；提交结果待确认，不得新建付款，只能查询或重试原订单"
 	}
 	return fmt.Sprintf("序付 HTTP %d：%s", e.HTTPStatus, message)
+}
+
+// Classify known validation messages without publishing arbitrary upstream text.
+// This only improves diagnostics; it never decides whether a payment was made.
+func xupayResponseErrorCode(status int, path, message string) string {
+	code := map[int]string{400: "REQUEST_REJECTED", 401: "API_KEY_INVALID", 402: "INSUFFICIENT_CREDITS", 403: "RESOURCE_FORBIDDEN", 404: "ORDER_NOT_FOUND", 409: "ORDER_CONFLICT", 429: "RATE_LIMITED", 503: "UNAVAILABLE"}[status]
+	if status == http.StatusNotFound {
+		switch {
+		case message == "接口不存在":
+			return "API_UNAVAILABLE"
+		case message == "套餐不存在或已下架":
+			return "PRODUCT_UNAVAILABLE"
+		case !strings.HasPrefix(path, "/orders/"):
+			return "API_UNAVAILABLE"
+		}
+	}
+	if status == http.StatusBadRequest {
+		switch message {
+		case "可用余额不足，请充值后再试":
+			return "INSUFFICIENT_CREDITS"
+		case "Session 已过期，请重新获取":
+			return "SESSION_EXPIRED"
+		case "Session 必须是 JSON 对象", "Session JSON 格式不正确", "Session 缺少有效账号邮箱、空间标识或 accessToken", "accessToken 格式不正确", "Session 缺少有效的 Token 到期时间", "Session 尚未生效", "Session 包含登录错误", "Session 账号信息不一致", "Session 空间信息不一致", "Session Cookie 格式不正确", "Session Token 格式不正确":
+			return "SESSION_INVALID"
+		case "请提供银行卡信息", "请提供有效的银行卡信息":
+			return "CARD_INVALID"
+		case "未结束的订单已达上限":
+			return "ORDER_LIMIT"
+		}
+		if strings.HasPrefix(message, "请检查参数类型、必填项和取值范围：") {
+			return "PARAMETERS_INVALID"
+		}
+	}
+	if status == http.StatusServiceUnavailable {
+		switch message {
+		case "暂无可用账单资料，请联系管理员":
+			return "BILLING_UNAVAILABLE"
+		case "无可用代理，请检查代理配置":
+			return "PROXY_UNAVAILABLE"
+		}
+	}
+	if status == http.StatusForbidden && message == "订阅办理暂未开放" {
+		return "SUBSCRIPTION_DISABLED"
+	}
+	if code == "" {
+		return "INVALID_RESPONSE"
+	}
+	return code
 }
 
 // XUPay uses a direct JSON body, not the GPTPay code/data envelope. Never
@@ -147,10 +205,11 @@ func (c *Client) xupayCall(ctx context.Context, base, key, method, path, idem st
 	var object map[string]json.RawMessage
 	valid := err == nil && len(raw) <= 1<<20 && json.Unmarshal(raw, &object) == nil && object != nil
 	if !valid || res.StatusCode < 200 || res.StatusCode >= 300 || len(object["error"]) > 0 {
-		code := map[int]string{400: "REQUEST_REJECTED", 401: "API_KEY_INVALID", 402: "INSUFFICIENT_CREDITS", 403: "RESOURCE_FORBIDDEN", 404: "ORDER_NOT_FOUND", 409: "ORDER_CONFLICT", 429: "RATE_LIMITED", 503: "UNAVAILABLE"}[res.StatusCode]
-		if code == "" {
-			code = "INVALID_RESPONSE"
+		var message string
+		if valid {
+			_ = json.Unmarshal(object["error"], &message)
 		}
+		code := xupayResponseErrorCode(res.StatusCode, path, message)
 		// A conflict may refer to a previously accepted payment. An unreadable
 		// error or a server/network failure must retain the card reservation.
 		definite := valid && len(object["error"]) > 0 && (res.StatusCode == 400 || res.StatusCode == 401 || res.StatusCode == 402 || res.StatusCode == 403 || res.StatusCode == 429)
@@ -163,8 +222,12 @@ func (c *Client) xupayCall(ctx context.Context, base, key, method, path, idem st
 }
 
 func (c *Client) createXUPay(ctx context.Context, s Snapshot, id string) (RemoteOrder, string, error) {
-	product := map[string]string{"pro5": "pro5x", "pro20": "pro"}[s.Input.PlanCode]
-	if product == "" || !XUPayCountry(s.Country) || s.TermsAccepted == nil || !*s.TermsAccepted {
+	product := s.XUPayProductID
+	if product == "" {
+		// Snapshots saved before the API rename must replay the original payload.
+		product = map[string]string{"pro5": "pro5x", "pro20": "pro"}[s.Input.PlanCode]
+	}
+	if product == "" || xupayProductPlan(product) != s.Input.PlanCode || !XUPayCountry(s.Country) || s.TermsAccepted == nil || !*s.TermsAccepted {
 		return RemoteOrder{}, "", &APIError{Provider: XUPay, ErrorCode: "REQUEST_REJECTED"}
 	}
 	s.Input.Session.SessionToken = s.WebSessionToken
@@ -190,6 +253,11 @@ func (c *Client) createXUPay(ctx context.Context, s Snapshot, id string) (Remote
 }
 
 var xupayOrderID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+func xupayProductPlan(product string) string {
+	// The old alias remains readable for historical orders, never new catalog entries.
+	return map[string]string{"pro5x": "pro5", "pro20x": "pro20", "pro": "pro20"}[product]
+}
 
 type xupayDetail struct {
 	Events []struct {
@@ -227,12 +295,15 @@ type xupayDetail struct {
 
 func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 	o, p := v.Order, v.Payment
-	plan := map[string]string{"pro5x": "pro5", "pro": "pro20"}[o.Product]
+	plan := xupayProductPlan(o.Product)
 	if o.ID != id || o.Workflow != "subscription" || plan == "" || o.Status == "" {
 		return RemoteOrder{}, &APIError{Provider: XUPay, ErrorCode: "INVALID_RESPONSE"}
 	}
 	r := RemoteOrder{ID: id, Status: "processing", PlanCode: plan, Country: o.Country, TargetEmail: o.Email, CardLast4: p.Last4, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt, PaymentState: p.State, ActivationStatus: o.Activation, CreditUnit: "cent_R"}
-	r.AutomaticRunning, r.CanCheck = p.AutomaticRunning, p.CanCheck
+	// Python's public contract exposes activity through order.status. Legacy
+	// suppliers may additionally advertise automatic_running / can_check.
+	running := p.AutomaticRunning || o.Status == "queued" || o.Status == "processing" || o.Status == "awaiting_payment"
+	r.AutomaticRunning, r.CanCheck = running, p.CanCheck
 	if regexp.MustCompile(`^[a-z0-9_]{1,80}$`).MatchString(p.ErrorCode) {
 		r.ErrorCode = p.ErrorCode
 	}
@@ -273,16 +344,16 @@ func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 		case "pending":
 			r.Status = "processing"
 		default:
-			if !p.AutomaticRunning {
+			if !running {
 				r.Status, r.FailureReason = "manual_review", "序付已确认付款成功，订阅生效待核实；禁止再次付款，请核实原订单"
 			}
 		}
 	case p.State == "review" || p.State == "action_required" || o.Status == "review" || o.Status == "succeeded" || p.FeeState == "charged":
-		if !p.AutomaticRunning {
+		if !running {
 			r.Status, r.FailureReason = "manual_review", "序付付款结果或额外验证待核实；保留原订单，请核实原订单"
 		}
 	case p.State == "failed" || p.State == "cancelled" || ((o.Status == "failed" || o.Status == "cancelled") && p.State == ""):
-		if !p.AutomaticRunning {
+		if !running {
 			r.Status, r.FailureReason, r.CancellationStatus = "failed", "序付确认本次办理失败，未确认付款成功；请在序付支付全监控查看原因", "not_applicable"
 		}
 	case p.State == "preparing" || p.State == "quoted" || p.State == "submitting" || p.State == "checking":
@@ -290,7 +361,7 @@ func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 	default:
 		return RemoteOrder{}, &APIError{Provider: XUPay, ErrorCode: "INVALID_RESPONSE"}
 	}
-	if p.AutomaticRunning && o.Renewal == "review" {
+	if running && o.Renewal == "review" {
 		r.CancellationStatus = "pending"
 	}
 	if r.Status == "failed" && r.ErrorCode != "" {
@@ -434,7 +505,7 @@ func (c *Client) XUPayCatalog(ctx context.Context, base, key string) (Catalog, e
 		}
 	}
 	for _, item := range data.Items {
-		plan := map[string]string{"pro5x": "pro5", "pro": "pro20"}[item.ID]
+		plan := map[string]string{"pro5x": "pro5", "pro20x": "pro20"}[item.ID]
 		if plan != "" && item.Fee != nil && *item.Fee >= 0 {
 			enabled := data.Connected
 			catalog.Products = append(catalog.Products, CatalogProduct{Code: plan, Label: item.Name, CreditPrice: item.Fee, Enabled: &enabled})
@@ -458,11 +529,11 @@ func (c *Client) accountXUPay(ctx context.Context, base, key string) (Account, e
 	if err := c.xupayCall(ctx, base, key, "GET", "/wallet", "", nil, &data); err != nil {
 		return Account{}, err
 	}
-	if data.Unit != "cent_R" || data.Balance == nil || data.Frozen == nil {
+	if data.Unit != "cent_R" || data.Balance == nil || data.Frozen == nil || *data.Balance < 0 || *data.Frozen < 0 {
 		return Account{}, &APIError{Provider: XUPay, ErrorCode: "INVALID_RESPONSE"}
 	}
 	a := Account{CreditUnit: data.Unit}
-	a.Wallet.AvailableCredits, a.Wallet.ReservedCredits = *data.Balance, *data.Frozen
+	a.Wallet.AvailableCredits, a.Wallet.ReservedCredits = *data.Balance-*data.Frozen, *data.Frozen
 	a.Level.Code, a.Level.Name = data.Membership.Current.Code, data.Membership.Current.Name
 	catalog, err := c.XUPayCatalog(ctx, base, key)
 	if err != nil {

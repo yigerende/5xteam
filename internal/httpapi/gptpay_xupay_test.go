@@ -25,7 +25,7 @@ func TestXUPayEndToEndOriginalOrderAndPaidFence(t *testing.T) {
 			if r.URL.Path != "/api/v1/orders/xupay-order" {
 				t.Error("wrong status endpoint")
 			}
-			fmt.Fprintf(w, `{"order":{"id":"xupay-order","product_id":"pro","workflow":"subscription","status":"succeeded","activation":%q,"renewal":%q,"fee":100},"payment":{"state":"succeeded","fee_state":"charged","amount":20000,"currency":"USD"}}`, activation, renewal)
+			fmt.Fprintf(w, `{"order":{"id":"xupay-order","product_id":"pro20x","workflow":"subscription","status":"succeeded","activation":%q,"renewal":%q,"fee":100},"payment":{"state":"succeeded","fee_state":"charged","amount":20000,"currency":"USD"}}`, activation, renewal)
 			return
 		}
 		posts++
@@ -33,6 +33,10 @@ func TestXUPayEndToEndOriginalOrderAndPaidFence(t *testing.T) {
 			t.Error("new id or endpoint on replay")
 		}
 		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		if json.Unmarshal(raw, &body) != nil || body["product_id"] != "pro20x" {
+			t.Error("new Pro 20x orders must use product_id pro20x")
+		}
 		if posts == 1 {
 			original = raw
 		} else if !bytes.Equal(raw, original) {

@@ -123,6 +123,7 @@ type Snapshot struct {
 	// Nil preserves the exact payload of orders created before terms support.
 	TermsAccepted   *bool       `json:"terms_accepted,omitempty"`
 	WebSessionToken string      `json:"web_session_token,omitempty"`
+	XUPayProductID  string      `json:"xupay_product_id,omitempty"`
 	Provider        string      `json:"provider,omitempty"`
 	Country         string      `json:"country,omitempty"`
 	URL             string      `json:"url"`
@@ -238,7 +239,8 @@ func (r RemoteOrder) CanCheckXUPay() bool {
 	if r.CanCheck != nil {
 		return *r.CanCheck
 	}
-	return r.PaymentState == "review" || r.PaymentState == "action_required"
+	// Missing capability is not permission to call an undocumented endpoint.
+	return false
 }
 
 func (o Order) RetryBlocked() bool {

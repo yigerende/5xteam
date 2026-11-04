@@ -28,7 +28,7 @@ func TestXUPayCreateContractAndReplay(t *testing.T) {
 		}
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)
-		if body["product_id"] != "pro" || body["country"] != "PH" || body["workflow"] != "subscription" || body["accepted"] != true || body["keep_renewal"] != false || body["seats"] != float64(1) {
+		if body["product_id"] != "pro20x" || body["country"] != "PH" || body["workflow"] != "subscription" || body["accepted"] != true || body["keep_renewal"] != false || body["seats"] != float64(1) {
 			t.Errorf("incorrect subscription contract")
 		}
 		card := body["card"].(map[string]any)
@@ -129,7 +129,7 @@ func TestXUPayWalletCatalogStatusAndErrorPrivacy(t *testing.T) {
 		case "/api/v1/wallet":
 			fmt.Fprint(w, `{"balance":12345,"frozen":500,"unit":"cent_R","membership":{"current":{"code":"L2","name":"银阶"}}}`)
 		case "/api/v1/catalog":
-			fmt.Fprint(w, `{"unit":"cent_R","payment_connected":true,"countries":[{"code":"PH","name":"菲律宾","currency":"PHP"}],"items":[{"id":"pro5x","name":"Pro 5x","member_fee":123},{"id":"pro","name":"Pro 20x","member_fee":456},{"id":"team","member_fee":789}]}`)
+			fmt.Fprint(w, `{"unit":"cent_R","payment_connected":true,"countries":[{"code":"PH","name":"菲律宾","currency":"PHP"}],"items":[{"id":"pro5x","name":"Pro 5x","member_fee":123},{"id":"pro20x","name":"Pro 20x","member_fee":456},{"id":"pro","member_fee":999},{"id":"team","member_fee":789}]}`)
 		case "/api/v1/orders/order-1":
 			fmt.Fprint(w, `{"order":{"id":"order-1","product_id":"pro","workflow":"subscription","status":"succeeded","activation":"active","renewal":"disabled","fee":456},"payment":{"state":"succeeded","fee_state":"charged","amount":20000,"currency":"USD"},"events":[{"stage":"payment","message":"付款核实中 accessToken=DO-NOT-EXPOSE-raw-secret"}]}`)
 		default:
@@ -140,7 +140,7 @@ func TestXUPayWalletCatalogStatusAndErrorPrivacy(t *testing.T) {
 	defer server.Close()
 	c := New()
 	a, err := c.AccountForProvider(context.Background(), XUPay, server.URL+"/api/v1", "key")
-	if err != nil || a.Wallet.AvailableCredits != 12345 || a.Level.Code != "L2" || len(a.Plans) != 2 || a.Plans[1].PlanCode != "pro20" || a.CreditUnit != "cent_R" {
+	if err != nil || a.Wallet.AvailableCredits != 11845 || a.Wallet.ReservedCredits != 500 || a.Level.Code != "L2" || len(a.Plans) != 2 || a.Plans[1].PlanCode != "pro20" || a.Plans[1].SuccessCredits != 456 || a.CreditUnit != "cent_R" {
 		t.Fatal(a, err)
 	}
 	r, err := c.StatusForProvider(context.Background(), XUPay, server.URL+"/api/v1", "key", []string{"order-1"})

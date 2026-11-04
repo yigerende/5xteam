@@ -214,3 +214,56 @@ func TestXUPayReadRateLimitAndCheckAuthentication(t *testing.T) {
 		t.Fatal("new action missing authentication", rec.Code)
 	}
 }
+
+func TestXUPayPythonMissingCheckCapabilityUsesOnlyStatus(t *testing.T) {
+	creates, checks, reads := 0, 0, 0
+	paid := false
+	s, st, email := gptPayFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v1/orders/existing":
+			reads++
+			status, payment, activation := "review", "review", "review"
+			if paid {
+				status, payment, activation = "succeeded", "succeeded", "active"
+			}
+			fmt.Fprintf(w, `{"order":{"id":"existing","product_id":"pro20x","workflow":"subscription","status":%q,"activation":%q,"renewal":"review"},"payment":{"state":%q,"message":"请查看原订单"}}`, status, activation, payment)
+		case r.Method == "POST" && r.URL.Path == "/api/v1/orders":
+			creates++
+			fmt.Fprint(w, `{"id":"existing","status":"queued"}`)
+		default:
+			checks++
+			t.Error("called undocumented supplier action", r.Method, r.URL.Path)
+			w.WriteHeader(404)
+		}
+	})
+	xupayFixtureSession(t, s, email)
+	o := payOrder(t, payCall(t, s.createGPTPayOrder, "email", email, xupayTestInput("python-no-check-action")))
+	o = payOrder(t, payCall(t, s.refreshGPTPayOrder, "id", o.ID, map[string]any{}))
+	if o.Status != "manual_review" || o.Remote.CanCheckXUPay() || o.NeedsStatusPoll() {
+		t.Fatal("missing capability invented a supplier operation", o)
+	}
+	// A stale page or stored legacy capability must be rechecked before any POST.
+	yes := true
+	o.Remote.CanCheck = &yes
+	if err := st.UpdateGPTPayOrder(o); err != nil {
+		t.Fatal(err)
+	}
+	rec := payCall(t, s.checkXUPayOrder, "id", o.ID, map[string]any{})
+	if rec.Code != 409 || checks != 0 || creates != 1 || reads != 2 {
+		t.Fatal("unsupported payment/check reached supplier", rec.Code, checks, creates, reads)
+	}
+	o, _, _ = st.GPTPayOrder(o.ID)
+	if o.CheckPending || o.Remote.CanCheckXUPay() {
+		t.Fatal("unsupported action left a pending check", o)
+	}
+	paid = true
+	o = payOrder(t, payCall(t, s.refreshGPTPayOrder, "id", o.ID, map[string]any{}))
+	p, _, _ := st.MailAccountCredential(email)
+	if o.Status != "success" || o.Remote.CancellationStatus != "failed" || o.NeedsStatusPoll() || p.ProManualStages["recharge"].Status != "completed" {
+		t.Fatal("Python cancellation failure blocked successful subscription", o)
+	}
+	_ = payCall(t, s.retryGPTPayOrder, "id", o.ID, map[string]any{})
+	if creates != 1 || checks != 0 {
+		t.Fatal("status recovery created another payment", creates, checks)
+	}
+}
