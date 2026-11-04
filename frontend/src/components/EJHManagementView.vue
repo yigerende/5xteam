@@ -213,7 +213,9 @@ async function reloadCard(id){
 }
 function refreshSaved(id=''){
  if(disposed)return
- const read=typeof id==='string'&&id?reloadCard(id).then(()=>load({background:true})):load({background:true})
+ const previous=activeView?.promise
+ const latest=()=>load({background:true})
+ const read=typeof id==='string'&&id?reloadCard(id).then(latest):previous?previous.catch(()=>{}).then(latest):latest()
  read.catch(e=>{if(!disposed)readError.value='操作结果已保留；页面更新失败：'+e.message})
  loadOverview()
 }

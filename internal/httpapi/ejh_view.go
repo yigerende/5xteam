@@ -84,6 +84,11 @@ func (c *ejhViewCache) read(ctx context.Context, version func(context.Context) (
 	case <-ctx.Done():
 		return nil, "", ctx.Err()
 	case <-job.done:
+		// A read requested after a completed mutation cannot reuse a collection
+		// that started before that mutation. Recheck once the shared read ends.
+		if job.err == nil && job.revision != revision {
+			return c.read(ctx, version, collect)
+		}
 		return job.data, job.revision, job.err
 	}
 }

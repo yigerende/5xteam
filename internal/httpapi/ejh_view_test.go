@@ -211,7 +211,7 @@ func TestEJHViewCoalescesCancelledAndConcurrentReaders(t *testing.T) {
 	close(release)
 	for i := 0; i < 20; i++ {
 		r := <-done
-		if r != "v1" && r != "v2" {
+		if r != "v2" {
 			t.Fatal(r)
 		}
 	}
