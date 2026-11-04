@@ -68,6 +68,22 @@ func TestEJHViewPagingDependenciesAndFilters(t *testing.T) {
 	if got := viewIDs(out); !reflect.DeepEqual(got, []string{"closed-new", "closed-old"}) {
 		t.Fatal("successful cancellation order", got)
 	}
+	out = readEJHTestView(t, s, "section=cards&lifecycle=closed&closure_state=processing&page_size=1&page=2")
+	if got := viewIDs(out); !reflect.DeepEqual(got, []string{"unknown"}) || out["total"] != float64(2) {
+		t.Fatal("processing includes unconfirmed cancellation with independent pagination", out)
+	}
+	closureCounts := out["closure_counts"].(map[string]any)
+	if closureCounts["processing"] != float64(2) || closureCounts["completed"] != float64(2) {
+		t.Fatal("closure counts must include both categories before pagination", closureCounts)
+	}
+	out = readEJHTestView(t, s, "section=cards&lifecycle=closed&closure_state=completed&page_size=10")
+	if got := viewIDs(out); !reflect.DeepEqual(got, []string{"closed-new", "closed-old"}) {
+		t.Fatal("completed category preserves successful cancellation order", got)
+	}
+	out = readEJHTestView(t, s, "section=cards&lifecycle=closed&closure_state=processing&card_id=closed-old")
+	if got := viewIDs(out); !reflect.DeepEqual(got, []string{"closed-old"}) {
+		t.Fatal("category must not hide explicitly located card", got)
+	}
 	out = readEJHTestView(t, s, "section=cards&lifecycle=normal&q=find@example.com&page_size=1")
 	if got := viewIDs(out); !reflect.DeepEqual(got, []string{"normal"}) {
 		t.Fatal(got)

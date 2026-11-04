@@ -55,8 +55,10 @@ function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=fal
     if(section==='cards')rows=rows.filter(c=>ejh.cardMatchesFilters(c,cases,p.get('card_state'),p.get('return_state'))&&ejh.cardMatchesSearch(c,cases,p.get('q'),p.get('card_id')))
     else if(p.get('q'))rows=rows.filter(c=>JSON.stringify(c).includes(p.get('q')))
     if(section==='cases'&&p.get('status'))rows=rows.filter(c=>c.state===p.get('status'))
+    const closure_counts={processing:rows.filter(c=>['8','cancel_pending'].includes(ejh.cardState(c))).length,completed:rows.filter(c=>ejh.cardState(c)==='2').length}
+    if(section==='cards'&&p.get('lifecycle')==='closed'&&!p.get('card_id')&&p.get('closure_state'))rows=rows.filter(c=>p.get('closure_state')==='processing'?['8','cancel_pending'].includes(ejh.cardState(c)):ejh.cardState(c)==='2')
     const size=Number(p.get('page_size'))||10,page=Math.min(Number(p.get('page'))||1,Math.max(1,Math.ceil(rows.length/size)))
-    return {...source(),items:rows.slice((page-1)*size,page*size),page,total:rows.length,page_size:size,counts:Object.fromEntries(Object.keys(ejh.returnStates).map(k=>[k,cases.filter(c=>c.state===k).length])),card_total:cards.length,lifecycle_counts:{normal:cards.filter(c=>ejh.cardLifecycle(c)==='normal').length,closed:cards.filter(c=>ejh.cardLifecycle(c)==='closed').length},case_counts:{normal:cases.filter(c=>c.state!=='unopened').length,unopened:cases.filter(c=>c.state==='unopened').length}}
+    return {...source(),closure_counts,items:rows.slice((page-1)*size,page*size),page,total:rows.length,page_size:size,counts:Object.fromEntries(Object.keys(ejh.returnStates).map(k=>[k,cases.filter(c=>c.state===k).length])),card_total:cards.length,lifecycle_counts:{normal:cards.filter(c=>ejh.cardLifecycle(c)==='normal').length,closed:cards.filter(c=>ejh.cardLifecycle(c)==='closed').length},case_counts:{normal:cases.filter(c=>c.state!=='unopened').length,unopened:cases.filter(c=>c.state==='unopened').length}}
    }
    if(options.method==='DELETE'){
     const removed=cases.filter(c=>c.state==='unopened'&&(url.endsWith('/unopened')||url.endsWith('/'+c.id)));cases=cases.filter(c=>!removed.includes(c));revision+='d'
@@ -68,7 +70,7 @@ function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=fal
    return {}
   }
  })
- vm.runInContext(code+';globalThis.exposed={retryFailedRefresh,progress,refreshProgress,refreshing,initialize,refreshPage,refreshAllBalances,busy,message,balanceFailures,editLimit,saveLimit,data,limitID,limitValue,lifecycleFilter,filtered,setLifecycle,clearFilters,cardStatusFilter,targetCardID,changeTab,showCaseState,tab,status,query,accountReturnStates,caseCategory,caseCounts,setCaseCategory,deleteUnopenedCase,page,pageSize,visible,settings,save,load,ready,loading,initializing,initialError,pollSavedData,overview,loadOverview,readError,refreshSaved,cardAction,cardReading,detail};',context)
+ vm.runInContext(code+';globalThis.exposed={retryFailedRefresh,progress,refreshProgress,refreshing,initialize,refreshPage,refreshAllBalances,busy,message,balanceFailures,editLimit,saveLimit,data,limitID,limitValue,lifecycleFilter,closureState,closureCounts,filtered,setLifecycle,setClosureState,clearFilters,cardStatusFilter,targetCardID,changeTab,showCaseState,tab,status,query,accountReturnStates,caseCategory,caseCounts,setCaseCategory,deleteUnopenedCase,page,pageSize,visible,settings,save,load,ready,loading,initializing,initialError,pollSavedData,overview,loadOverview,readError,refreshSaved,cardAction,cardReading,detail};',context)
  return {...context.exposed,calls,workers,timers,document,confirmations,release,setHoldView:v=>holdView=v,setFailView:v=>failView=v,setRevision:v=>revision=v,setFailSync:v=>failSync=v,setFailSave:v=>failSave=v,unmount:()=>unmounts.forEach(fn=>fn())}
 }
 let f=fixture();await f.initialize();await tick()
@@ -99,10 +101,17 @@ f=fixture({failView:true});await f.initialize();assert.match(f.initialError.valu
 f=fixture({holdSettings:true,cards:[card('first')]});pending=f.initialize();await tick();assert.equal(f.visible.value.length,1,'settings hid current rows');f.release();await pending;f.unmount()
 console.log('Passed: repeated-read coalescing, navigation/unmount cancellation, stale response guard, independent settings')
 
-f=fixture({cards:[card('normal'),{...card('closed'),remote:{status:'2'}},{...card('pending'),normal_pending:true}]});await f.initialize()
-assert.deepEqual(Array.from(f.visible.value,c=>c.id),['normal']);f.setLifecycle('closed');await f.load();assert.deepEqual(Array.from(f.visible.value,c=>c.id),['closed'])
+f=fixture({cards:[card('normal'),{...card('closed'),remote:{status:'2'}},{...card('closing'),remote:{status:'8'}},{...card('unknown'),local:{issuer_cancel_status:'unknown'}},{...card('pending'),normal_pending:true}]});await f.initialize()
+assert.deepEqual(Array.from(f.visible.value,c=>c.id),['normal']);f.setLifecycle('closed');await f.load()
+assert.equal(f.closureState.value,'processing');assert.deepEqual(Array.from(f.visible.value,c=>c.id),['closing','unknown'])
+assert.equal(f.closureCounts.value.processing,2);assert.equal(f.closureCounts.value.completed,1)
+assert.equal(f.calls.filter(c=>c.url.includes('closure_state=completed')).length,0,'completed rows fetched before clicking')
+f.page.value=4;f.setClosureState('completed');await f.load();assert.equal(f.page.value,1);assert.deepEqual(Array.from(f.visible.value,c=>c.id),['closed'])
+before=f.calls.length;f.setClosureState('completed');await f.load();assert.equal(f.calls.length,before+1,'clicking active category must reread saved data')
+f.setLifecycle('closed');await f.load();assert.deepEqual(Array.from(f.visible.value,c=>c.id),['closing','unknown'],'re-entering closed must default to processing')
+f.cardStatusFilter.value='2';assert.equal(f.closureState.value,'completed');await f.load();assert.equal(f.visible.value[0].id,'closed')
 f.cardStatusFilter.value='normal_pending';assert.equal(f.lifecycleFilter.value,'normal_pending');await f.load();assert.equal(f.visible.value[0].id,'pending')
-f.clearFilters();f.targetCardID.value='closed';await f.load();assert.equal(f.visible.value[0].id,'closed');f.setLifecycle('normal');assert.equal(f.targetCardID.value,'');f.unmount()
+f.clearFilters();f.targetCardID.value='closed';await f.load();assert.equal(f.visible.value[0].id,'closed');assert.equal(f.closureState.value,'completed');f.setLifecycle('normal');assert.equal(f.targetCardID.value,'');f.unmount()
 const unopened=Array.from({length:12},(_,i)=>({id:'u'+i,email:'test'+i+'@example.com',state:'unopened'})),normal={id:'normal',email:'normal@example.com',state:'opened'}
 f=fixture({cases:[...unopened,normal]});await f.initialize();await tick();assert.equal(f.overview.value._overview.fullHistoryCount,13,'overview paginated')
 f.showCaseState('unopened');f.query.value='test11@';await f.load();assert.equal(f.visible.value.length,1);assert.equal(f.caseCounts.value.unopened,12)

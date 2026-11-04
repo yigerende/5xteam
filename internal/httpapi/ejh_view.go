@@ -218,6 +218,11 @@ func (s *Server) ejhView(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 400, nil, "读取分区无效")
 		return
 	}
+	closureState := q.Get("closure_state")
+	if closureState != "" && closureState != "processing" && closureState != "completed" {
+		writeAPI(w, 400, nil, "销卡分类无效")
+		return
+	}
 	page, _ := strconv.Atoi(q.Get("page"))
 	if page < 1 {
 		page = 1
@@ -288,6 +293,8 @@ func (s *Server) ejhView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selected := []any{}
+	closureCounts := map[string]int{"processing": 0, "completed": 0}
+	out["closure_counts"] = closureCounts
 	query := strings.ToLower(strings.TrimSpace(q.Get("q")))
 	status := q.Get("status")
 	switch section {
@@ -413,6 +420,19 @@ func (s *Server) ejhView(w http.ResponseWriter, r *http.Request) {
 				if !found {
 					continue
 				}
+			}
+			closure := ""
+			switch ejhDisplayState(c) {
+			case "8", "cancel_pending":
+				closure = "processing"
+			case "2":
+				closure = "completed"
+			}
+			if closure != "" {
+				closureCounts[closure]++
+			}
+			if target == "" && q.Get("lifecycle") == "closed" && closureState != "" && closure != closureState {
+				continue
 			}
 			selected = append(selected, c)
 		}
