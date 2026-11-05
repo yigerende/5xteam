@@ -333,6 +333,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/mail/accounts/invalid-at-outside", s.listOutsideInvalidATMailEmails)
 	mux.HandleFunc("POST /api/mail/accounts/select", s.selectMailAccounts)
 	mux.HandleFunc("GET /api/pro-accounts", s.listProAccounts)
+	mux.HandleFunc("GET /api/pro-accounts/select-unlogged", s.selectUnloggedProAccounts)
 	mux.HandleFunc("POST /api/pro-accounts/delete", s.deleteProAccounts)
 	mux.HandleFunc("POST /api/pro-accounts/export", s.exportProAccounts)
 	mux.HandleFunc("POST /api/pro-accounts/import", s.importProAccounts)

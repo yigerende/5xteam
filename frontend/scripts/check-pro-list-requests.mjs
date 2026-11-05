@@ -6,8 +6,8 @@ import {ref} from 'vue'
 import {createLatestRequest} from '../src/latestRequest.js'
 const source=readFileSync(new URL('../src/components/ProManagementView.vue',import.meta.url),'utf8')
 const parsed=ts.createSourceFile('View.js',source.split('<script setup>')[1].split('</script>')[0],ts.ScriptTarget.Latest,true,ts.ScriptKind.JS)
-const names=new Set(['loadPage','loadPageHandled','setSpaceFilter'])
-const vars=new Set(['accountsLoading','renderedAccountPage','accountsRequest'])
+const names=new Set(['loadPage','loadPageHandled','setSpaceFilter','clearSelection'])
+const vars=new Set(['accountsLoading','renderedAccountPage','accountsRequest','crossPageSelection','selectionRevision'])
 const code=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)?names.has(s.name?.text):ts.isVariableStatement(s)&&s.declarationList.declarations.some(d=>vars.has(d.name.getText(parsed)))).map(s=>s.getText(parsed)).join('\n')
 const requests=[], errors=[], rows=ref([]), page=ref(1), filter=ref('all')
 const c=vm.createContext({finalStepControlRevision:0,finalStepControlBusy:ref(false),settings:{},ref,createLatestRequest,URLSearchParams,rows,page,pageSize:ref(10),query:ref(''),spaceFilter:filter,total:ref(0),listSummary:{},selectedEmails:ref(new Set()),searchTimer:0,window:{clearTimeout(){}},setMessage:message=>errors.push(message),api:(url,{signal})=>new Promise((resolve,reject)=>requests.push({url,signal,resolve,reject}))})

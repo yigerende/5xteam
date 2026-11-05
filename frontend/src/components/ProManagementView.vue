@@ -53,6 +53,8 @@ const rows = ref([])
 const total = ref(0)
 const listSummary = reactive({ all: 0, oauth_ready: 0, pushed: 0, merged: 0, deleted: 0, merchant:0, merge_v2:0, unmerged: 0, in_progress: 0 })
 const selectedEmails = ref(new Set())
+const crossPageSelection = ref(false)
+let selectionRevision = 0
 const busy = ref('')
 const finalStepControlBusy = ref(false)
 let finalStepControlRevision = 0
@@ -212,7 +214,10 @@ const flowColumnTitle = computed(() => { const fixed=filterDisposition(spaceFilt
 const accountTimeLabel = computed(() => ({in_progress:'进入流程',merged:'合并成功',deleted:'进入删除',merchant:'商户完成',merge_v2:'进入合并2.0',unmerged:'进入 Pro'}[spaceFilter.value] || '进入 Pro'))
 const accountSortHint = computed(() => spaceFilter.value==='unmerged' ? '按进入 Pro 时间升序，最早在前' : spaceFilter.value==='all' ? '按进入 Pro 时间降序，最新在前' : '按进入当前状态的时间降序，最新在前')
 const displayedAccounts = computed(() => rows.value)
-const selectedAccounts = computed(() => rows.value.filter((account) => selectedEmails.value.has(account.email.toLowerCase())))
+const selectedAccounts = computed(() => {
+  const visible = new Map(rows.value.map(account => [account.email.toLowerCase(), account]))
+  return [...selectedEmails.value].map(email => visible.get(email) || { email })
+})
 const allVisibleSelected = computed(() => displayedAccounts.value.length && displayedAccounts.value.every((account) => selectedEmails.value.has(account.email.toLowerCase())))
 const oauthReady = computed(() => Number(listSummary.oauth_ready || 0))
 const pushed = computed(() => Number(listSummary.pushed || 0))
@@ -239,7 +244,7 @@ async function loadPage({ background = false } = {}) {
       const lastPage = Math.max(1, Math.ceil(total.value / pageSize.value))
       if (page.value > lastPage) { page.value = lastPage; return loadPage() }
       const visible = new Set(rows.value.map((account) => account.email.toLowerCase()))
-      selectedEmails.value = new Set([...selectedEmails.value].filter((email) => visible.has(email)))
+      if (!crossPageSelection.value) selectedEmails.value = new Set([...selectedEmails.value].filter((email) => visible.has(email)))
     }, { background },
   )
 }
@@ -296,10 +301,27 @@ async function saveMergeStage(account, step, event) {
   finally { busy.value = '' }
 }
 function loadPageHandled() { return loadPage().catch(error => setMessage(error.message, 'error')) }
-function setPage(value) { page.value = value; selectedEmails.value = new Set(); loadPageHandled() }
-function setPageSize(value) { pageSize.value = value; page.value = 1; selectedEmails.value = new Set(); loadPageHandled() }
-function setSpaceFilter(value) { if (spaceFilter.value === value) return; window.clearTimeout(searchTimer); spaceFilter.value = value; page.value = 1; selectedEmails.value = new Set(); loadPageHandled() }
-watch(query, () => { window.clearTimeout(searchTimer); page.value = 1; selectedEmails.value = new Set(); searchTimer = window.setTimeout(loadPageHandled, 250) })
+function clearSelection() { selectionRevision++; selectedEmails.value = new Set(); crossPageSelection.value = false }
+function setPage(value) { page.value = value; if (!crossPageSelection.value) clearSelection(); loadPageHandled() }
+function setPageSize(value) { pageSize.value = value; page.value = 1; if (!crossPageSelection.value) clearSelection(); loadPageHandled() }
+function setSpaceFilter(value) { if (spaceFilter.value === value) return; window.clearTimeout(searchTimer); spaceFilter.value = value; page.value = 1; clearSelection(); loadPageHandled() }
+watch(query, () => { window.clearTimeout(searchTimer); page.value = 1; clearSelection(); searchTimer = window.setTimeout(loadPageHandled, 250) })
+
+async function selectUnloggedAccounts() {
+  if (busy.value || spaceFilter.value !== 'unmerged') return
+  const revision = ++selectionRevision
+  const search = query.value.trim()
+  busy.value = 'select-unlogged'
+  try {
+    const result = await api('/api/pro-accounts/select-unlogged?' + new URLSearchParams({ query: search }))
+    if (disposed || revision !== selectionRevision || spaceFilter.value !== 'unmerged' || query.value.trim() !== search) return
+    selectedEmails.value = new Set((result.emails || []).map(email => email.toLowerCase()))
+    crossPageSelection.value = true
+    setMessage(selectedEmails.value.size ? `已选中 ${selectedEmails.value.size} 个未登录账号（全部分页${search ? '，按当前搜索条件' : ''}）` : '没有符合条件的未登录账号', 'success')
+  } catch (error) {
+    if (!disposed && revision === selectionRevision) setMessage(error.message, 'error')
+  } finally { busy.value = '' }
+}
 
 function setMessage(text = '', type = '') { message.text = text; message.type = type }
 function toggle(account) { const next = new Set(selectedEmails.value); const email = account.email.toLowerCase(); next.has(email) ? next.delete(email) : next.add(email); selectedEmails.value = next }
@@ -540,6 +562,11 @@ onBeforeUnmount(() => { disposed = true; cancelGroupLoad(); accountsRequest.disp
       </div>
       <section class="panel list-panel">
         <div class="account-toolbar"><div class="space-filter-tabs"><button :class="{ active: spaceFilter === 'all' }" @click="setSpaceFilter('all')">全部 <span>{{ listSummary.all }}</span></button><button :class="{ active: spaceFilter === 'unmerged' }" title="未开始后续流程的账号，包含仅登录完成的账号" @click="setSpaceFilter('unmerged')">未空间合并 <span>{{ listSummary.unmerged }}</span></button><button :class="{ active: spaceFilter === 'in_progress' }" title="已开始阶段但尚未成功合并，包含等待额度、失败及中断的账号" @click="setSpaceFilter('in_progress')">流程中 <span>{{ listSummary.in_progress }}</span></button><button :class="{ active: spaceFilter === 'merged' }" @click="setSpaceFilter('merged')">已空间合并 <span>{{ merged }}</span></button><button :class="{ active: spaceFilter === 'deleted' }" @click="setSpaceFilter('deleted')">删除账户 <span>{{ listSummary.deleted }}</span></button><button :class="{active:spaceFilter==='merchant'}" @click="setSpaceFilter('merchant')">API 商户 <span>{{listSummary.merchant}}</span></button><button :class="{active:spaceFilter==='merge_v2'}" @click="setSpaceFilter('merge_v2')">合并空间2.0 <span>{{listSummary.merge_v2}}</span></button><button :class="{active:spaceFilter==='dead'}" @click="setSpaceFilter('dead')">死号 <span>{{listSummary.dead||0}}</span></button></div><div class="heading-actions"><button v-if="spaceFilter === 'in_progress' || settings.auto_delete_paused" class="btn ghost" :class="{ 'danger-text': !settings.auto_delete_paused }" type="button" :disabled="finalStepControlBusy || !settingsLoaded" :title="settings.auto_delete_paused ? '恢复按原条件和周期判断，不会立即执行最后一步' : '暂停删除、空间合并、合并空间2.0和 API 商户，查额度和前序流程继续'" @click="toggleAutoFinalStep"><LoaderCircle v-if="finalStepControlBusy" :size="14" class="spin"/><Play v-else-if="settings.auto_delete_paused" :size="14"/><Pause v-else :size="14"/>{{ finalStepControlBusy ? '处理中…' : settings.auto_delete_paused ? '启动全自动最后一步' : '停止全自动最后一步' }}</button><label class="compact-search"><Search :size="14" /><input v-model="query" placeholder="搜索账号" /></label><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length || selectedAccounts.some(account => account.pro_workflow_running || account.pro_auto?.status === 'running')" @click="requestTemporaryAT(selectedAccounts, true)"><KeyRound :size="14" />批量获取临时 AT</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('push')"><Rocket :size="14" />批量推送</button><button class="btn ghost" :disabled="!!busy || !selectedAccounts.length" @click="runBatch('quota')"><Gauge :size="14" />批量查额度</button><button class="btn ghost danger-text" :disabled="!!busy || !selectedAccounts.length" @click="deleteSelectedAccounts"><LoaderCircle v-if="busy === 'delete-batch'" :size="14" class="spin" /><Trash2 v-else :size="14" />{{ busy === 'delete-batch' ? '删除中…' : '批量删除' }}<span v-if="selectedAccounts.length">（{{ selectedAccounts.length }}）</span></button></div></div>
+        <div v-if="spaceFilter === 'unmerged' || selectedAccounts.length" class="heading-actions">
+          <button v-if="spaceFilter === 'unmerged'" class="btn ghost" type="button" :disabled="!!busy" title="跨全部分页，按当前搜索条件选中未取得登录凭证且无登录完成记录的账号" @click="selectUnloggedAccounts"><LoaderCircle v-if="busy === 'select-unlogged'" :size="14" class="spin"/><UsersRound v-else :size="14"/>{{ busy === 'select-unlogged' ? '筛选中…' : '一键选中未登录账号' }}</button>
+          <span v-if="selectedAccounts.length" class="table-note" role="status">已选 {{ selectedAccounts.length }} 个{{ crossPageSelection ? '（跨页）' : '' }}</span>
+          <button v-if="selectedAccounts.length" class="btn ghost" type="button" :disabled="!!busy" @click="clearSelection">清空选择</button>
+        </div>
         <p v-if="settings.auto_delete_paused" class="table-note" role="status">全自动最后一步已暂停 · 查额度及其他流程继续 · 点击「启动全自动最后一步」恢复原规则</p>
         <div class="table-shell"><table class="pro-table"><thead><tr><th><input type="checkbox" :checked="allVisibleSelected" @change="toggleVisible" /></th><th>账号</th><th>智商情况</th><th>OAuth</th><th title="显示成功开通订单保存的套餐，不再远程识别">开通套餐</th><th>开通银行卡</th><th>回款状态</th><th>推送时限</th><th>推送时长</th><th>推送</th><th title="与 Team 轮转一致：查询 Sub2 近 90 天统计，随额度检测更新">消耗额度</th><th>5小时</th><th>7天</th><th>空间合并</th><th>全自动阶段</th><th>{{flowColumnTitle}}</th><th>OAI 确认</th><th class="actions-column">操作</th></tr></thead><tbody>
           <tr v-if="accountsLoading && !displayedAccounts.length"><td colspan="18" class="empty-cell" role="status"><LoaderCircle :size="16" class="spin" /> 正在加载账号…</td></tr>
