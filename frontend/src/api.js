@@ -51,7 +51,7 @@ export async function api(path, options = {}) {
       }
     }
   } catch (error) {
-    if (timedOut) throw new Error(readOnly ? '读取数据超时，请重试；已显示的数据会保留' : '等待操作结果超时，请先查看当前状态，避免重复提交')
+    if (timedOut) { const failure = new Error(readOnly ? '读取数据超时，请重试；已显示的数据会保留' : '等待操作结果超时，请先查看当前状态，避免重复提交'); failure.timeout = true; throw failure }
     throw error
   } finally {
     clearTimeout(timer)

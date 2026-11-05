@@ -30,7 +30,7 @@
     "test:quality-vm": "node scripts/check-quality-vm.mjs",
     "test:pipeline-selection": "node scripts/check-pipeline-selection.mjs",
     "test:list-requests": "node scripts/check-list-requests.mjs && node scripts/check-pro-list-requests.mjs",
-    "test:ejh-page": "node scripts/check-ejh-page.mjs && node scripts/check-ejh-sync.mjs && node scripts/check-ejh-cancel-time.mjs && node scripts/check-api-timeout.mjs",
+    "test:ejh-page": "node scripts/check-ejh-page.mjs && node scripts/check-ejh-overview-delta.mjs && node scripts/check-ejh-sync.mjs && node scripts/check-ejh-cancel-time.mjs && node scripts/check-api-timeout.mjs",
     "test:restock-forecast": "node scripts/check-restock-forecast.mjs"
   },
   "dependencies": {

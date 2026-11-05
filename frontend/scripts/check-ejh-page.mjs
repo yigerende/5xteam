@@ -9,6 +9,7 @@ import {cardOrigin} from '../src/card-platform.js'
 import {createLatestRequest} from '../src/latestRequest.js'
 import {createEJHRefreshGate} from '../src/ejhRefresh.js'
 import {refreshEJHSync} from '../src/ejhSync.js'
+import {applyEJHOverviewResponse} from '../src/ejh-overview-state.js'
 import {activationPlan} from '../src/proActivationPlan.js'
 const paid = (id, plan, created_at, payment_status = 'success') => ({ id, plan, created_at, payment_status })
 const account = { current_plan_type:'free', financial_cases:[paid('old','pro5','2026-10-01'),paid('paid','pro20','2026-10-02'),paid('retry','pro50','2026-10-03','failed'),paid('points','codex_point','2026-10-04')] }
@@ -31,7 +32,7 @@ function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=fal
  const blocked=new Promise(resolve=>{release=resolve})
  const source=()=>({cards,cases,trades:[],operations:[],audit:[],sync:{},reversal_fee_percent:percent,revision})
  const document={hidden:false,addEventListener(){},removeEventListener(){}}
- const context=vm.createContext({ref,shallowRef,reactive,computed,watch,URLSearchParams,AbortController,...ejh,applyPaymentPolicies,applyRefundFeeOverrides,cardOrigin,createLatestRequest,refreshEJHSync,ejhRefreshGate:gate,
+ const context=vm.createContext({ref,shallowRef,reactive,computed,watch,URLSearchParams,AbortController,...ejh,applyPaymentPolicies,applyRefundFeeOverrides,cardOrigin,createLatestRequest,refreshEJHSync,applyEJHOverviewResponse,reconciliationStatus:()=>({}),ejhRefreshGate:gate,
   createEJHOverviewWorker:()=>({calculate:async s=>{workers.push(s);return {fullHistoryCount:s.cases.length}},dispose(){}}),
   nextTick:tick,onMounted(){},onBeforeUnmount:fn=>unmounts.push(fn),defineProps:()=>({defaultPageSize}),defineEmits:()=>()=>{},document,
   window:{localStorage:storage,addEventListener(){},removeEventListener(){},confirm:t=>{confirmations.push(t);return confirmDelete}},
@@ -44,7 +45,7 @@ function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=fal
     return {enabled,reversal_fee_percent:percent,page_refresh_seconds:300,templates:[]}
    }
    if(url==='/api/ejh/revision')return {revision}
-   if(url==='/api/ejh/overview')return source()
+   if(url.startsWith('/api/ejh/overview?'))return source()
    if(url.startsWith('/api/ejh/view?')){
     const p=new URLSearchParams(url.split('?')[1]),section=p.get('section')
     if(holdView)await blocked
@@ -70,6 +71,7 @@ function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=fal
    return {}
   }
  })
+ context.readEJH=context.api
  vm.runInContext(code+';globalThis.exposed={retryFailedRefresh,progress,refreshProgress,refreshing,initialize,refreshPage,refreshAllBalances,busy,message,balanceFailures,editLimit,saveLimit,data,limitID,limitValue,lifecycleFilter,closureState,closureCounts,filtered,setLifecycle,setClosureState,clearFilters,cardStatusFilter,targetCardID,changeTab,showCaseState,tab,status,query,accountReturnStates,caseCategory,caseCounts,setCaseCategory,deleteUnopenedCase,page,pageSize,visible,settings,save,load,ready,loading,initializing,initialError,pollSavedData,overview,loadOverview,readError,refreshSaved,cardAction,cardReading,detail};',context)
  return {...context.exposed,calls,workers,timers,document,confirmations,release,setHoldView:v=>holdView=v,setFailView:v=>failView=v,setRevision:v=>revision=v,setFailSync:v=>failSync=v,setFailSave:v=>failSave=v,unmount:()=>unmounts.forEach(fn=>fn())}
 }
@@ -78,8 +80,10 @@ assert.equal(f.calls.filter(c=>c.options.method).length,0,'entry must not invoke
 assert.equal(f.calls.filter(c=>c.url.includes('/dashboard')).length,0,'legacy full-list poll remains')
 assert.ok(f.timers.some(t=>t.ms===300000),'configured display interval ignored')
 assert.equal(f.busy.value,false)
+const initialWorkerCount=f.workers.length
 let before=f.calls.length;await f.pollSavedData()
 assert.deepEqual(f.calls.slice(before).map(c=>c.url),['/api/ejh/revision'],'unchanged data reloaded')
+assert.equal(f.workers.length,initialWorkerCount,'unchanged overview recalculated')
 f.document.hidden=true;before=f.calls.length;await f.pollSavedData();assert.equal(f.calls.length,before)
 f.document.hidden=false;f.setRevision('2');await f.pollSavedData();await tick()
 assert.ok(f.calls.slice(before).some(c=>c.url.startsWith('/api/ejh/view?')))
@@ -140,3 +144,9 @@ f=fixture({cards:['a','b','c'].map(card),failURLs});await f.initialize();await f
 f=fixture({failSync:true,failURLs:new Set(['/api/ejh/balance'])});await f.initialize();await f.refreshPage();f.setFailSync(false);f.calls.length=0;pending=f.retryFailedRefresh();f.refreshProgress.value.stopRequested=true;await f.retryFailedRefresh();await pending;assert.equal(f.calls.filter(c=>c.options.method).length,1);assert.equal(f.balanceFailures.value.length,1);f.unmount()
 f=fixture({cards:[card('a')]});await f.initialize();f.busy.value=true;await f.cardAction(card('a'),'details');assert.ok(f.detail.value,'write busy blocked pure viewing');f.unmount()
 console.log('Passed: local refresh scope, no duplicate sync, stop/unmount guards, manual disabled-issuer refresh and failed-only retry')
+
+// A timed out saved-data read must recover even when its revision has not changed.
+f=fixture();await f.initialize();await tick();f.readError.value='previous timeout';before=f.calls.length;await f.pollSavedData();await tick();assert.equal(f.readError.value,'');assert.ok(f.calls.slice(before).some(c=>c.url.startsWith('/api/ejh/view?')));f.unmount()
+const tradesComponent=readFileSync(new URL('../src/components/EJHCardTrades.vue',import.meta.url),'utf8')
+assert.ok(!tradesComponent.includes("emit('updated')"),'read-only trades invalidated overview')
+console.log('Passed: read-only details do not invalidate totals; timeout recovers on unchanged revision')

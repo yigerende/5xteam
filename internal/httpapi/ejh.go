@@ -32,6 +32,7 @@ type ejhRuntime struct {
 	syncJobs     map[string]*ejhSyncTask
 	ctx          context.Context
 	views        ejhViewCache
+	overview     ejhOverviewHistory
 	syncClosed   bool // guarded by lifecycle; prevents Add racing shutdown Wait
 }
 

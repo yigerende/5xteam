@@ -123,6 +123,15 @@ func (s *Server) ejhOverview(w http.ResponseWriter, r *http.Request) {
 		cases[i].ProOAIAvailableModes = nil
 	}
 	out["cases"], out["revision"] = cases, revision
+	if r.URL.Query().Get("format") == "delta" {
+		reply, err := s.ejh.overview.response(out, revision, r.URL.Query().Get("since"))
+		if err != nil {
+			writeAPI(w, 500, nil, "读取余额总览失败")
+			return
+		}
+		writeProAccountList(w, r, reply)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeProAccountList(w, r, out)
 }

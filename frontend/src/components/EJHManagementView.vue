@@ -14,6 +14,9 @@ import EJHCardTrades from './EJHCardTrades.vue'
 import { cardLifecycle } from '../ejh'
 import { computed, watch, nextTick, onMounted, onBeforeUnmount, reactive, ref, shallowRef } from 'vue'
 import { api } from '../api'
+import { readEJH } from '../ejh-read'
+import { applyEJHOverviewResponse } from '../ejh-overview-state'
+import { reconciliationStatus } from '../ejh-reconciliation-view'
 import { createLatestRequest } from '../latestRequest'
 import { createEJHOverviewWorker } from '../ejh-overview-client'
 import { ejhRefreshGate } from '../ejhRefresh'
@@ -77,7 +80,7 @@ async function changeCardCategory(card){
 }
 async function refreshPendingCards(){
  await action(async()=>{
-  const {cards}=await api('/api/ejh/view?section=pending_targets&platform='+encodeURIComponent(platformFilter.value),{timeoutMs:15000})
+  const {cards}=await readEJH('/api/ejh/view?section=pending_targets&platform='+encodeURIComponent(platformFilter.value),{timeoutMs:15000})
   for(const card of cards){if(disposed)break;for(const kind of ['refresh','balance','sync_trades'])await api('/api/ejh/cards/'+encodeURIComponent(card.id)+'/action',{method:'POST',body:{action:kind}})}
   refreshSaved();show('正常待定卡片资料、余额和交易已刷新')
  },'刷新正常待定卡',true)
@@ -179,7 +182,7 @@ function load({background=false}={}){
  const section=tab.value,parameters=viewQuery()
  if(activeView?.key===parameters)return activeView.promise
  const replacing=!!activeView,request={key:parameters,promise:null};activeView=request
- request.promise=dataRequest.run(signal=>api('/api/ejh/view?'+parameters,{signal,timeoutMs:15000}),result=>{
+ request.promise=dataRequest.run(signal=>readEJH('/api/ejh/view?'+parameters,{signal,timeoutMs:15000}),result=>{
   if(disposed||viewQuery()!==parameters)return
   const projected=project(result)
   data.value=projected;viewMeta.value=result;viewTotal.value=result.total;viewRevision.value=result.revision;readError.value=''
@@ -194,10 +197,16 @@ function load({background=false}={}){
 function loadOverview({background=false}={}){
  if(disposed||['settings','open'].includes(tab.value))return Promise.resolve()
  if(overviewFlight){if(!background)overviewAgain=true;return overviewFlight}
- overviewFlight=overviewRequest.run(signal=>api('/api/ejh/overview',{signal,timeoutMs:45000}),async result=>{
-  const summary=await overviewWorker.calculate(result)
+ const previous=overviewSource
+ const parameters=new URLSearchParams({format:'delta',since:previous?.revision||''})
+ overviewFlight=overviewRequest.run(signal=>readEJH('/api/ejh/overview?'+parameters,{signal,timeoutMs:45000}),async response=>{
+  const result=applyEJHOverviewResponse(previous,response)
+  const changed=!previous||result.revision!==previous.revision
+  const summary=changed?await overviewWorker.calculate(result):overview.value._overview
   if(disposed)return
-  overviewSource=result;overview.value={...project(result),_overview:summary};overviewRevision.value=result.revision;overviewError.value=''
+  overviewSource=result
+  overview.value={...project(result),_overview:{...summary,reconciliation:reconciliationStatus(result,Date.now(),600,summary.finance)}}
+  overviewRevision.value=result.source_revision||result.revision;overviewError.value=''
  },{background}).catch(e=>{if(!disposed)overviewError.value=e.message}).finally(()=>{
   overviewFlight=null
   if(overviewAgain&&!disposed){overviewAgain=false;loadOverview({background:true})}
@@ -206,7 +215,7 @@ function loadOverview({background=false}={}){
 }
 
 async function reloadCard(id){
- const result=await api('/api/ejh/view?section=card&card_id='+encodeURIComponent(id),{timeoutMs:15000})
+ const result=await readEJH('/api/ejh/view?section=card&card_id='+encodeURIComponent(id),{timeoutMs:15000})
  if(disposed)return null
  const current=project(result),merge=(before=[],after=[],belongs=()=>false)=>[...before.filter(v=>!belongs(v)&&!after.some(n=>n.id===v.id)),...after]
  data.value={...data.value,cards:merge(data.value.cards,current.cards,v=>v.id===id),cases:merge(data.value.cases,current.cases,v=>v.card_id===id||v.ejh_card_id===id),trades:merge(data.value.trades,current.trades,v=>v.card_id===id),operations:merge(data.value.operations,current.operations,v=>v.card_id===id),payment_policies:current.payment_policies,refund_fees:current.refund_fees,sync:current.sync,auto_cancel:current.auto_cancel}
@@ -223,7 +232,7 @@ function refreshSaved(id=''){
  read.catch(e=>{if(!disposed)readError.value='操作结果已保留；页面更新失败：'+e.message})
  loadOverview()
 }
-function ledgerUpdated(ledger){if(overview.value)overview.value={...overview.value,recharge_ledger:ledger};loadOverview()}
+function ledgerUpdated(){loadOverview()}
 
 async function save(){await action(async()=>{const result=await api('/api/ejh/settings',{method:'PUT',body:settings});Object.assign(settings,result,{app_secret:''});savedEnabled.value=result.enabled===true;savedRefreshSeconds.value=result.page_refresh_seconds||30;refreshSaved();show('EJH 配置已保存')})}
 async function test(){await action(async()=>{await api('/api/ejh/test',{method:'POST',body:{}});refreshSaved();show('连接成功，余额已更新（使用已保存配置）')})}
@@ -253,7 +262,7 @@ async function refreshAllBalances(includeSync = false, automatic = false) {
    refreshProgress.value.done++
   }
   if(disposed||refreshProgress.value.stopRequested){refreshProgress.value.stopped=true;refreshProgress.value.phase='后续查询已停止';return}
-  const targets=await api('/api/ejh/view?section=balance_targets',{timeoutMs:15000})
+  const targets=await readEJH('/api/ejh/view?section=balance_targets',{timeoutMs:15000})
   if(disposed||refreshProgress.value.stopRequested){refreshProgress.value.stopped=true;refreshProgress.value.phase='后续查询已停止';return}
   const cards=targets.cards
   balanceProgress.value={done:0,total:cards.length+1};refreshProgress.value.total=cards.length+1+(includeSync===true?1:0);refreshProgress.value.phase='正在查询账户余额'
@@ -307,7 +316,7 @@ async function initialize() {
  initializing.value=true;initialError.value=''
  try {
   await Promise.all([
-   settingsRequest.run(signal=>api('/api/ejh/settings',{signal,timeoutMs:15000}),cfg=>{Object.assign(settings,cfg);savedEnabled.value=cfg.enabled===true;savedRefreshSeconds.value=cfg.page_refresh_seconds||30}),
+   settingsRequest.run(signal=>readEJH('/api/ejh/settings',{signal,timeoutMs:15000}),cfg=>{Object.assign(settings,cfg);savedEnabled.value=cfg.enabled===true;savedRefreshSeconds.value=cfg.page_refresh_seconds||30}),
    load(),
   ])
   if(!disposed)ready.value=true
@@ -319,12 +328,12 @@ async function pollSavedData(){
  if(!ready.value||disposed||document.hidden||savedRead||!tableTabs.some(([id])=>id===tab.value))return
  savedRead=true
  try{
-  const {revision}=await api('/api/ejh/revision',{timeoutMs:10000})
-  if(revision!==viewRevision.value)await load({background:true})
-  if(revision!==overviewRevision.value)loadOverview({background:true})
+  const {revision}=await readEJH('/api/ejh/revision',{timeoutMs:10000})
+  if(readError.value||revision!==viewRevision.value)await load({background:true})
+  if(overviewError.value||revision!==overviewRevision.value)loadOverview({background:true})
   else if(overviewSource&&!overviewFlight){
-   const source=overviewSource,summary=await overviewWorker.calculate(source)
-   if(!disposed&&source===overviewSource)overview.value={...overview.value,_overview:summary}
+   const summary=overview.value._overview
+   overview.value={...overview.value,_overview:{...summary,reconciliation:reconciliationStatus(overviewSource,Date.now(),600,summary.finance)}}
   }
  }catch(e){if(!disposed)readError.value=e.message}finally{savedRead=false}
 }

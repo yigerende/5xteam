@@ -5,7 +5,6 @@ import { tradeKinds } from '../ejh'
 import { formatTime } from '../utils'
 import EJHReversalFee from './EJHReversalFee.vue'
 const props=defineProps({savedTrades:{type:Array,default:()=>[]},defaultPageSize:{type:Number,default:10},operations:{type:Array,default:()=>[]},feePercent:{type:Number,default:6}})
-const emit=defineEmits(['updated'])
 const opened=ref(false),busy=ref(false),error=ref(''),card=ref(null),rows=ref([]),page=ref(1),hasMore=ref(false),queriedAt=ref(''),applied=ref(null),cached=ref(false)
 const pageSize=ref(props.defaultPageSize || 10)
 const dates=reactive({start:'',end:''})
@@ -29,7 +28,7 @@ async function query(nextPage=1,newSearch=false,nextSize=pageSize.value){
  try{
   const result=await api('/api/ejh/cards/'+encodeURIComponent(card.value.id)+'/trades',{method:'POST',body:{start:range.start,end:range.end,page:nextPage,page_size:nextSize},signal:controller.signal})
   if(disposed)return
-  cached.value=!!result.cached;rows.value=result.items||[];page.value=result.page;pageSize.value=nextSize;hasMore.value=result.has_more;queriedAt.value=result.queried_at;applied.value={start:range.start,end:range.end};emit('updated')
+  cached.value=!!result.cached;rows.value=result.items||[];page.value=result.page;pageSize.value=nextSize;hasMore.value=result.has_more;queriedAt.value=result.queried_at;applied.value={start:range.start,end:range.end}
  }catch(e){if(!disposed)error.value=e.message}finally{busy.value=false}
 }
 onBeforeUnmount(()=>{disposed=true;controller?.abort()})
