@@ -24,6 +24,7 @@ type ejhRuntime struct {
 	lifecycle    sync.Mutex
 	autoCancelMu sync.Mutex
 	mu           sync.Mutex
+	clientMu     sync.Mutex
 	client       *ejh.Client
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
@@ -34,7 +35,11 @@ type ejhRuntime struct {
 	syncClosed   bool // guarded by lifecycle; prevents Add racing shutdown Wait
 }
 
-func (s *Server) ejhClientLocked() *ejh.Client {
+// Only initialization needs this lock. The client synchronizes its own token;
+// read-only requests must not wait for the card-operation mutex.
+func (s *Server) ejhClient() *ejh.Client {
+	s.ejh.clientMu.Lock()
+	defer s.ejh.clientMu.Unlock()
 	if s.ejh.client == nil {
 		s.ejh.client = ejh.New()
 	}
@@ -142,7 +147,7 @@ func (s *Server) testEJH(w http.ResponseWriter, r *http.Request) {
 			Balance  string `json:"balance"`
 		} `json:"abroadList"`
 	}
-	if e = s.ejhClientLocked().Call(r.Context(), c, k, "account.balance.info", map[string]any{}, &out); e != nil {
+	if e = s.ejhClient().Call(r.Context(), c, k, "account.balance.info", map[string]any{}, &out); e != nil {
 		writeAPI(w, 502, nil, e.Error())
 		return
 	}
@@ -415,7 +420,7 @@ func (s *Server) ejhOpenLocked(ctx context.Context, id string, input ejh.OpenInp
 		return op, e
 	}
 	var card ejh.Card
-	e = s.ejhClientLocked().Call(ctx, c, k, "card.open.info", input, &card)
+	e = s.ejhClient().Call(ctx, c, k, "card.open.info", input, &card)
 	op.UpdatedAt = time.Now()
 	if e != nil {
 		op.Status = "unknown"
@@ -558,7 +563,7 @@ func (s *Server) ejhCardAction(w http.ResponseWriter, r *http.Request) {
 	case "sync_trades":
 		// Save only a complete collection for this card; the paginated viewer is read-only.
 		now := time.Now()
-		e = s.collectEJHCardTrades(r.Context(), s.ejhClientLocked(), c, k, card, now.AddDate(0, 0, -90), now)
+		e = s.collectEJHCardTrades(r.Context(), s.ejhClient(), c, k, card, now.AddDate(0, 0, -90), now)
 		if e == nil {
 			e = s.store.EJHReconcile()
 		}
@@ -570,7 +575,7 @@ func (s *Server) ejhCardAction(w http.ResponseWriter, r *http.Request) {
 		return
 	case "details", "refresh":
 		var remote ejh.Card
-		e = s.ejhClientLocked().Call(r.Context(), c, k, "card.query.info", data, &remote)
+		e = s.ejhClient().Call(r.Context(), c, k, "card.query.info", data, &remote)
 		if e == nil && remote.OrderNo != card.Remote.OrderNo {
 			e = fmt.Errorf("卡台返回订单号不一致，未更新卡片")
 		}
@@ -592,7 +597,7 @@ func (s *Server) ejhCardAction(w http.ResponseWriter, r *http.Request) {
 		var out struct {
 			Balance string `json:"balance"`
 		}
-		e = s.ejhClientLocked().Call(r.Context(), c, k, "card.balance.info", data, &out)
+		e = s.ejhClient().Call(r.Context(), c, k, "card.balance.info", data, &out)
 		if e == nil {
 			_, e = ejh.Money(strings.TrimPrefix(out.Balance, "-"))
 		}
@@ -673,7 +678,7 @@ func (s *Server) ejhCardAction(w http.ResponseWriter, r *http.Request) {
 		Status  string `json:"status"`
 		Balance string `json:"billAmount"`
 	}
-	e = s.ejhClientLocked().Call(r.Context(), c, k, "card.change.info", data, &out)
+	e = s.ejhClient().Call(r.Context(), c, k, "card.change.info", data, &out)
 	op.Status = "completed"
 	if e != nil {
 		op.Status, op.Error = "unknown", e.Error()
@@ -750,7 +755,7 @@ func (s *Server) resolveEJHOperation(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var remote ejh.Card
-		if e = s.ejhClientLocked().Call(r.Context(), c, k, "card.query.info", map[string]string{"orderNo": in.OrderNo}, &remote); e != nil {
+		if e = s.ejhClient().Call(r.Context(), c, k, "card.query.info", map[string]string{"orderNo": in.OrderNo}, &remote); e != nil {
 			writeAPI(w, 502, nil, e.Error())
 			return
 		}
@@ -773,7 +778,7 @@ func (s *Server) resolveEJHOperation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var remote ejh.Card
-		if e = s.ejhClientLocked().Call(r.Context(), c, k, "card.query.info", map[string]string{"orderNo": op.OrderNo}, &remote); e != nil {
+		if e = s.ejhClient().Call(r.Context(), c, k, "card.query.info", map[string]string{"orderNo": op.OrderNo}, &remote); e != nil {
 			writeAPI(w, 502, nil, e.Error())
 			return
 		}

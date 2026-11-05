@@ -15,7 +15,7 @@ func (s *Server) submitEJHCancellationLocked(ctx context.Context, cfg ejh.Settin
 		OrderNo string `json:"orderNo"`
 		Status  string `json:"status"`
 	}
-	err := s.ejhClientLocked().Call(ctx, cfg, key, "card.cancel.info", map[string]any{"orderNo": op.OrderNo}, &out)
+	err := s.ejhClient().Call(ctx, cfg, key, "card.cancel.info", map[string]any{"orderNo": op.OrderNo}, &out)
 	op.Status = "unknown"
 	if err != nil {
 		op.Error = err.Error()
@@ -36,7 +36,7 @@ func (s *Server) submitEJHCancellationLocked(ctx context.Context, cfg ejh.Settin
 // Query only: never replay card.cancel.info, including after timeouts/restarts.
 func (s *Server) checkEJHCancellationLocked(ctx context.Context, cfg ejh.Settings, key string, op ejh.Operation) (ejh.Operation, error) {
 	var remote ejh.Card
-	err := s.ejhClientLocked().Call(ctx, cfg, key, "card.query.info", map[string]string{"orderNo": op.OrderNo}, &remote)
+	err := s.ejhClient().Call(ctx, cfg, key, "card.query.info", map[string]string{"orderNo": op.OrderNo}, &remote)
 	if err == nil && remote.OrderNo != op.OrderNo {
 		err = fmt.Errorf("卡台返回订单号不一致，保留原销卡状态")
 	}

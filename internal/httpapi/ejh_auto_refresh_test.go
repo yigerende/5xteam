@@ -126,7 +126,9 @@ func TestEJHClosedReadsAndRefreshSkipIssuer(t *testing.T) {
 	r := httptest.NewRequest("POST", "/", strings.NewReader(`{"start":"2026-10-01","end":"2026-10-15","page":1}`))
 	r.SetPathValue("id", closed.ID)
 	w := httptest.NewRecorder()
+	s.ejh.mu.Lock()
 	s.queryEJHCardTrades(w, r)
+	s.ejh.mu.Unlock()
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"cached":true`) || !strings.Contains(w.Body.String(), "saved") || strings.Contains(w.Body.String(), remote.Number) {
 		t.Fatal(w.Code, w.Body.String())
 	}

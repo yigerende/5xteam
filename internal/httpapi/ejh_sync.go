@@ -100,7 +100,7 @@ func (s *Server) syncEJHLocked(ctx context.Context, start, end time.Time) (retEr
 			closed[c.Remote.OrderNo] = true
 		}
 	}
-	client := s.ejhClientLocked()
+	client := s.ejhClient()
 	seenCards := map[[32]byte]bool{}
 	cardErrors := 0
 	for page := 1; page <= 10000; page++ {

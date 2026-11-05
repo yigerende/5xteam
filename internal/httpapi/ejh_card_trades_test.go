@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestEJHCardTradesQuery(t *testing.T) {
@@ -211,13 +213,95 @@ func TestEJHCardTradesQuery(t *testing.T) {
 	if w := query(valid, "unknown"); w.Code != 404 {
 		t.Fatal("unknown card accepted")
 	}
+	if calls != before {
+		t.Fatal("invalid requests reached supplier")
+	}
 	s.ejh.mu.Lock()
 	w := query(valid, card.ID)
 	s.ejh.mu.Unlock()
-	if w.Code != 409 {
-		t.Fatal("busy query did not fail promptly")
+	if w.Code != 200 || calls != before+1 {
+		t.Fatal("background work blocked read-only trades", w.Code, w.Body.String())
 	}
-	if calls != before {
-		t.Fatal("invalid/busy requests reached supplier")
+	records, err := store.EJHRecords[ejh.TradeRecord](s.store, "trade")
+	if err != nil || len(records) != 0 {
+		t.Fatal("browsing changed saved transactions", err)
+	}
+}
+
+func TestEJHCardTradesConcurrentDuringBackgroundWork(t *testing.T) {
+	s, _ := ejhTestServer(t, 200)
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var authCalls atomic.Int32
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/authenticate" {
+			authCalls.Add(1)
+			fmt.Fprint(w, `{"code":"000000","data":{"authToken":"fixture-token","validity":60000}}`)
+			return
+		}
+		started <- struct{}{}
+		select {
+		case <-release:
+			fmt.Fprint(w, `{"code":"000000","data":{"tradeInfos":[]}}`)
+		case <-r.Context().Done():
+		}
+	}))
+	defer up.Close()
+	defer close(release)
+	cfg, _, err := s.store.EJHSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.URL = up.URL
+	if _, err = s.store.SaveEJHSettings(cfg, "fixture-secret"); err != nil {
+		t.Fatal(err)
+	}
+	s.ejh.client = ejh.New()
+	s.ejh.client.HTTP = up.Client()
+	card := ejh.CardRecord{ID: "concurrent", Remote: ejh.Card{OrderNo: "concurrent-order"}}
+	if err = s.store.EJHPut("card", card.ID, card); err != nil {
+		t.Fatal(err)
+	}
+	// Neither the application's database connection nor the mutation lock
+	// should be needed while reading details from an independent snapshot.
+	if err = s.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s.ejh.mu.Lock()
+	defer s.ejh.mu.Unlock()
+	results := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() {
+			r := httptest.NewRequest("POST", "/", strings.NewReader(`{"start":"2026-10-01","end":"2026-10-15","page":1}`))
+			r.SetPathValue("id", card.ID)
+			w := httptest.NewRecorder()
+			s.queryEJHCardTrades(w, r)
+			results <- w
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case w := <-results:
+			t.Fatalf("query rejected before reaching issuer: %d %s", w.Code, w.Body.String())
+		case <-time.After(5 * time.Second):
+			t.Fatal("queries blocked each other or background work")
+		}
+	}
+	if authCalls.Load() != 1 {
+		t.Fatal("concurrent reads did not share authenticated client")
+	}
+	// Release both issuer requests without unlocking the background operation.
+	release <- struct{}{}
+	release <- struct{}{}
+	for range 2 {
+		select {
+		case w := <-results:
+			if w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("query did not finish")
+		}
 	}
 }

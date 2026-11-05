@@ -147,7 +147,7 @@ func (s *Server) autoCancelEJHCardLocked(ctx context.Context, cfg ejh.Settings, 
 	}
 	started := time.Now()
 	var remote ejh.Card
-	if err := s.ejhClientLocked().Call(ctx, cfg, key, "card.query.info", map[string]any{"orderNo": card.Remote.OrderNo}, &remote); err != nil {
+	if err := s.ejhClient().Call(ctx, cfg, key, "card.query.info", map[string]any{"orderNo": card.Remote.OrderNo}, &remote); err != nil {
 		return empty, err
 	}
 	if remote.OrderNo != card.Remote.OrderNo || remote.Number != card.Remote.Number {
@@ -176,7 +176,7 @@ func (s *Server) autoCancelEJHCardLocked(ctx context.Context, cfg ejh.Settings, 
 			start = c.CreatedAt
 		}
 	}
-	if err = s.collectEJHCardTrades(ctx, s.ejhClientLocked(), cfg, key, card, start.Add(-24*time.Hour), time.Now()); err != nil {
+	if err = s.collectEJHCardTrades(ctx, s.ejhClient(), cfg, key, card, start.Add(-24*time.Hour), time.Now()); err != nil {
 		return empty, err
 	}
 	if err = s.store.EJHReconcile(); err != nil {

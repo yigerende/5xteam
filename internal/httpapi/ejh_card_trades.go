@@ -20,8 +20,17 @@ func (s *Server) queryEJHCardTrades(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(w, r, &in, 4096) != nil {
 		return
 	}
+	// Read a consistent, request-local snapshot without taking the issuer's
+	// mutation lock or waiting for the application's shared write connection.
+	reader, err := s.store.ProListReader(r.Context())
+	if err != nil {
+		writeAPI(w, 500, nil, "读取 EJH 明细配置失败")
+		return
+	}
+	defer reader.Close()
+	view := &Server{store: reader}
 	if in.PageSize == 0 {
-		in.PageSize = s.defaultPageSize()
+		in.PageSize = view.defaultPageSize()
 	}
 	switch in.PageSize {
 	case 10, 50, 100, 500:
@@ -37,18 +46,13 @@ func (s *Server) queryEJHCardTrades(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 400, nil, "请选择 1～90 天的日期范围和有效页码")
 		return
 	}
-	if !s.ejh.mu.TryLock() {
-		writeAPI(w, 409, nil, "卡台正在同步或执行操作，请稍后重试查询")
-		return
-	}
-	defer s.ejh.mu.Unlock()
 	var card ejh.CardRecord
-	if err := s.store.EJHGet("card", r.PathValue("id"), &card); err != nil || card.Remote.OrderNo == "" {
+	if err := reader.EJHGet("card", r.PathValue("id"), &card); err != nil || card.Remote.OrderNo == "" {
 		writeAPI(w, 404, nil, "未找到绑定卡台的银行卡")
 		return
 	}
 	if card.Remote.Status == "2" {
-		records, err := store.EJHRecords[ejh.TradeRecord](s.store, "trade")
+		records, err := store.EJHRecords[ejh.TradeRecord](reader, "trade")
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -85,11 +89,14 @@ func (s *Server) queryEJHCardTrades(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 200, map[string]any{"items": items[offset:limit], "page": in.Page, "page_size": in.PageSize, "has_more": limit < len(items), "queried_at": queriedAt, "cached": true}, "")
 		return
 	}
-	cfg, key, err := s.ejhConfig()
+	cfg, key, err := view.ejhConfig()
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
 	}
+	// Do not retain the SQLite snapshot during potentially slow issuer I/O.
+	reader.Close()
+	client := s.ejhClient()
 	// EJH pages stay at 100 rows. Slice small display pages and combine
 	// larger display pages sequentially; browsing never saves partial data.
 	offset := (in.Page - 1) * in.PageSize
@@ -101,7 +108,7 @@ func (s *Server) queryEJHCardTrades(w http.ResponseWriter, r *http.Request) {
 		var out struct {
 			Trades []ejh.Trade `json:"tradeInfos"`
 		}
-		err = s.ejhClientLocked().Call(r.Context(), cfg, key, "card.trade.info", map[string]any{"orderNo": card.Remote.OrderNo, "tradeTime": start.Format("2006-01-02 15:04:05"), "endTime": end.Format("2006-01-02 15:04:05"), "page": remotePage, "size": 100}, &out)
+		err = client.Call(r.Context(), cfg, key, "card.trade.info", map[string]any{"orderNo": card.Remote.OrderNo, "tradeTime": start.Format("2006-01-02 15:04:05"), "endTime": end.Format("2006-01-02 15:04:05"), "page": remotePage, "size": 100}, &out)
 		if err != nil {
 			writeAPI(w, 502, nil, err.Error())
 			return
