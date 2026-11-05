@@ -76,6 +76,10 @@ func Open(dataDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.initializeGPTRegister(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := s.ensureOpenAIRefreshColumn(); err != nil {
 		_ = db.Close()
 		return nil, err

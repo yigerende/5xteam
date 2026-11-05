@@ -53,6 +53,7 @@ import StatusPill from "./StatusPill.vue";
 import Pagination from "./Pagination.vue";
 import TeamVisitCount from "./TeamVisitCount.vue";
 import MailGPTInfoProgress from "./MailGPTInfoProgress.vue";
+import MailGPTRegister from "./MailGPTRegister.vue";
 import AccountCredentialsDialog from "./AccountCredentialsDialog.vue";
 import MailProActionsDialog from "./MailProActionsDialog.vue";
 import { dispositionLabels } from "../pro-disposition";
@@ -61,6 +62,11 @@ const mailProActions = ref(null);
 import { gptPlanLabel, gptCreatedTime, gptInfoTitle } from "../mailGPTInfo";
 
 const gptInfoProgress = ref(null);
+const gptRegister = ref(null);
+function onRegisteredAccounts() {
+  if (activeTab.value === 'accounts') loadAccountsHandled();
+  emit('pro-changed');
+}
 
 const emit = defineEmits(["open-team", "pro-changed"]);
 const props = defineProps({ defaultPageSize: { type: Number, default: 10 } });
@@ -701,7 +707,7 @@ function setMessagePageSize(value) {
 async function refreshAll() {
   busy.value = "refresh";
   try {
-    await Promise.all([loadStatus(), activeTab.value === "inbox" ? loadMessages() : loadAccounts()]);
+    await Promise.all([loadStatus(), activeTab.value === "gptregister" ? gptRegister.value?.refresh() : activeTab.value === "inbox" ? loadMessages() : loadAccounts()]);
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -1315,7 +1321,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
       <button
         type="button"
         :class="{ active: activeTab === 'accounts' }"
-        @click="activeTab = 'accounts'"
+        @click="activeTab = 'accounts'; loadAccountsHandled()"
       >
         <Mail :size="15" />邮件账号
         <span>{{ counts.all || accounts.length }}</span>
@@ -1330,10 +1336,14 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
       >
         <Inbox :size="15" />收件箱 <span>{{ messageTotal }}</span>
       </button>
+      <button type="button" :class="{ active: activeTab === 'gptregister' }" @click="activeTab = 'gptregister'">
+        <Plus :size="15" />GPT Register
+      </button>
     </div>
 
     <MessageBar :message="message" />
     <MailGPTInfoProgress ref="gptInfoProgress" :mask="maskSensitive" :default-page-size="props.defaultPageSize" @updated="loadAccounts" />
+    <MailGPTRegister ref="gptRegister" :visible="activeTab === 'gptregister'" @show-settings="activeTab = 'gptregister'" @imported="onRegisteredAccounts" />
 
     <template v-if="activeTab === 'accounts'">
       <section class="panel list-panel mail-accounts-panel">
@@ -1397,6 +1407,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             >
               <Plus :size="15" />导入账号
             </button>
+            <button class="btn primary" type="button" :disabled="!!busy" @click="gptRegister?.openRegister()"><Plus :size="15" />注册</button>
           </div>
         </div>
         <div class="space-filter-tabs" role="tablist" aria-label="空间状态筛选">
@@ -1662,7 +1673,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
       </section>
     </template>
 
-    <template v-else>
+    <template v-else-if="activeTab === 'inbox'">
       <section class="panel inbox-toolbar">
         <div class="inbox-filters">
           <label class="compact-search grow"

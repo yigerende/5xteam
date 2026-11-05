@@ -26,6 +26,7 @@ import (
 )
 
 type Server struct {
+	gptRegister               gptRegisterRuntime
 	notifications             notificationRuntime
 	proQuality                proQualityRuntime
 	proFallback               proFallbackRuntime
@@ -191,6 +192,7 @@ func (s *Server) Close() {
 		return
 	}
 	s.auditCloseOnce.Do(func() {
+		s.stopGPTRegister()
 		s.stopProQuality()
 		s.stopEJH()
 		s.stopNexovcc()
@@ -220,6 +222,7 @@ func (s *Server) Close() {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.gptRegisterRoutes(mux)
 	s.ejhRoutes(mux)
 	s.nexovccRoutes(mux)
 	mux.HandleFunc("GET /api/notifications", s.getNotifications)
@@ -455,6 +458,7 @@ func (s *Server) Handler() http.Handler {
 
 // StartBackground runs periodic Free account quota checks until ctx is done.
 func (s *Server) StartBackground(ctx context.Context) {
+	s.startGPTRegister(ctx)
 	s.startEJH(ctx)
 	s.startSeatRecoveryMonitor(ctx)
 	s.startGPTPayOrderMonitor(ctx)
