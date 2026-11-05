@@ -433,9 +433,14 @@ func (s *Server) runLocalLogin(id, email string) {
 	result, err := s.executeChatGPTAT(email, nil, func(event protocolOAuthDiagnostic) {
 		s.appendRegistrationDiagnostic(id, event)
 	})
+	s.finishTemporaryATLogin(id, profile, creds, result, err)
+}
+
+// Called only after the shared login executor has finished all applicable retries.
+func (s *Server) finishTemporaryATLogin(id string, profile model.MailAccountProfile, creds model.MailAccountCredentials, result map[string]any, err error) {
+	email := profile.Email
 	if err != nil {
-		s.deleteMailAccountOnDeadLogin(email, nil, err.Error())
-		s.finishRegistration(id, "failed", err.Error())
+		s.finishTemporaryATFailure(id, profile, err.Error())
 		return
 	}
 	if result == nil || result["success"] != true {
@@ -443,13 +448,12 @@ func (s *Server) runLocalLogin(id, email string) {
 		if strings.TrimSpace(message) == "" {
 			message = "ChatGPT 临时 AT 登录失败"
 		}
-		s.deleteMailAccountOnDeadLogin(email, result, message)
-		s.finishRegistration(id, "failed", message)
+		s.finishTemporaryATFailure(id, profile, message)
 		return
 	}
 	at, _ := result["access_token"].(string)
 	if strings.TrimSpace(at) == "" {
-		s.finishRegistration(id, "failed", "ChatGPT Web Session 未返回 accessToken")
+		s.finishTemporaryATFailure(id, profile, "ChatGPT Web Session 未返回 accessToken")
 		return
 	}
 	creds.Email = email
@@ -497,11 +501,18 @@ func (s *Server) runLocalLogin(id, email string) {
 	s.finishRegistration(id, "success", message)
 }
 
-func (s *Server) deleteMailAccountOnDeadLogin(email string, result map[string]any, message string) bool {
-	if !isDeadOAuthResult(result, message) {
-		return false
+func (s *Server) finishTemporaryATFailure(id string, profile model.MailAccountProfile, reason string) {
+	err := s.store.DeleteMailAccountAfterTemporaryATFailure(profile)
+	message := reason + "；临时 AT 获取最终失败，账号已自动删除"
+	if err != nil {
+		message = reason + "；账号自动删除未完成：" + err.Error()
 	}
-	return s.store.DeleteMailAccount(email) == nil
+	s.enqueueAuditEvent(model.AutoRotationEvent{
+		AccountID: profile.ID, TaskID: id, Type: "audit", Operation: "temporary_at", Stage: "failed",
+		Source: "mail", Level: "error", Message: message,
+		Details: map[string]any{"email": profile.Email, "account_deleted": err == nil},
+	})
+	s.finishRegistration(id, "failed", message)
 }
 
 // runTurbStyleProtocolLogin executes the complete login/OTP/callback/session
