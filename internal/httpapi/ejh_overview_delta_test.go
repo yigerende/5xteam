@@ -8,14 +8,20 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"chatgpt-space-merge/internal/ejh"
+	"chatgpt-space-merge/internal/store"
 )
 
 func TestEJHOverviewDeltaHTTPAndSavedDataInvalidation(t *testing.T) {
 	s, st, _ := gptPayFixture(t, func(http.ResponseWriter, *http.Request) { t.Error("overview contacted issuer") })
 	card := ejh.Card{OrderNo: "saved", Number: "5555555555554444", CVV: "919", Validity: "1299", Status: "1"}
 	if _, err := st.ImportEJHCard(card, true); err != nil {
+		t.Fatal(err)
+	}
+	recharge := store.EJHRechargeEvent{ID: "daily-recharge", At: time.Now(), Before: "100", After: "200", Delta: "100"}
+	if err := st.EJHPut("finance_recharge", recharge.ID, recharge); err != nil {
 		t.Fatal(err)
 	}
 	get := func(query string) map[string]json.RawMessage {
@@ -36,6 +42,13 @@ func TestEJHOverviewDeltaHTTPAndSavedDataInvalidation(t *testing.T) {
 	s.ejh.mu.Lock() // A slow upstream job must not block these saved-data reads.
 	defer s.ejh.mu.Unlock()
 	legacy := get("")
+	var recharges []store.EJHRechargeEvent
+	if err := json.Unmarshal(legacy["recharge_history"], &recharges); err != nil || len(recharges) != 1 || recharges[0].Delta != "100" {
+		t.Fatal("overview omitted dated recharge costs", err)
+	}
+	if _, exists := legacy["snapshots"]; exists {
+		t.Fatal("overview must not load full financial snapshots")
+	}
 	full := get("format=delta&page_size=1&lifecycle=closed")
 	if string(full["mode"]) != `"full"` {
 		t.Fatal("missing initial full snapshot")

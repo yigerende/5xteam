@@ -34,7 +34,7 @@ type ejhViewRead struct {
 }
 
 func (s *Server) ejhDisplaySnapshot(ctx context.Context) (map[string]any, string, error) {
-	return s.ejh.views.read(ctx, s.store.ReadRevision, func(ctx context.Context) (map[string]any, error) {
+	return s.ejh.views.read(ctx, s.store.EJHDisplayRevision, func(ctx context.Context) (map[string]any, error) {
 		reader, err := s.store.ProListReader(ctx)
 		if err != nil {
 			return nil, err
@@ -94,7 +94,7 @@ func (c *ejhViewCache) read(ctx context.Context, version func(context.Context) (
 }
 
 func (s *Server) ejhRevision(w http.ResponseWriter, r *http.Request) {
-	revision, err := s.store.ReadRevision(r.Context())
+	revision, err := s.store.EJHDisplayRevision(r.Context())
 	if err != nil {
 		writeAPI(w, 500, nil, "读取数据版本失败")
 		return
@@ -283,6 +283,12 @@ func (s *Server) ejhView(w http.ResponseWriter, r *http.Request) {
 	if section == "balance_targets" || section == "pending_targets" {
 		targets := []ejhDisplayCard{}
 		for _, c := range cards {
+			if section == "balance_targets" && q.Get("scope") == "reconciliation" {
+				if c.Linked && c.Remote.Status != "2" {
+					targets = append(targets, c)
+				}
+				continue
+			}
 			if section == "pending_targets" {
 				platform := c.Platform
 				if platform == "" {

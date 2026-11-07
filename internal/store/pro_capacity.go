@@ -124,10 +124,18 @@ func proCardLimit(q proCapacityQuery, key string) (int, error) {
 	}
 	return limit, err
 }
-func (s *Store) decorateProCardLocked(card *gptpay.Card, secret gptpay.CardSecret) error {
+func (s *Store) decorateProCardLocked(card *gptpay.Card, secret gptpay.CardSecret, display ...*ejhCardDisplay) error {
+	var batch *ejhCardDisplay
+	if len(display) > 0 {
+		batch = display[0]
+	}
 	key := proCardKey(secret.Number)
 	var err error
-	card.CardType, err = proCardType(s.db, key)
+	if batch != nil {
+		card.CardType = "ejh"
+	} else {
+		card.CardType, err = proCardType(s.db, key)
+	}
 	if err != nil {
 		return err
 	}
@@ -147,27 +155,45 @@ func (s *Store) decorateProCardLocked(card *gptpay.Card, secret gptpay.CardSecre
 		card.IssuerFrozen = issuer.IssuerFrozen
 		card.Source, card.IssuerOrderNo, card.IssuerStatus, card.IssuerLocked, card.IssuerEnd = issuer.Source, issuer.IssuerOrderNo, issuer.IssuerStatus, issuer.IssuerLocked, issuer.IssuerEnd
 	}
-	limit, err := proCardLimit(s.db, key)
-	if err != nil {
-		return err
-	}
-	custom, err := proCardCustomLimit(s.db, key)
-	if err != nil {
-		return err
+	var limit, custom, opened, pending int
+	if batch != nil {
+		limit, custom, opened, pending = batch.limit, batch.custom, batch.opened, batch.pending
+	} else {
+		limit, err = proCardLimit(s.db, key)
+		if err != nil {
+			return err
+		}
+		custom, err = proCardCustomLimit(s.db, key)
+		if err != nil {
+			return err
+		}
+		opened, pending, err = proCardCounts(s.db, key, "")
+		if err != nil {
+			return err
+		}
 	}
 	card.MaxAccounts = nil
 	if custom > 0 {
 		card.MaxAccounts = &custom
 	}
-	opened, pending, err := proCardCounts(s.db, key, "")
-	if err != nil {
-		return err
-	}
 	card.AccountLimit, card.OpenedAccounts, card.PendingAccounts = limit, opened, pending
 	card.RemainingAccounts = max(0, limit-opened-pending)
 	card.ActiveAccounts, card.ActiveEmail, card.SingleActiveAccount = 0, "", false
 	card.Occupants = []gptpay.CardOccupant{}
-	if card.CardType == "ejh" {
+	if batch != nil {
+		card.Occupants = batch.occupants
+		card.SingleActiveAccount = batch.single
+		seen := map[string]bool{}
+		for _, o := range card.Occupants {
+			if o.Email != "" {
+				seen[o.Email] = true
+				if card.ActiveEmail == "" || o.Email < card.ActiveEmail {
+					card.ActiveEmail = o.Email
+				}
+			}
+		}
+		card.ActiveAccounts = len(seen)
+	} else if card.CardType == "ejh" {
 		card.Occupants, err = ejhCardOccupants(s.db, key)
 		if err != nil {
 			return err
@@ -195,7 +221,11 @@ func (s *Store) decorateProCardLocked(card *gptpay.Card, secret gptpay.CardSecre
 			return err
 		}
 	}
-	card.DeadAccount, err = proCardDead(s.db, key)
+	if batch != nil {
+		card.DeadAccount = batch.dead
+	} else {
+		card.DeadAccount, err = proCardDead(s.db, key)
+	}
 	if err != nil {
 		return err
 	}

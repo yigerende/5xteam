@@ -1,6 +1,6 @@
 import { applyPaymentPolicies, paymentOnlySummary } from './payment-only.js'
 import { applyRefundFeeOverrides } from './ejh-refund-cost.js'
-import { financeOverview } from './ejh-finance.js'
+import { financeOverview, dailyFinanceCost, beijingDay } from './ejh-finance.js'
 import { reconciliationStatus } from './ejh-reconciliation-view.js'
 import { summarizeCardBalances } from './ejh.js'
 import { summarizeCardBalancesUSD } from './ejh-card-funding.js'
@@ -13,6 +13,7 @@ export function calculateEJHOverview(source, now = Date.now()) {
  const finance = financeOverview(data)
  return {
   finance,
+  today: dailyFinanceCost(data, beijingDay(now)),
   reconciliation: reconciliationStatus(data, now, 600, finance),
   balances: summarizeCardBalances(data.cards),
   usd: summarizeCardBalancesUSD(data.cards, data.operations),

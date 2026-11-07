@@ -285,9 +285,16 @@ func (s *Store) gptPayCardsLocked(limit, offset int, enabledOnly bool, cardType 
 	if err != nil {
 		return nil, 0, err
 	}
+	var display map[string]*ejhCardDisplay
+	if cardType == "ejh" && len(loaded) > 0 {
+		display, err = s.ejhCardDisplayStats()
+		if err != nil {
+			return nil, 0, err
+		}
+	}
 	items := []gptpay.Card{}
 	for _, v := range loaded {
-		if err = s.decorateProCardLocked(&v.card, v.secret); err != nil {
+		if err = s.decorateProCardLocked(&v.card, v.secret, display[proCardKey(v.secret.Number)]); err != nil {
 			return nil, 0, err
 		}
 		if len(oaiOnly) > 0 && oaiOnly[0] && !cardplatform.IsOAI(v.card.Platform) {

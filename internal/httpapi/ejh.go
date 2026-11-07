@@ -237,12 +237,16 @@ func (s *Server) readEJHDashboard(includeAudit bool) (map[string]any, error) {
 	for _, local := range locals {
 		localByID[local.ID] = local
 	}
+	numbers := make([]string, 0, len(cards))
 	for _, c := range cards {
-		kind, err := s.store.ProCardTypeForNumber(c.Remote.Number)
-		if err != nil {
-			return nil, err
-		}
-		if kind != "ejh" {
+		numbers = append(numbers, c.Remote.Number)
+	}
+	classified, err := s.store.EJHCardNumbers(numbers)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range cards {
+		if !classified[c.Remote.Number] {
 			continue
 		}
 		c.Remote.Number = maskEJH(c.Remote.Number)
@@ -345,6 +349,14 @@ func (s *Server) readEJHDashboard(includeAudit bool) (map[string]any, error) {
 		return nil, err
 	}
 	applyEJHFinancialConsumption(cases, usage)
+	recharges, err := store.EJHRecords[store.EJHRechargeEvent](s.store, "finance_recharge")
+	if err != nil {
+		return nil, err
+	}
+	transfers, err := store.EJHRecords[store.EJHExternalTransferEvent](s.store, "finance_external_transfer")
+	if err != nil {
+		return nil, err
+	}
 	refundFees, err := s.store.EJHRefundFees()
 	if err != nil {
 		return nil, err
@@ -359,7 +371,7 @@ func (s *Server) readEJHDashboard(includeAudit bool) (map[string]any, error) {
 	}
 	var autoCancel ejhAutoCancelState
 	_ = s.store.EJHGet("auto_cancel", "latest", &autoCancel)
-	return map[string]any{"auto_cancel": autoCancel, "payment_policies": policies, "merchant_fees": merchantFees, "cards": rows, "operations": ops, "trades": trades, "cases": cases, "sync": syncState, "balance": balance, "recharge_ledger": ledger, "refund_fees": refundFees, "reversal_fee_percent": settings.ReversalFeePercent, "page_refresh_seconds": settings.PageRefreshSeconds, "consumption_history": usage, "audit": audit, "server_time": time.Now()}, nil
+	return map[string]any{"auto_cancel": autoCancel, "payment_policies": policies, "merchant_fees": merchantFees, "cards": rows, "operations": ops, "trades": trades, "cases": cases, "sync": syncState, "balance": balance, "recharge_ledger": ledger, "recharge_history": recharges, "external_transfer_history": transfers, "refund_fees": refundFees, "reversal_fee_percent": settings.ReversalFeePercent, "page_refresh_seconds": settings.PageRefreshSeconds, "consumption_history": usage, "audit": audit, "server_time": time.Now()}, nil
 }
 func maskEJH(n string) string {
 	if len(n) > 4 {

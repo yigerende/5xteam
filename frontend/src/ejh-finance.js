@@ -158,7 +158,7 @@ export function financeEvents(data,history={}) {
   // A separate signed exclusion preserves issuer trades. The first cumulative
   // amount has no known spend date; later edits are dated accounting changes.
   let recordedTransfer=0n
-  for(const event of new Map((history.external_transfers||[]).map(e=>[e.id,e])).values()){
+  for(const event of new Map((history.external_transfers||data.external_transfer_history||[]).map(e=>[e.id,e])).values()){
     const delta=cents(event.delta)
     if(delta===null){
       events.push({id:'external:'+event.id,kind:'clearing',externalTransfer:true,at:financeTime(event.at),reference:event.id,amount:null,usd:null,currency:'USD',incomplete:true,note:'平台外转出调整金额待核实'})
@@ -184,7 +184,7 @@ export function financeEvents(data,history={}) {
       email:(data.cases||[]).find(c=>c.id===record.payment_order_id)?.email||'',amount:fee.rows[0]?.amount??null,currency:fee.rows[0]?.currency||t.cardCurrency||'',usd:money(cents(fee.usd.amount)),usd_precise:fee.usd.amount,
       incomplete:!!(fee.missing||fee.pending||fee.usd.missing),note:fee.pending?'待确认，未计入':`按 ${fee.percent}% 估算${record.reversal_fee?'（已回款锁定）':'（当前设置）'}`})
   }
-  for(const event of history.recharges||[]){
+  for(const event of history.recharges||data.recharge_history||[]){
     const after=feeCents(event.after||'0'),before=feeCents(event.before||'0')
     events.push({id:event.id,kind:'recharge',at:event.baseline?null:financeTime(event.at),month:event.baseline&&(!data.recharge_ledger?.history_month_recorded_at||financeTime(event.at)<=financeTime(data.recharge_ledger.history_month_recorded_at))?historyMonth:null,reference:event.id,amount:money(after-before),currency:'USD',usd:money(after-before),note:event.baseline?(historyMonth?'历史充值归属 '+historyMonth+'，具体日期未记录':'历史充值基数，未分摊日期'):'充值总账变动 '+event.delta+' USD'})
   }
@@ -272,6 +272,20 @@ export function financeReport(data,history={},mode='day',date=beijingDay()) {
   const lossChange=samePolicies&&first&&last&&financeTime(first.at)!==financeTime(last.at)&&firstLoss!==null&&lastLoss!==null?money(cents(lastLoss)-cents(firstLoss)):null
   return {range,summary,events,rows,overview,baseline,dailyPending,dailyErrors,periodIncomplete,monthlyUndated,undatedTransfers,undated:all.filter(e=>e.at===null&&!e.month&&e.kind!=='consumption').length,lossChange,firstAt:first?.at,lastAt:last?.at,
     coverage:(history.usage_days||[]).map(r=>r.day).sort()[0]||null}
+}
+
+// Reuse the dated ledger events without loading daily usage or full historical
+// snapshots. Missing dates stay unallocated; cash differences are never fees.
+export function dailyFinanceCost(data, date=beijingDay()) {
+  const range=periodRange('day',date)
+  const all=financeEvents(data).filter(e=>e.kind!=='consumption')
+  const events=all.filter(e=>e.at!==null&&e.at>=range.start&&e.at<range.end)
+  const earnings=summarizeEvents(events).earnings
+  if(cents(data.recharge_ledger?.amount)===null){
+    earnings.costUSD=null;earnings.costR=null;earnings.costIncomplete=true
+    earnings.profitR=null;earnings.incomplete=true
+  }
+  return {date,earnings,undated:all.filter(e=>e.at===null&&(!e.month||e.month===date.slice(0,7))).length}
 }
 
 export function financeEventPeriod(event,mode) {

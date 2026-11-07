@@ -87,20 +87,22 @@ export function summarizeInFlightPayments(cases=[],cards=[],operations=[],trades
  const orders=new Map(),payments=new Map(),payment=new Map(),transaction=new Map(),settlement=new Map(),conversions=[]
  for(const row of cases)if(!row.pro_dead&&!row.payment_only&&['opened','waiting'].includes(row.state)&&!closedCards.has(row.ejh_card_id||row.card_id))orders.set(row.id||row,row)
  let missingPayment=0,missingTransaction=0,missingSettlement=0,pendingSettlement=0,authorizations=0
+ const missingRows=[]
+ const missing=(row,reason)=>missingRows.push({id:row.id,email:row.email||'',card_id:row.ejh_card_id||row.card_id||'',reason})
  for(const row of orders.values()){
   let charge=row.charge
   const valid=charge&&(['1','4'].includes(charge.type)&&charge.status==='2'||charge.type==='1'&&charge.status==='1')
-  if(!valid){missingPayment++;missingTransaction++;missingSettlement++;continue}
+  if(!valid){missing(row,charge?'付款流水状态待确认':'尚未匹配到付款流水');missingPayment++;missingTransaction++;missingSettlement++;continue}
   const card=row.ejh_card_id||row.card_id||''
   const remaining=remainingAuthorization(row,groups)
-  if(remaining?.missing){missingPayment++;missingTransaction++;missingSettlement++;continue}
+  if(remaining?.missing){missing(row,'授权、清算或回款金额不完整');missingPayment++;missingTransaction++;missingSettlement++;continue}
   if(remaining){
    if(units(remaining.amount)===0n)continue
    charge={...charge,type:remaining.refundPending?'4':'1',status:remaining.refundPending?'2':'1',card_amount:remaining.amount,card_currency:remaining.currency,bill_amount:remaining.settlementUSD??'0',bill_currency:'USD',trade_amount:'',trade_currency:'',refund_pending:remaining.refundPending}
   }
   const key=remaining?.key||(charge.trade_no?`${card}:trade:${charge.trade_no}`:charge.id?`id:${charge.id}`:row.id||row)
   const previous=payments.get(key)
-  if(!previous||(Date.parse(charge.synced_at)||0)>(Date.parse(previous.charge.synced_at)||0))payments.set(key,{charge,card_id:card})
+  if(!previous||(Date.parse(charge.synced_at)||0)>(Date.parse(previous.charge.synced_at)||0))payments.set(key,{charge,card_id:card,row})
  }
  const add=(totals,value,currency)=>{
   const n=units(value)
@@ -108,9 +110,9 @@ export function summarizeInFlightPayments(cases=[],cards=[],operations=[],trades
   totals.set(currency,(totals.get(currency)||0n)+n);return true
  }
  const unrecognized=missingPayment
- for(const {charge,card_id} of payments.values()){
+ for(const {charge,card_id,row} of payments.values()){
   const actualRefundUSD=charge.refund_pending&&units(charge.bill_amount)>0n
-  conversions.push({card_id,amount:actualRefundUSD?charge.bill_amount:units(charge.card_amount)===null?null:charge.card_amount,currency:actualRefundUSD?'USD':charge.card_currency})
+  conversions.push({card_id,amount:actualRefundUSD?charge.bill_amount:units(charge.card_amount)===null?null:charge.card_amount,currency:actualRefundUSD?'USD':charge.card_currency,row})
   if(charge.type==='1')authorizations++
   if(!add(payment,charge.card_amount,charge.card_currency))missingPayment++
   if(!add(transaction,charge.trade_amount,charge.trade_currency))missingTransaction++
@@ -123,7 +125,10 @@ export function summarizeInFlightPayments(cases=[],cards=[],operations=[],trades
  }
  const rows=totals=>[...totals].sort(([a],[b])=>a.localeCompare(b)).map(([currency,n])=>({amount:format(n),currency}))
  const paymentUSD=summarizeCardAmountsUSD(conversions,cards,operations)
+ if(paymentUSD.missing)for(const entry of conversions){
+  if(summarizeCardAmountsUSD([entry],cards,operations).missing)missing(entry.row,units(entry.amount)===null?'付款金额缺失':'付款币种或 USD 折算依据缺失')
+ }
  // Cases without a recognized charge still represent unknown in-flight money.
  paymentUSD.missing+=unrecognized;paymentUSD.total+=unrecognized
- return {count:orders.size,payment:rows(payment),transaction:rows(transaction),settlement:rows(settlement),missingPayment,missingTransaction,missingSettlement,pendingSettlement,authorizations,paymentUSD,authorizationKeys:[...payments.keys()]}
+ return {count:orders.size,payment:rows(payment),transaction:rows(transaction),settlement:rows(settlement),missingPayment,missingTransaction,missingSettlement,pendingSettlement,authorizations,paymentUSD,missingRows,authorizationKeys:[...payments.keys()]}
 }

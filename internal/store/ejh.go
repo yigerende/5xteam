@@ -569,6 +569,11 @@ type ejhCaseQuery interface {
 	Query(string, ...any) (*sql.Rows, error)
 }
 
+// Compact SQL projections avoid decoding supplier event logs and unrelated
+// account history for every financial row. Keep the original model decisions.
+const ejhCaseAccountProjection = `json_object('management_scope',json_extract(m.profile,'$.management_scope'),'mail_pro_actions',json_extract(m.profile,'$.mail_pro_actions'),'pro_invite_status',json_extract(m.profile,'$.pro_invite_status'),'pro_accept_status',json_extract(m.profile,'$.pro_accept_status'),'pro_transfer_status',json_extract(m.profile,'$.pro_transfer_status'),'pro_remove_status',json_extract(m.profile,'$.pro_remove_status'),'vm2api',json_extract(m.profile,'$.vm2api'),'pro_post_merge_groups',json_extract(m.profile,'$.pro_post_merge_groups'),'pro_deactivation',json_extract(m.profile,'$.pro_deactivation'),'pro_merchant',json_extract(m.profile,'$.pro_merchant'),'pro_merge_v2',json_extract(m.profile,'$.pro_merge_v2'),'pro_auto',json_object('order_id',json_extract(m.profile,'$.pro_auto.order_id')))`
+const ejhCaseOrderProjection = `json_object('updated_at',json_extract(o.profile,'$.updated_at'),'remote',json_object('id',json_extract(o.profile,'$.remote.id'),'creditUnit',json_extract(o.profile,'$.remote.creditUnit'),'chargedCredits',json_extract(o.profile,'$.remote.chargedCredits'),'reservedCredits',json_extract(o.profile,'$.remote.reservedCredits'),'releasedCredits',json_extract(o.profile,'$.remote.releasedCredits'),'settlementStatus',json_extract(o.profile,'$.remote.settlementStatus')))`
+
 func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, error) {
 	rates, err := ejhReversalFeeRates(q)
 	if err != nil {
@@ -623,9 +628,9 @@ func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, erro
 	if e != nil {
 		return nil, e
 	}
-	rows, e := q.Query(`SELECT c.profile,m.email,CASE WHEN k.card_type='ejh' THEN COALESCE(l.card_id,i.card_id,c.card_id) ELSE '' END,COALESCE(k.card_type,'other'),charge.sealed,o.profile,
+	rows, e := q.Query(`SELECT c.profile,m.email,CASE WHEN k.card_type='ejh' THEN COALESCE(l.card_id,i.card_id,c.card_id) ELSE '' END,COALESCE(k.card_type,'other'),charge.sealed,`+ejhCaseOrderProjection+`,
         CASE WHEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_identity'),'')<>''
-        THEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_snapshot'),0) END,COALESCE(oc.profile,'{}'),COALESCE(m.profile,'{}'),COALESCE((SELECT profile FROM pro_dead_accounts WHERE email=c.email),'null') FROM ejh_cases c
+        THEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_snapshot'),0) END,COALESCE(oc.profile,'{}'),`+ejhCaseAccountProjection+`,COALESCE((SELECT profile FROM pro_dead_accounts WHERE email=c.email),'null') FROM ejh_cases c
         LEFT JOIN ejh_records charge ON charge.kind='trade' AND charge.id=json_extract(c.profile,'$.original_trade_id')
         LEFT JOIN gptpay_orders o ON o.id=c.id
 		LEFT JOIN mail_accounts m ON m.email=c.email

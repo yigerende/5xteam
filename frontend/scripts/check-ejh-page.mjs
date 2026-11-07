@@ -10,6 +10,7 @@ import {createLatestRequest} from '../src/latestRequest.js'
 import {createEJHRefreshGate} from '../src/ejhRefresh.js'
 import {refreshEJHSync} from '../src/ejhSync.js'
 import {applyEJHOverviewResponse} from '../src/ejh-overview-state.js'
+import {beijingDay} from '../src/ejh-finance.js'
 import {activationPlan} from '../src/proActivationPlan.js'
 const paid = (id, plan, created_at, payment_status = 'success') => ({ id, plan, created_at, payment_status })
 const account = { current_plan_type:'free', financial_cases:[paid('old','pro5','2026-10-01'),paid('paid','pro20','2026-10-02'),paid('retry','pro50','2026-10-03','failed'),paid('points','codex_point','2026-10-04')] }
@@ -28,12 +29,12 @@ const plain=v=>JSON.parse(JSON.stringify(v))
 const card=id=>({id,issuer_linked:true,remote:{orderNo:id,status:'1'},local:{}})
 function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=false,holdSync=false,holdSettings=false,holdView=false,failView=false,failURLs=new Set(),confirmDelete=true}={}){
  const calls=[],unmounts=[],confirmations=[],timers=[],workers=[]
- let release,percent=6,failSave=false,revision='1'
+ let release,percent=6,failSave=false,revision='1',day=beijingDay()
  const blocked=new Promise(resolve=>{release=resolve})
  const source=()=>({cards,cases,trades:[],operations:[],audit:[],sync:{},reversal_fee_percent:percent,revision})
  const document={hidden:false,addEventListener(){},removeEventListener(){}}
- const context=vm.createContext({ref,shallowRef,reactive,computed,watch,URLSearchParams,AbortController,...ejh,applyPaymentPolicies,applyRefundFeeOverrides,cardOrigin,createLatestRequest,refreshEJHSync,applyEJHOverviewResponse,reconciliationStatus:()=>({}),ejhRefreshGate:gate,
-  createEJHOverviewWorker:()=>({calculate:async s=>{workers.push(s);return {fullHistoryCount:s.cases.length}},dispose(){}}),
+ const context=vm.createContext({ref,shallowRef,reactive,computed,watch,URLSearchParams,AbortController,...ejh,applyPaymentPolicies,applyRefundFeeOverrides,cardOrigin,createLatestRequest,refreshEJHSync,applyEJHOverviewResponse,beijingDay:()=>day,reconciliationStatus:()=>({}),ejhRefreshGate:gate,
+  createEJHOverviewWorker:()=>({calculate:async s=>{workers.push(s);return {fullHistoryCount:s.cases.length,today:{date:day}}},dispose(){}}),
   nextTick:tick,onMounted(){},onBeforeUnmount:fn=>unmounts.push(fn),defineProps:()=>({defaultPageSize}),defineEmits:()=>()=>{},document,
   window:{localStorage:storage,addEventListener(){},removeEventListener(){},confirm:t=>{confirmations.push(t);return confirmDelete}},
   setInterval:()=>0,clearInterval(){},setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length},clearTimeout(){},CreditCard:{},CircleDashed:{},Clock3:{},CheckCircle2:{},isClosedCard:c=>c.remote?.status==='2',
@@ -50,7 +51,7 @@ function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=fal
     const p=new URLSearchParams(url.split('?')[1]),section=p.get('section')
     if(holdView)await blocked
     if(failView)throw Error('read timed out')
-    if(section==='balance_targets')return {cards:cards.filter(c=>!c.normal_pending&&!['2','8'].includes(c.remote.status))}
+    if(section==='balance_targets')return {cards:cards.filter(c=>p.get('scope')==='reconciliation'?c.issuer_linked!==false&&c.remote.status!=='2':!c.normal_pending&&!['2','8'].includes(c.remote.status))}
     if(section==='pending_targets')return {cards:cards.filter(c=>c.normal_pending)}
     let rows=section==='cases'?cases.filter(c=>p.get('category')==='unopened'?c.state==='unopened':c.state!=='unopened'):section==='cards'?cards.filter(c=>p.get('card_id')?c.id===p.get('card_id'):ejh.cardLifecycle(c)===(p.get('lifecycle')||'normal')):section==='card'?cards.filter(c=>c.id===p.get('card_id')):[]
     if(section==='cards')rows=rows.filter(c=>ejh.cardMatchesFilters(c,cases,p.get('card_state'),p.get('return_state'))&&ejh.cardMatchesSearch(c,cases,p.get('q'),p.get('card_id')))
@@ -73,7 +74,7 @@ function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=fal
  })
  context.readEJH=context.api
  vm.runInContext(code+';globalThis.exposed={retryFailedRefresh,progress,refreshProgress,refreshing,initialize,refreshPage,refreshAllBalances,busy,message,balanceFailures,editLimit,saveLimit,data,limitID,limitValue,lifecycleFilter,closureState,closureCounts,filtered,setLifecycle,setClosureState,clearFilters,cardStatusFilter,targetCardID,changeTab,showCaseState,tab,status,query,accountReturnStates,caseCategory,caseCounts,setCaseCategory,deleteUnopenedCase,page,pageSize,visible,settings,save,load,ready,loading,initializing,initialError,pollSavedData,overview,loadOverview,readError,refreshSaved,cardAction,cardReading,detail};',context)
- return {...context.exposed,calls,workers,timers,document,confirmations,release,setHoldView:v=>holdView=v,setFailView:v=>failView=v,setRevision:v=>revision=v,setFailSync:v=>failSync=v,setFailSave:v=>failSave=v,unmount:()=>unmounts.forEach(fn=>fn())}
+ return {...context.exposed,calls,workers,timers,document,confirmations,release,setDay:v=>day=v,setHoldView:v=>holdView=v,setFailView:v=>failView=v,setRevision:v=>revision=v,setFailSync:v=>failSync=v,setFailSave:v=>failSave=v,unmount:()=>unmounts.forEach(fn=>fn())}
 }
 let f=fixture();await f.initialize();await tick()
 assert.equal(f.calls.filter(c=>c.options.method).length,0,'entry must not invoke upstream')
@@ -84,6 +85,10 @@ const initialWorkerCount=f.workers.length
 let before=f.calls.length;await f.pollSavedData()
 assert.deepEqual(f.calls.slice(before).map(c=>c.url),['/api/ejh/revision'],'unchanged data reloaded')
 assert.equal(f.workers.length,initialWorkerCount,'unchanged overview recalculated')
+f.setDay('2026-11-08');before=f.calls.length;await f.pollSavedData();await tick()
+assert.equal(f.overview.value._overview.today.date,'2026-11-08','midnight did not roll daily costs without database writes')
+assert.equal(f.workers.length,initialWorkerCount+1)
+assert.equal(f.calls.slice(before).filter(c=>c.url.startsWith('/api/ejh/view?')).length,0,'midnight unnecessarily reloaded cards')
 f.document.hidden=true;before=f.calls.length;await f.pollSavedData();assert.equal(f.calls.length,before)
 f.document.hidden=false;f.setRevision('2');await f.pollSavedData();await tick()
 assert.ok(f.calls.slice(before).some(c=>c.url.startsWith('/api/ejh/view?')))
@@ -150,3 +155,10 @@ f=fixture();await f.initialize();await tick();f.readError.value='previous timeou
 const tradesComponent=readFileSync(new URL('../src/components/EJHCardTrades.vue',import.meta.url),'utf8')
 assert.ok(!tradesComponent.includes("emit('updated')"),'read-only trades invalidated overview')
 console.log('Passed: read-only details do not invalidate totals; timeout recovers on unchanged revision')
+f=fixture({cards:[card('normal'),{...card('pending'),normal_pending:true},{...card('closing'),remote:{orderNo:'closing',status:'8'}},{...card('closed'),remote:{orderNo:'closed',status:'2'}}]})
+await f.initialize();await tick();f.calls.length=0
+await f.refreshAllBalances(false,false,true)
+assert.deepEqual(f.calls.filter(c=>c.options.method).map(c=>c.url),['/api/ejh/balance','/api/ejh/cards/normal/action','/api/ejh/cards/pending/action','/api/ejh/cards/closing/action'])
+assert.ok(f.calls.filter(c=>c.url.endsWith('/action')).every(c=>c.options.body.action==='balance'),'reconciliation refresh must not mutate card lifecycle')
+f.unmount()
+console.log('Passed: manual reconciliation refresh includes pending/closing balances, excludes closed cards and never submits issuer mutations')

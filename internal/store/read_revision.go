@@ -16,6 +16,10 @@ import (
 func (s *Store) ReadRevision(ctx context.Context) (string, error) {
 	s.revisionMu.Lock()
 	defer s.revisionMu.Unlock()
+	return s.readRevisionLocked(ctx)
+}
+
+func (s *Store) readRevisionLocked(ctx context.Context) (string, error) {
 	if s.revisionDB == nil {
 		path := strings.NewReplacer("%", "%25", "#", "%23", "?", "%3F").Replace(filepath.ToSlash(s.path))
 		db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(1000)")

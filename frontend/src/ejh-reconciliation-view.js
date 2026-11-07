@@ -14,6 +14,8 @@ export function reconciliationStatus(data, now = Date.now(), maxAgeSeconds = 600
   const timestamps = [data.balance?.at, data.sync?.last_success, ...liveCards.map(c => c.balance_at)].map(financeTime)
   const oldest = timestamps.some(t => t === null) ? null : Math.min(...timestamps)
   const ageLimit = Math.max(600, Number(maxAgeSeconds) || 600) * 1000
+  const sources = [{id:'account',label:'EJH 账户余额',at:data.balance?.at},{id:'trades',label:'卡片与交易',at:data.sync?.last_success},...liveCards.map(c=>({id:c.id,label:'卡片 '+(c.remote?.cardNo?.slice(-4)||c.local?.name||c.id)+(c.normal_pending?'（正常待定）':''),at:c.balance_at}))]
+  const freshness = sources.filter(s=>financeTime(s.at)===null||now-financeTime(s.at)>ageLimit).map(s=>({...s,at:financeTime(s.at)}))
   if (oldest === null) issues.push('部分查询时间未记录')
   else if (now - oldest > ageLimit) issues.push('部分余额或交易较旧，建议刷新核对')
   let state = 'unknown', label = '数据待补齐'
@@ -24,7 +26,7 @@ export function reconciliationStatus(data, now = Date.now(), maxAgeSeconds = 600
     else if ((gap < 0n ? -gap : gap) <= cents(reconciliationToleranceUSD)) { state = 'small'; label = '小额估算差异' }
     else { state = 'difference'; label = '存在待核对差额' }
   }
-  return { value, state, label, oldest, issues: [...new Set(issues)], tolerance: reconciliationToleranceUSD }
+  return { value, state, label, oldest, freshness, issues: [...new Set(issues)], tolerance: reconciliationToleranceUSD }
 }
 
 export function reconciliationCards(data) {

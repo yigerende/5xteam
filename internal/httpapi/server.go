@@ -509,8 +509,14 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
-	writeAPI(w, 200, s.store.Settings(), "")
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	reader, err := s.store.ProListReader(r.Context())
+	if err != nil {
+		writeAPI(w, 500, nil, "读取设置失败")
+		return
+	}
+	defer reader.Close()
+	writeAPI(w, 200, reader.Settings(), "")
 }
 
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {

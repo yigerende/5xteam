@@ -54,7 +54,7 @@ func TestEJHViewPagingDependenciesAndFilters(t *testing.T) {
 	now := time.Now()
 	data["operations"] = []ejh.Operation{{ID: "old", Method: "cancel", CardID: "closed-old", Status: "completed", UpdatedAt: now.Add(-time.Hour)}, {ID: "new", Method: "cancel", CardID: "closed-new", Status: "completed", UpdatedAt: now}}
 	data["trades"] = []ejh.TradeRecord{{ID: "refund-today", CardID: "normal", Trade: ejh.Trade{Type: "5", CreatedAt: "2026-11-04 08:00:00", TradeTime: "2026-11-02 10:00:00"}}, {ID: "refund-yesterday", CardID: "normal", Trade: ejh.Trade{Type: "5", CreatedAt: "2026-11-03 08:00:00", TradeTime: "2026-11-03 08:00:00"}}}
-	rev, err := st.ReadRevision(t.Context())
+	rev, err := st.EJHDisplayRevision(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +105,14 @@ func TestEJHViewPagingDependenciesAndFilters(t *testing.T) {
 	out = readEJHTestView(t, s, "section=trades&status=pending&page_size=1")
 	if got := viewIDs(out); !reflect.DeepEqual(got, []string{"refund-today"}) {
 		t.Fatal("issuer posting order", got)
+	}
+	allBalances := readEJHTestView(t, s, "section=balance_targets&scope=reconciliation&page_size=1")
+	ids := []string{}
+	for _, c := range allBalances["cards"].([]any) {
+		ids = append(ids, c.(map[string]any)["id"].(string))
+	}
+	if !reflect.DeepEqual(ids, []string{"normal", "pending", "closing", "unknown"}) {
+		t.Fatal("reconciliation must include every unfinished card, regardless of category or pagination", ids)
 	}
 	out = readEJHTestView(t, s, "section=balance_targets&page_size=1")
 	if len(out["cards"].([]any)) != 2 {

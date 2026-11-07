@@ -7,6 +7,7 @@ const display=value=>props.masked?'---':value
 const report=computed(()=>props.data._overview?.reconciliation || reconciliationStatus(props.data))
 const value=computed(()=>report.value.value)
 const state=computed(()=>props.masked?'unknown':report.value.state)
+const queryTime=at=>at===null?'查询时间未记录':new Date(at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})
 </script>
 <template>
  <section class="reconcile-bar" :class="state" aria-label="资金核对">
@@ -14,6 +15,8 @@ const state=computed(()=>props.masked?'unknown':report.value.state)
   <div class="reconcile-values"><div><span>账面差额</span><b>{{display(value.gap??'—')}} <em>USD</em></b><small>{{display(usdToR(value.gap)??'—')}} R</small></div><div><span>其中未销卡待补回</span><b>{{display(value.closurePending??'—')}} <em>USD</em></b><small>不计成本</small></div><div><span>其余待核对</span><b>{{display(value.unexplained??'—')}} <em>USD</em></b><small>未认定为损失</small></div></div>
   <details v-if="!masked&&value.gap!==null"><summary>核对明细与计算方式</summary><p>充值 <b>{{display(value.gross)}}</b> − 余额及在途 <b>{{display(value.assets)}}</b> − 总成本 <b>{{display(value.earnings.costUSD)}}</b><template v-if="value.externalTransfer!=='0.00'"> − 平台外转出 <b>{{display(value.externalTransfer??'—')}}</b></template><template v-if="value.paymentOnly.amount"> − 只付款支出 <b>{{(value.paymentOnly.amount/100).toFixed(2)}}</b></template> ＝ 差额 <b>{{display(value.gap)}}</b> USD</p></details>
   <p v-else-if="!masked">{{display(value.lossReasons.join('；')||'部分费用待核实，暂不能核对总账。')}}</p>
+  <details v-if="!masked&&state==='stale'" open><summary>{{report.issues.join('；')}}</summary><ul><li v-for="row in report.freshness" :key="row.id">{{row.label}}：{{queryTime(row.at)}}</li></ul><small v-if="report.freshness?.length">以上时间为北京时间。自动同步卡片与交易不会查询账户及单卡余额；请点击“刷新核对余额”。正常待定及销卡处理中余额也参与核对。</small></details>
+  <details v-if="!masked&&value.inFlight.missingRows?.length"><summary>查看待核实付款（{{value.inFlight.missingRows.length}} 笔）</summary><ul><li v-for="row in value.inFlight.missingRows" :key="row.id">{{row.email||row.id}}：{{row.reason}}</li></ul><small>可在账号回款中搜索该账号，查看对应卡片的付款流水；数据补齐后自动重新计算。</small></details>
  </section>
 </template>
 <style scoped>

@@ -18,6 +18,7 @@ import { api } from '../api'
 import { readEJH } from '../ejh-read'
 import { applyEJHOverviewResponse } from '../ejh-overview-state'
 import { reconciliationStatus } from '../ejh-reconciliation-view'
+import { beijingDay } from '../ejh-finance'
 import { createLatestRequest } from '../latestRequest'
 import { createEJHOverviewWorker } from '../ejh-overview-client'
 import { ejhRefreshGate } from '../ejhRefresh'
@@ -202,7 +203,7 @@ function loadOverview({background=false}={}){
  const parameters=new URLSearchParams({format:'delta',since:previous?.revision||''})
  overviewFlight=overviewRequest.run(signal=>readEJH('/api/ejh/overview?'+parameters,{signal,timeoutMs:45000}),async response=>{
   const result=applyEJHOverviewResponse(previous,response)
-  const changed=!previous||result.revision!==previous.revision
+  const changed=!previous||result.revision!==previous.revision||overview.value?._overview?.today?.date!==beijingDay()
   const summary=changed?await overviewWorker.calculate(result):overview.value._overview
   if(disposed)return
   overviewSource=result
@@ -243,7 +244,7 @@ async function refreshCardsAndTrades(target){
  if(result.stopped){target.stopped=true;target.phase='后续查询已停止，已提交的同步任务在后台完成'}
  return result
 }
-async function refreshAllBalances(includeSync = false, automatic = false) {
+async function refreshAllBalances(includeSync = false, automatic = false, reconciliation = false) {
  if(refreshing.value || disposed || (automatic && !savedEnabled.value))return
  const lease=ejhRefreshGate.begin(automatic,savedRefreshSeconds.value)
  if(lease.reason){
@@ -264,7 +265,7 @@ async function refreshAllBalances(includeSync = false, automatic = false) {
    refreshProgress.value.done++
   }
   if(disposed||refreshProgress.value.stopRequested){refreshProgress.value.stopped=true;refreshProgress.value.phase='后续查询已停止';return}
-  const targets=await readEJH('/api/ejh/view?section=balance_targets',{timeoutMs:15000})
+  const targets=await readEJH('/api/ejh/view?section=balance_targets'+(reconciliation?'&scope=reconciliation':''),{timeoutMs:15000})
   if(disposed||refreshProgress.value.stopRequested){refreshProgress.value.stopped=true;refreshProgress.value.phase='后续查询已停止';return}
   const cards=targets.cards
   balanceProgress.value={done:0,total:cards.length+1};refreshProgress.value.total=cards.length+1+(includeSync===true?1:0);refreshProgress.value.phase='正在查询账户余额'
@@ -281,7 +282,7 @@ async function refreshAllBalances(includeSync = false, automatic = false) {
    }
    if(!disposed) refreshSaved()
    refreshProgress.value.phase=refreshProgress.value.stopped?'后续查询已停止':'查询完成'
-   show(refreshProgress.value.stopped?'后续查询已停止，已完成结果保留。':balanceFailures.value.length ? '刷新完成，'+balanceFailures.value.length+' 项失败，保留已有数据，可点击重试。' : '账户及未进入销卡的 '+cards.length+' 张卡片余额已刷新并保存。',balanceFailures.value.length?'error':'success')
+   show(refreshProgress.value.stopped?'后续查询已停止，已完成结果保留。':balanceFailures.value.length ? '刷新完成，'+balanceFailures.value.length+' 项失败，保留已有数据，可点击重试。' : '账户及'+(reconciliation?'参与核对的':'未进入销卡的')+' '+cards.length+' 张卡片余额已刷新并保存。',balanceFailures.value.length?'error':'success')
   } finally { balanceProgress.value=null }
  },'刷新数据',true)
  } finally { lease.finish() }
@@ -332,7 +333,7 @@ async function pollSavedData(){
  try{
   const {revision}=await readEJH('/api/ejh/revision',{timeoutMs:10000})
   if(readError.value||revision!==viewRevision.value)await load({background:true})
-  if(overviewError.value||revision!==overviewRevision.value)loadOverview({background:true})
+  if(overviewError.value||revision!==overviewRevision.value||overview.value?._overview?.today?.date!==beijingDay())loadOverview({background:true})
   else if(overviewSource&&!overviewFlight){
    const summary=overview.value._overview
    overview.value={...overview.value,_overview:{...summary,reconciliation:reconciliationStatus(overviewSource,Date.now(),600,summary.finance)}}
@@ -490,7 +491,7 @@ onBeforeUnmount(()=>{window.removeEventListener('keydown',keydown);disposed=true
   <p v-if="overviewError" class="danger-text" role="status">余额总览更新失败，保留上次结果：{{overviewError}} <button class="text-link" @click="loadOverview()">重试</button></p>
   <p v-if="overview&&tab!=='settings'&&tab!=='open'" class="muted">总览数据时间：{{formatTime(overview.server_time)}}{{overviewLoading?' · 正在更新':''}}</p>
   <EJHProgress v-if="refreshProgress" :progress="refreshProgress" @stop="refreshProgress.stopRequested=true" @dismiss="refreshProgress=null"/>
-  <EJHBalanceOverview v-if="tab!=='settings'&&tab!=='open'&&overview" :data="overview" :busy="refreshing||busy" :ready="ready" :enabled="savedEnabled" :progress="balanceProgress" :failures="balanceFailures" @refresh="refreshPage" @retry-failed="retryFailedRefresh" @ledger-updated="ledgerUpdated" @refund-fee-saved="refreshSaved"/>
+  <EJHBalanceOverview v-if="tab!=='settings'&&tab!=='open'&&overview" :data="overview" :busy="refreshing||busy" :ready="ready" :enabled="savedEnabled" :progress="balanceProgress" :failures="balanceFailures" @refresh="refreshPage" @refresh-reconciliation="refreshAllBalances(false,false,true)" @retry-failed="retryFailedRefresh" @ledger-updated="ledgerUpdated" @refund-fee-saved="refreshSaved"/>
   <div class="ejh-statusbar"><span class="ejh-connection"><i :class="{enabled:settings.enabled}"></i>{{settings.enabled?'接口已启用':'接口未启用'}}</span><span class="ejh-last-sync">最近更新 {{formatTime(data.sync?.last_success)}}</span><span>{{settings.enabled?'后台每 '+settings.sync_interval_seconds+' 秒自动对账':'接口未启用，显示保存数据'}} · 销卡退回确认后停止查询</span></div><p v-if="data.sync?.error" class="danger-text">最近更新有异常：{{data.sync.error}}。成功项目已保存，失败项目保留旧数据，将按配置间隔重试。</p>
   <p v-if="(loading||viewPending)&&tableTabs.some(([id])=>id===tab)" class="muted" role="status">正在读取当前列表…</p>
   <nav class="ejh-tabs" aria-label="EJH 管理分区"><button v-for="[id,label] in tableTabs" :key="id" :aria-current="tab===id?'page':undefined" :class="{active:tab===id}" @click="changeTab(id)">{{label}}<span v-if="id==='cards'">{{viewMeta.card_total}}</span></button></nav>

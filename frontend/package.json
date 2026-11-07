@@ -12,7 +12,7 @@
     "test:dead-loss": "node scripts/check-dead-account-loss.mjs",
     "test:payment-only": "node scripts/check-payment-only.mjs",
     "test:ejh-finance": "node scripts/check-ejh-refund-cost.mjs && node scripts/check-ejh-refund-fees.mjs && node scripts/check-ejh-finance.mjs && node scripts/check-ejh-profit.mjs && node scripts/check-ejh-clearing.mjs && node scripts/check-ejh-reconciliation.mjs && node scripts/check-ejh-reversal-fees.mjs && node scripts/check-ejh-external-transfer.mjs && node scripts/check-ejh-ledger.mjs",
-    "test:ejh-reconciliation": "node scripts/check-ejh-reconciliation.mjs",
+    "test:ejh-reconciliation": "node scripts/check-ejh-reconciliation.mjs && node scripts/check-ejh-today.mjs",
     "test:ejh-reversal-fees": "node scripts/check-ejh-reversal-fees.mjs",
     "test:config-layout": "node scripts/check-config-layout.mjs",
     "test:card-status": "node scripts/check-card-status.mjs",
