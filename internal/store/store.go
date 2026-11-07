@@ -636,9 +636,10 @@ func preserveMailPlanCheck(profile *model.MailAccountProfile, old model.MailAcco
 
 func preserveProProfile(profile *model.MailAccountProfile, old model.MailAccountProfile) {
 	profile.MailProActions = old.MailProActions
-	if old.MailProActions != nil {
-		profile.ProMergeV2, profile.ProMerchant, profile.ProDeactivation = old.ProMergeV2, old.ProMerchant, old.ProDeactivation
-	}
+	// Credential saves/imports must retain the current workflow for both Pro
+	// accounts and mailbox actions, even when the caller has an older snapshot.
+	profile.ProMergeV2, profile.ProMerchant, profile.ProDeactivation = old.ProMergeV2, old.ProMerchant, old.ProDeactivation
+	profile.ProMergeV2Restart = old.ProMergeV2Restart
 	profile.ProDead = old.ProDead
 	profile.ProOAIConfirmations = old.ProOAIConfirmations
 	profile.ProDailyMerge, profile.ProMergeTrigger = old.ProDailyMerge, old.ProMergeTrigger

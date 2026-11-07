@@ -5,6 +5,7 @@ import CompactErrorDetails from './CompactErrorDetails.vue'
 const props=defineProps({account:{type:Object,required:true},disabled:Boolean,readonly:Boolean,restarting:Boolean})
 const emit=defineEmits(['retry','change','restart'])
 const state=computed(()=>props.account.pro_merge_v2 || {})
+const historyMissing=computed(()=>!props.account.pro_merge_v2 && [props.account.pro_auto?.steps?.merge_v2,props.account.pro_stage_progress?.steps?.merge_v2,props.account.pro_manual_stages?.merge_v2?.status].some(status=>status && !['not_started','pending'].includes(status)))
 const steps=[['invite','邀请'],['login','团队登录'],['submit','提交停用'],['remove','移出团队'],['groups','后续分组']]
 const stepStatus=(key)=>key==='submit' && state.value.completion_basis==='plan_free' ? 'verified' : state.value.steps?.[key]||'not_started'
 const names={verified:'套餐确认',not_started:'未开始',pending:'待处理',running:'执行中',completed:'完成',failed:'失败',unknown:'待核实',interrupted:'已中断'}
@@ -12,7 +13,8 @@ function change(key,label,event){const status=event.target.value;event.target.va
 </script>
 <template>
   <div class="merge-v2-flow">
-    <div class="merge-v2-steps"><label v-for="[key,label] in steps" :key="key" :class="stepStatus(key)"><b>{{label}}</b><small v-if="readonly">{{names[stepStatus(key)]||'未开始'}}</small><select v-else :aria-label="'合并空间2.0'+label+'状态'" :value="stepStatus(key)" :disabled="disabled || !account.pro_merge_v2 || !!state.completed_at || (!!state.accepted_at || !!state.completion_basis) && ['invite','login','submit'].includes(key)" @change="change(key,label,$event)"><option v-for="(text,status) in names" :key="status" :value="status" :disabled="status==='running'||status==='verified'">{{text}}</option></select><small v-if="state.manual?.[key]" title="手动修正">手</small></label></div>
+    <small v-if="historyMissing" class="danger-text">已有流程记录，但步骤明细缺失，请查看账号流程日志。</small>
+    <div v-else class="merge-v2-steps"><label v-for="[key,label] in steps" :key="key" :class="stepStatus(key)"><b>{{label}}</b><small v-if="readonly">{{names[stepStatus(key)]||'未开始'}}</small><select v-else :aria-label="'合并空间2.0'+label+'状态'" :value="stepStatus(key)" :disabled="disabled || !account.pro_merge_v2 || !!state.completed_at || (!!state.accepted_at || !!state.completion_basis) && ['invite','login','submit'].includes(key)" @change="change(key,label,$event)"><option v-for="(text,status) in names" :key="status" :value="status" :disabled="status==='running'||status==='verified'">{{text}}</option></select><small v-if="state.manual?.[key]" title="手动修正">手</small></label></div>
     <small v-if="state.started_at">开始：{{formatTime(state.started_at)}}</small>
     <small v-if="state.accepted_at">受理：{{formatTime(state.accepted_at)}}</small>
     <small v-if="state.completed_at">完成：{{formatTime(state.completed_at)}}</small>
