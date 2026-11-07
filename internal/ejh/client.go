@@ -100,7 +100,7 @@ func (c *Client) post(ctx context.Context, address, token string, body any) (jso
 			return nil, &APIError{Code: code, Message: "认证令牌失效，请重新认证", authRejected: true}
 		}
 		if code == "000009" && strings.TrimRight(strings.TrimSpace(env.Msg), "！!。.") == "接口已停用，无法访问" {
-			return nil, &APIError{Code: code, Message: "接口已停用，无法访问；请联系 EJH 恢复 API 服务"}
+			return nil, &APIError{Code: code, Message: "接口已停用，无法访问；请按新版双重验签配置公钥及最新 AppSecret"}
 		}
 		return nil, &APIError{Code: code, Message: knownMessage(code)}
 	}
@@ -140,7 +140,7 @@ func rejectedTokenMessage(message string) bool {
 	return false
 }
 func tokenScope(cfg Settings, secret string) string {
-	sum := sha256.Sum256([]byte(cfg.URL + "|" + cfg.AppKey + "|" + secret))
+	sum := sha256.Sum256([]byte(cfg.URL + "|" + cfg.AppKey + "|" + secret + "|" + cfg.SigningPrivateKey))
 	return fmt.Sprintf("%x", sum)
 }
 func (c *Client) invalidateToken(cfg Settings, secret, rejected string) {
@@ -160,6 +160,9 @@ func readOnlyMethod(method string) bool {
 	return false
 }
 func (c *Client) Token(ctx context.Context, cfg Settings, secret string) (string, error) {
+	if cfg.SigningKeyPresent && cfg.SigningPrivateKey == "" {
+		return "", errors.New("EJH 签名私钥未加载，已停止请求")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	scope := tokenScope(cfg, secret)
@@ -169,7 +172,11 @@ func (c *Client) Token(ctx context.Context, cfg Settings, secret string) (string
 	if cfg.AppKey == "" || secret == "" {
 		return "", fmt.Errorf("请先保存 AppKey 和 AppSecret")
 	}
-	raw, e := c.post(ctx, cfg.URL+"/api/v3/authenticate", "", map[string]string{"appKey": cfg.AppKey})
+	body, e := authenticationBody(cfg, secret)
+	if e != nil {
+		return "", e
+	}
+	raw, e := c.post(ctx, cfg.URL+"/api/v3/authenticate", "", body)
 	if e != nil {
 		return "", e
 	}
@@ -207,7 +214,14 @@ func (c *Client) Call(ctx context.Context, cfg Settings, secret, method string, 
 	if e != nil {
 		return e
 	}
-	raw, e = c.post(ctx, cfg.URL+"/api/v3/card", token, map[string]string{"appKey": cfg.AppKey, "param": encrypted})
+	body := map[string]string{"appKey": cfg.AppKey, "param": encrypted}
+	if cfg.SigningPrivateKey != "" {
+		body["sign"], e = signRSA(encrypted, cfg.SigningPrivateKey)
+		if e != nil {
+			return e
+		}
+	}
+	raw, e = c.post(ctx, cfg.URL+"/api/v3/card", token, body)
 	var authError *APIError
 	if errors.As(e, &authError) && authError.authRejected {
 		c.invalidateToken(cfg, secret, token)
@@ -218,7 +232,7 @@ func (c *Client) Call(ctx context.Context, cfg Settings, secret, method string, 
 			if e != nil {
 				return e
 			}
-			raw, e = c.post(ctx, cfg.URL+"/api/v3/card", token, map[string]string{"appKey": cfg.AppKey, "param": encrypted})
+			raw, e = c.post(ctx, cfg.URL+"/api/v3/card", token, body)
 			if errors.As(e, &authError) && authError.authRejected {
 				c.invalidateToken(cfg, secret, token)
 			}

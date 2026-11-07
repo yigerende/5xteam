@@ -52,6 +52,9 @@ func (s *Store) EJHSettings() (ejh.Settings, string, error) {
 	}
 	secret, e := s.decryptOptional(sealed)
 	v.SecretPresent = secret != ""
+	if e == nil {
+		e = s.loadEJHSigningLocked(&v)
+	}
 	return v, secret, e
 }
 func (s *Store) SaveEJHSettings(v ejh.Settings, secret string) (ejh.Settings, error) {
@@ -88,6 +91,9 @@ func (s *Store) SaveEJHSettings(v ejh.Settings, secret string) (ejh.Settings, er
 	}
 	if v.Enabled && (v.AppKey == "" || sealed == "") {
 		return v, fmt.Errorf("启用前请填写 AppKey 和 AppSecret")
+	}
+	if e = s.loadEJHSigningLocked(&v); e != nil {
+		return v, e
 	}
 	v.SecretPresent = sealed != ""
 	tx, e := s.db.Begin()

@@ -16,6 +16,9 @@ type Settings struct {
 	URL                       string     `json:"url"`
 	AppKey                    string     `json:"app_key"`
 	SecretPresent             bool       `json:"secret_present"`
+	SigningKeyPresent         bool       `json:"signing_key_present"`
+	SigningPublicKey          string     `json:"signing_public_key,omitempty"`
+	SigningPrivateKey         string     `json:"-"`
 	DefaultMaxAccounts        int        `json:"default_max_accounts"`
 	SingleActiveAccount       bool       `json:"single_active_account"`
 	SyncEnabled               bool       `json:"sync_enabled"`

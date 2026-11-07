@@ -54,7 +54,7 @@ func TestExpiredTokenQueryRefreshAndMutationSafety(t *testing.T) {
 			if err != nil && strings.Contains(err.Error(), "secret-card-number") {
 				t.Fatal("supplier message leaked")
 			}
-			if tc.name == "disabled_not_repeated" && !strings.Contains(err.Error(), "请联系 EJH 恢复 API 服务") {
+			if tc.name == "disabled_not_repeated" && !strings.Contains(err.Error(), "请按新版双重验签配置公钥及最新 AppSecret") {
 				t.Fatal("disabled API reason hidden", err)
 			}
 			if !tc.wantError && out["balance"] != "12.34" {
@@ -81,7 +81,7 @@ func TestDisabledAPIAuthenticationReportsReason(t *testing.T) {
 	defer up.Close()
 	c := New()
 	err := c.Call(context.Background(), Settings{URL: up.URL, AppKey: "fixture"}, "fixture-secret", "card.list.info", map[string]any{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "请联系 EJH 恢复 API 服务") || calls.Load() != 1 || c.token != "" {
+	if err == nil || !strings.Contains(err.Error(), "请按新版双重验签配置公钥及最新 AppSecret") || calls.Load() != 1 || c.token != "" {
 		t.Fatalf("disabled API: err=%v calls=%d", err, calls.Load())
 	}
 }

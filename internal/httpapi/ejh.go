@@ -72,6 +72,7 @@ func (s *Server) ejhRoutes(m *http.ServeMux) {
 	m.HandleFunc("POST /api/ejh/occupancy/{id}/resolve", s.resolveEJHOccupancy)
 	m.HandleFunc("GET /api/ejh/settings", s.getEJHSettings)
 	m.HandleFunc("PUT /api/ejh/settings", s.saveEJHSettings)
+	m.HandleFunc("POST /api/ejh/signing-key", s.ensureEJHSigningKey)
 	m.HandleFunc("POST /api/ejh/test", s.testEJH)
 	m.HandleFunc("POST /api/ejh/balance", s.testEJH)
 	m.HandleFunc("GET /api/ejh/dashboard", s.ejhDashboard)
