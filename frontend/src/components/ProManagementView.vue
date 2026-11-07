@@ -397,7 +397,8 @@ async function restartMergeV2(account) {
   if (mergeRestartRequests.value[account.email]) return
   mergeRestartRequests.value[account.email] = true
   try {
-    await api(`/api/pro-accounts/${encodeURIComponent(account.email)}/merge-v2-restart`, {method:'POST', body:{request_id:crypto.randomUUID()}})
+    const requestID = Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, '0')).join('')
+    await api(`/api/pro-accounts/${encodeURIComponent(account.email)}/merge-v2-restart`, {method:'POST', body:{request_id:requestID}})
     setMessage('已提交重新执行，旧任务退出后从邀请开始。')
     await loadPage()
     schedulePoll(0)

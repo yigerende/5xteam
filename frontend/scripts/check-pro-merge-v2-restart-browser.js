@@ -1,6 +1,7 @@
 (async()=>{
  const f=window.mergeV2Fixture
  f.showAll=true
+ Object.defineProperty(crypto,'randomUUID',{value:undefined,configurable:true})
  const pause=ms=>new Promise(r=>setTimeout(r,ms))
  const wait=async fn=>{for(let i=0;i<150;i++){if(fn())return;await pause(40)}throw Error('UI wait timed out')}
  const assert=(v,m)=>{if(!v)throw Error(m)}
