@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"time"
 )
@@ -182,6 +183,22 @@ func (s *Server) restockTasks(snap restock.Snapshot, p model.ProSettings, c rest
 			}
 		}
 		verified := false
+		// A task may have waited while the operator changed the push settings.
+		// Verify its actual submitted destination, not its reservation snapshot.
+		if profile.PushStatus == "completed" && profile.ProRestockTargetID != "" && profile.ProAuto.RestockBinding != "" && t.Binding != profile.ProAuto.RestockBinding {
+			pinned, _, _, pe := s.proAccountPushSettings(profile)
+			if pe != nil {
+				return nil, 0, pe
+			}
+			if pinned.Provider == "sub2" && len(pinned.Sub2.GroupIDs) > 0 && restockBinding(pinned) == profile.ProAuto.RestockBinding {
+				t.Binding = profile.ProAuto.RestockBinding
+				if t.Binding == snap.Binding && slices.Contains(pinned.Sub2.GroupIDs, snap.GroupID) {
+					t.GroupID = snap.GroupID
+				} else if !slices.Contains(pinned.Sub2.GroupIDs, t.GroupID) {
+					t.GroupID = pinned.Sub2.GroupIDs[0]
+				}
+			}
+		}
 		pushedAt := t.Stages["push:completed"]
 		if profile.PushStatus == "completed" && pushedAt.IsZero() {
 			// Legacy/manual completion has no milestone: persist the first

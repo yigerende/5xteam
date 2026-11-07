@@ -564,6 +564,10 @@ func (s *Server) completeProOAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) currentProCredential(ctx context.Context, email string) (model.MailAccountProfile, model.MailAccountCredentials, error) {
+	return s.currentProCredentialForPush(ctx, email, nil)
+}
+
+func (s *Server) currentProCredentialForPush(ctx context.Context, email string, push *model.ProSettings) (model.MailAccountProfile, model.MailAccountCredentials, error) {
 	profile, credentials, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return profile, credentials, err
@@ -571,7 +575,11 @@ func (s *Server) currentProCredential(ctx context.Context, email string) (model.
 	if !profile.ProActionsAllowed() {
 		return profile, credentials, errors.New("账号不在 Pro 管理中")
 	}
-	if settings, _, _, e := s.proAccountPushSettings(profile); e == nil && settings.Sub2.AuthMode == "siwc" {
+	settings, _, _, settingsErr := s.proAccountPushSettings(profile)
+	if push != nil {
+		settings, settingsErr = *push, nil
+	}
+	if settingsErr == nil && settings.Provider == "sub2" && settings.Sub2.AuthMode == "siwc" {
 		tokens, e := s.ensureProSIWC(ctx, profile, credentials)
 		if e != nil {
 			return profile, credentials, e
@@ -603,11 +611,11 @@ func (s *Server) currentProCredential(ctx context.Context, email string) (model.
 		}
 		return profile, credentials, nil
 	}
-	settings := s.store.Settings()
-	if strings.TrimSpace(settings.ProxyURL) == "" {
+	global := s.store.Settings()
+	if strings.TrimSpace(global.ProxyURL) == "" {
 		return profile, credentials, errors.New("请先配置全局代理；OpenAI OAuth 刷新禁止直连")
 	}
-	tokens, err := workflow.RefreshOAuthTokens(ctx, credentials.RefreshToken, settings)
+	tokens, err := workflow.RefreshOAuthTokens(ctx, credentials.RefreshToken, global)
 	if err != nil {
 		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.OAuthStatus, p.ProLastError = "reauthorize_required", err.Error() })
 		return profile, credentials, err
@@ -886,14 +894,25 @@ func (s *Server) performProPush(ctx context.Context, email string) (out model.Ma
 	if err != nil {
 		return profile, err
 	}
-	v, subPassword, cpaKey, err := s.proAccountPushSettings(profile)
+	v, subPassword, cpaKey, err := s.proNewPushSettings(profile)
 	if err != nil {
 		return profile, err
 	}
 	if v.Provider == "sub2" && v.Sub2.AuthMode == "siwc" {
 		return s.performDirectSIWCPush(ctx, profile, credentials, v, subPassword)
 	}
-	profile, credentials, err = s.currentProCredential(ctx, email)
+	if v.Provider != "sub2" && profile.ProRestockTargetID != "" && profile.Sub2AccountID == 0 && profile.CPAAuthFileName == "" && profile.VM2 == nil {
+		// The old reservation must not override the selected provider after
+		// this new push. Submitted Sub2 attempts never reach this branch.
+		profile, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+			p.ProRestockTargetID = ""
+			p.ProAuto.Sub2PushGroupIDs = nil
+		})
+		if err != nil {
+			return profile, err
+		}
+	}
+	profile, credentials, err = s.currentProCredentialForPush(ctx, email, &v)
 	if err != nil {
 		return profile, err
 	}
@@ -952,10 +971,11 @@ func (s *Server) performProPush(ctx context.Context, email string) (out model.Ma
 	if len(v.Sub2.GroupIDs) == 0 {
 		return profile, errors.New("请选择 Pro 的 Sub2 OpenAI 分组")
 	}
-	if profile.ProRestockTargetID != "" && len(profile.ProAuto.Sub2PushGroupIDs) > 0 {
-		v.Sub2.GroupIDs = profile.ProAuto.Sub2PushGroupIDs
+	profile, groups, err := s.pinProSub2Push(profile, v, subPassword)
+	if err != nil {
+		return profile, err
 	}
-	input := sub2.CreateAccountInput{Name: name, Credentials: buildProCredentials(profile, credentials), GroupIDs: v.Sub2.GroupIDs, Models: v.Sub2.Models, Concurrency: v.Sub2.AccountConcurrency, Priority: v.Sub2.Priority, CpaWS: v.Sub2.CpaWS}
+	input := sub2.CreateAccountInput{Name: name, Credentials: buildProCredentials(profile, credentials), GroupIDs: groups, Models: v.Sub2.Models, Concurrency: v.Sub2.AccountConcurrency, Priority: v.Sub2.Priority, CpaWS: v.Sub2.CpaWS}
 	name = s.sub2NameWithMother(name, profile.TargetAdminID, "")
 	input.Name = name
 	fingerprint := sha256.Sum256([]byte(email + "|" + name + "|" + credentials.AccessToken))

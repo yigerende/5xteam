@@ -128,18 +128,16 @@ func (s *Server) performDirectSIWCPush(ctx context.Context, p model.MailAccountP
 		_, e = s.sub2.ApplyOAuthCredentials(ctx, v.Sub2, password, p.Sub2AccountID, siwcCredentials(tokens))
 		return p, e
 	}
-	input := sub2.CreateAccountInput{Name: proAccountName(p), Credentials: siwcCredentials(tokens), GroupIDs: v.Sub2.GroupIDs, Models: v.Sub2.Models, Concurrency: v.Sub2.AccountConcurrency, Priority: v.Sub2.Priority}
-	if len(p.ProAuto.Sub2PushGroupIDs) > 0 {
-		input.GroupIDs = p.ProAuto.Sub2PushGroupIDs
+	p, groups, e := s.pinProSub2Push(p, v, password)
+	if e != nil {
+		return p, e
 	}
+	input := sub2.CreateAccountInput{Name: proAccountName(p), Credentials: siwcCredentials(tokens), GroupIDs: groups, Models: v.Sub2.Models, Concurrency: v.Sub2.AccountConcurrency, Priority: v.Sub2.Priority}
 	created, e := s.createSub2WithProxy(ctx, v.Sub2, password, input, "pro-siwc:"+p.ID, "pro-siwc-"+p.ID, nil)
 	if e != nil {
 		return p, e
 	}
-	target, e := s.store.SaveDownstreamTarget(model.DownstreamTarget{Scope: "pro-restock", Provider: "sub2", Sub2: v.Sub2, Secret: password})
-	if e != nil {
-		return p, e
-	}
+	target := p.ProRestockTargetID
 	updated, e := s.store.UpdateProAccount(p.Email, func(p *model.MailAccountProfile) {
 		p.PushProvider, p.PushStatus = "sub2", "completed"
 		p.Sub2AccountID, p.Sub2AccountName = created.ID, created.Name

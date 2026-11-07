@@ -57,7 +57,9 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 	if err != nil {
 		return sub2.Account{}, err
 	}
-	if !settings.BindProxy && raw == "" && settings.AuthMode != "siwc" {
+	// Pro can change its default site before an unsubmitted push. Even with
+	// binding disabled, retain uncertain creates so retries cannot move sites.
+	if !settings.BindProxy && raw == "" && settings.AuthMode != "siwc" && !strings.HasPrefix(scope, "pro:") {
 		created, err := s.sub2.CreateAccount(ctx, settings, password, input, legacyKey)
 		if err != nil && strings.Contains(strings.ToLower(err.Error()), "idempotency") {
 			return s.sub2.CreateAccount(ctx, settings, password, input, legacyKey+"-"+randomRegistrationID())
@@ -125,7 +127,7 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 				return created, fmt.Errorf("%w；清理推送记录失败: %v", err, clearErr)
 			}
 		}
-		log("Sub2 绑定代理推送失败", map[string]any{"proxy_id": attempt.Proxy.ID, "error": err.Error()})
+		log("Sub2 推送失败", map[string]any{"proxy_id": attempt.Proxy.ID, "error": err.Error()})
 		return created, err
 	}
 	attempt.Created = &created
@@ -133,7 +135,11 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 	if err := s.store.SaveSub2PushAttempt(id, string(encoded)); err != nil {
 		return created, err
 	}
-	log("Sub2 账号已创建并绑定代理", map[string]any{"proxy_id": attempt.Proxy.ID, "proxy_name": attempt.Proxy.Name, "account_id": created.ID})
+	message := "Sub2 账号已创建"
+	if attempt.Input.ProxyID != nil {
+		message += "并绑定代理"
+	}
+	log(message, map[string]any{"proxy_id": attempt.Proxy.ID, "proxy_name": attempt.Proxy.Name, "account_id": created.ID})
 	return created, nil
 }
 

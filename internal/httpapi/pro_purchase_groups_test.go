@@ -149,8 +149,9 @@ func TestProPurchaseExtraGroupsLeaveWithPostMergeGroups(t *testing.T) {
 	}
 }
 
-func TestProPurchasePushGroupsSurviveRestartAndSettingsChange(t *testing.T) {
-	remote, pushes := purchaseSub2Fixture(t, []int64{1, 15})
+func TestProPurchasePushUsesLatestSiteAfterRestart(t *testing.T) {
+	remote, oldPushes := purchaseSub2Fixture(t, []int64{1, 15})
+	current, pushes := purchaseSub2Fixture(t, []int64{99})
 	dir := t.TempDir()
 	st, err := store.Open(dir)
 	if err != nil {
@@ -176,7 +177,7 @@ func TestProPurchasePushGroupsSurviveRestartAndSettingsChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Sub2.URL, p.Sub2.GroupIDs, p.Sub2.AccountConcurrency = "http://changed.invalid", []int64{99}, 2
+	p.Sub2.URL, p.Sub2.GroupIDs, p.Sub2.AccountConcurrency = current.URL, []int64{99}, 2
 	if _, err = st.SaveProSettings(p, "changed-password", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -192,14 +193,14 @@ func TestProPurchasePushGroupsSurviveRestartAndSettingsChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, _, _, err := s.proAccountPushSettings(profile)
-	if err != nil || base.Sub2.URL != remote.URL || base.Sub2.AccountConcurrency != 50 || !slices.Equal(base.Sub2.GroupIDs, []int64{1}) {
-		t.Fatal("restart lost original connection/settings", err)
+	base, _, _, err := s.proNewPushSettings(profile)
+	if err != nil || base.Sub2.URL != current.URL || base.Sub2.AccountConcurrency != 2 || !slices.Equal(base.Sub2.GroupIDs, []int64{99}) {
+		t.Fatal("unsubmitted task did not use current settings after restart", err)
 	}
 	if _, err = s.performProPush(context.Background(), email); err != nil {
 		t.Fatal(err)
 	}
-	if pushes.Load() != 1 {
-		t.Fatal("push did not use persisted target")
+	if pushes.Load() != 1 || oldPushes.Load() != 0 {
+		t.Fatal("push did not use latest target")
 	}
 }
