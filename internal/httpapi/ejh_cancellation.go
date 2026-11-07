@@ -66,7 +66,7 @@ func (s *Server) checkEJHCancellationLocked(ctx context.Context, cfg ejh.Setting
 }
 
 func (s *Server) tickEJHCancellations(ctx context.Context) {
-	if !s.ejh.mu.TryLock() {
+	if !s.tryBackgroundCardLock(&s.ejh.mu) {
 		return
 	}
 	defer s.ejh.mu.Unlock()
@@ -81,7 +81,7 @@ func (s *Server) tickEJHCancellations(ctx context.Context) {
 	job, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	for _, op := range ops {
-		if job.Err() != nil {
+		if job.Err() != nil || s.manualCardPreparationPending() {
 			return
 		}
 		_, _ = s.checkEJHCancellationLocked(job, cfg, key, op)

@@ -80,10 +80,17 @@ func (s *Server) automaticProCards(cfg model.ProSettings, strictProvider ...bool
 // Serialize selection, optional issuance and reservation across manual, auto
 // and scheduled starts. The database still enforces physical-card occupancy.
 func (s *Server) reserveProStartCard(ctx context.Context, email, selected string, autoOpen, enforceMaximum bool, admissionChecks ...func() error) (gptpay.Card, gptpay.CardSecret, error) {
+	automatic := ctx.Value(proRestockContextKey{}) != nil || ctx.Value(proScheduledContextKey{}) == true
+	if automatic && s.manualCardPreparationPending() {
+		return gptpay.Card{}, gptpay.CardSecret{}, cardPreparationWait("手动全自动正在优先准备银行卡，原补货任务等待后继续")
+	}
 	if err := lockProCardPreparation(ctx, &s.proCardAdmissionMu, "其他账号正在准备银行卡，本次尚未提交；等待卡片调度空闲后继续"); err != nil {
 		return gptpay.Card{}, gptpay.CardSecret{}, err
 	}
 	defer s.proCardAdmissionMu.Unlock()
+	if automatic && s.manualCardPreparationPending() {
+		return gptpay.Card{}, gptpay.CardSecret{}, cardPreparationWait("手动全自动正在优先准备银行卡，原补货任务等待后继续")
+	}
 	var card gptpay.Card
 	var secret gptpay.CardSecret
 	for _, check := range admissionChecks {

@@ -85,6 +85,8 @@ type Server struct {
 	proAutoMu                 sync.Mutex
 	proScheduleMu             sync.Mutex
 	proCardAdmissionMu        sync.Mutex
+	proCardPriorityActive     atomic.Int64
+	proCardPriorityUntil      atomic.Int64
 	proAutoWG                 sync.WaitGroup
 	proAutoJobs               map[string]context.CancelFunc
 	proRestockStartJobs       map[string]context.CancelFunc

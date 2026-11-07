@@ -27,7 +27,7 @@ func (s *Server) tickEJHAutoCancel(ctx context.Context) {
 		return
 	}
 	defer s.ejh.autoCancelMu.Unlock()
-	if !s.ejh.mu.TryLock() {
+	if !s.tryBackgroundCardLock(&s.ejh.mu) {
 		return
 	}
 	// Do not hold the issuer mutex while scanning local history or across
@@ -104,7 +104,7 @@ func (s *Server) tickEJHAutoCancel(ctx context.Context) {
 			state.Error = err.Error()
 			return
 		}
-		if !s.ejh.mu.TryLock() {
+		if !s.tryBackgroundCardLock(&s.ejh.mu) {
 			return
 		}
 		cardJob, done := context.WithTimeout(job, 30*time.Second)

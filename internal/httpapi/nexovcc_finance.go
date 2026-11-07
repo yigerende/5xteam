@@ -439,7 +439,7 @@ func (s *Server) tickNexovccMonitor(ctx context.Context) {
 	// Financial reads do not own Pro admission. Acquire both locks in the
 	// established order only for automatic card mutations.
 	s.nexovcc.mu.Unlock()
-	if err == nil && s.proCardAdmissionMu.TryLock() {
+	if err == nil && s.tryBackgroundCardLock(&s.proCardAdmissionMu) {
 		if s.nexovcc.mu.TryLock() {
 			s.nexovcc.jobMu.Lock()
 			sameJob := s.nexovcc.job.ID == jobID

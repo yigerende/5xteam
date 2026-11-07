@@ -691,7 +691,7 @@ func (s *Server) tickProRestock(ctx context.Context, force bool) (resultErr erro
 		target, e := s.store.SaveDownstreamTarget(model.DownstreamTarget{Scope: "pro-restock", Provider: "sub2", Sub2: p.Sub2, Secret: password})
 		if e == nil {
 			var reserved []restock.Task
-			locked := s.proCardAdmissionMu.TryLock()
+			locked := s.tryBackgroundCardLock(&s.proCardAdmissionMu)
 			if !locked {
 				e = errors.New("已有银行卡准备正在执行，监控继续更新，等待下轮领取")
 			} else if reason := s.proSIWCBlock(); reason != "" {
@@ -832,7 +832,7 @@ func (s *Server) dispatchProRestock(ctx context.Context, c restock.Config, p mod
 		t.NextCardCheckAt = nil
 		t.SubmittedAt = &now
 		t.UpdatedAt = now
-		if !s.proCardAdmissionMu.TryLock() {
+		if !s.tryBackgroundCardLock(&s.proCardAdmissionMu) {
 			return
 		}
 		if reason := s.proSIWCBlock(); reason != "" {

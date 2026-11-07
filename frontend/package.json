@@ -17,6 +17,7 @@
     "test:config-layout": "node scripts/check-config-layout.mjs",
     "test:card-status": "node scripts/check-card-status.mjs",
     "test:card-allocation": "node scripts/check-card-allocation.mjs",
+    "test:pro-card-wait": "node scripts/check-pro-card-wait.mjs && node scripts/check-pro-auto-retry.mjs && node scripts/check-pro-stop.mjs && node scripts/check-api-timeout.mjs",
     "test:mail-import": "node scripts/check-mail-import.mjs",
     "test:mail-pro-transfer": "node scripts/check-mail-pro-transfer.mjs",
     "test:mail-export": "node scripts/check-mail-export.mjs && node scripts/check-account-text-export.mjs",

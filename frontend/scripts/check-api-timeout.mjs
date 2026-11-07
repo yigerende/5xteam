@@ -12,6 +12,10 @@ const server = http.createServer((req, res) => {
   res.setHeader('Content-Type', 'application/json')
   if (req.url === '/body-stall') { res.write('{"ok":'); return }
   if (req.url === '/failure') { res.writeHead(409); res.end(JSON.stringify({ok:false,error:'conflict'})); return }
+  if (req.url.startsWith('/card-')) {
+    if(req.url==='/card-busy')res.setHeader('X-Pro-Card-Retry','busy')
+    res.writeHead(409);res.end(JSON.stringify({ok:false,error:'card wait',data:{flow_id:'original',stop_version:7}}));return
+  }
   res.end(JSON.stringify({ok:true,data:{method:req.method}}))
 })
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -36,6 +40,9 @@ try {
   await assert.rejects(api(base+'/post-drop',{method:'POST',body:{}}),/避免重复提交/)
   assert.equal(counts.get('/post-drop'),1,'write replayed after lost response')
   assert.equal(counts.get('/failure'),1,'business error retried')
+  await assert.rejects(api(base+'/card-busy',{method:'POST',body:{}}),e=>e.status===409&&e.cardPreparationRetry?.flow_id==='original'&&e.cardPreparationRetry.stop_version===7)
+  await assert.rejects(api(base+'/card-review',{method:'POST',body:{}}),e=>e.status===409&&!e.cardPreparationRetry)
+  assert.equal(counts.get('/card-busy'),1,'shared API must not replay writes itself')
   assert.ok(counts.get('/stall')<=2,'timeout/cancellation retried')
   assert.deepEqual(await readEJH(base+'/ejh-once',{timeoutMs:100}),{method:'GET'})
   assert.equal(counts.get('/ejh-once'),2)

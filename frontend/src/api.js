@@ -32,7 +32,14 @@ export async function api(path, options = {}) {
           invalid.status = response.status
           throw invalid
         }
-        if (!response.ok || !payload.ok) { const error = new Error(payload.error || `请求失败（HTTP ${response.status}）`); error.status = response.status; throw error }
+        if (!response.ok || !payload.ok) {
+          const error = new Error(payload.error || `请求失败（HTTP ${response.status}）`)
+          error.status = response.status
+          // Only an explicit pre-submission lock rejection may be retried by
+          // the Pro dialog. Transport loss and financial holds never qualify.
+          if (response.status === 409 && response.headers.get('X-Pro-Card-Retry') === 'busy' && payload.data) error.cardPreparationRetry = payload.data
+          throw error
+        }
         return payload.data
       } catch (error) {
         if (!(error instanceof TypeError) || request.signal?.aborted) throw error

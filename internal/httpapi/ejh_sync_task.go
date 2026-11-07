@@ -101,7 +101,7 @@ func (s *Server) requestEJHSync(key string, start, end time.Time) (*ejhSyncTask,
 
 func (s *Server) performEJHSyncTask(ctx context.Context, task *ejhSyncTask, waitLimit, runLimit time.Duration) error {
 	wait, cancel := context.WithTimeout(ctx, waitLimit)
-	unlock, err := lockProMutex(wait, &s.ejh.mu)
+	unlock, err := s.lockBackgroundCard(wait, &s.ejh.mu)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("等待其他卡台操作结束超时或服务停止，本次未开始同步；已有数据保留：%w", err)

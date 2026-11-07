@@ -95,7 +95,7 @@ func (s *Server) runNexovccWithdrawCheck(ctx context.Context) (bool, error) {
 	defer finishOperation()
 	ctx = bound
 
-	if ctx.Err() != nil || !s.proCardAdmissionMu.TryLock() {
+	if ctx.Err() != nil || !s.tryBackgroundCardLock(&s.proCardAdmissionMu) {
 		return false, nil
 	}
 	defer s.proCardAdmissionMu.Unlock()

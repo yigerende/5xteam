@@ -149,16 +149,17 @@ func (s *Server) autoProUpdate(email, stage, status, message string) error {
 func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
 	var input struct {
-		ResumeQuota    bool    `json:"resume_quota"`
-		ExpectedFlowID string  `json:"expected_flow_id"`
-		StopVersion    *uint64 `json:"expected_stop_version"`
-		RetryCurrent   bool    `json:"retry_current"`
-		CardID         string  `json:"card_id"`
-		CardProvider   string  `json:"card_provider"`
-		PlanCode       string  `json:"plan_code"`
-		Provider       string  `json:"provider"`
-		Country        *string `json:"country"`
-		CreditQuantity *int    `json:"credit_quantity"`
+		ResumeQuota          bool                     `json:"resume_quota"`
+		ExpectedFlowID       string                   `json:"expected_flow_id"`
+		StopVersion          *uint64                  `json:"expected_stop_version"`
+		RetryCurrent         bool                     `json:"retry_current"`
+		CardPreparationRetry *proCardPreparationRetry `json:"card_preparation_retry"`
+		CardID               string                   `json:"card_id"`
+		CardProvider         string                   `json:"card_provider"`
+		PlanCode             string                   `json:"plan_code"`
+		Provider             string                   `json:"provider"`
+		Country              *string                  `json:"country"`
+		CreditQuantity       *int                     `json:"credit_quantity"`
 	}
 	if decodeJSON(w, r, &input, 8<<10) != nil {
 		return
@@ -170,6 +171,10 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.IsProDead() {
 		writeAPI(w, 409, nil, errProAccountDead.Error())
+		return
+	}
+	if input.CardPreparationRetry != nil && *input.CardPreparationRetry != cardPreparationProgress(p.ProAuto) {
+		writeAPI(w, 409, nil, "账号进度或停止状态已变化，已取消银行卡准备重试，请查看当前进度")
 		return
 	}
 	if p.MergeV2Started() {
@@ -460,22 +465,37 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 			}
 			pushTargetID, pushGroupIDs = latest.ProRestockTargetID, latest.ProAuto.Sub2PushGroupIDs
 		}
+		finishPriority := func(bool) {}
+		if !automatic {
+			finishPriority = s.beginManualCardPreparation()
+			defer finishPriority(false)
+		}
 		card, secret, err = s.reserveProStartCard(context.WithValue(r.Context(), proPaymentConfigKey{}, cfg), email, input.CardID, pro.AutoCardEnabled(), r.Context().Value(proScheduledContextKey{}) == true, func() error {
 			latest, _, err := s.store.MailAccountCredential(email)
 			if err != nil {
 				return err
+			}
+			if input.CardPreparationRetry != nil && *input.CardPreparationRetry != cardPreparationProgress(latest.ProAuto) {
+				return errors.New("账号进度或停止状态已变化，已取消银行卡准备重试")
 			}
 			if proReplacementOwner(latest) != replacementOwner || latest.ProAuto.StopVersion != stopVersion || (latest.ProAuto.StopRequested && (automatic || !wasStopped)) {
 				return errors.New("用户已停止该账号流程，未购买新卡")
 			}
 			return nil
 		})
+		var busyWait *proCardPreparationWait
+		finishPriority(errors.As(err, &busyWait) && busyWait.busy)
 		if err != nil {
 			lock.Unlock()
 			var preparationWait *proCardPreparationWait
 			if errors.As(err, &preparationWait) {
 				w.Header().Set("X-Pro-Card-Wait", "preparation")
 				s.auditProEvent(p, "card", "waiting", "pro_auto", err.Error(), nil)
+				if preparationWait.busy {
+					w.Header().Set("X-Pro-Card-Retry", "busy")
+					writeAPI(w, 409, cardPreparationProgress(p.ProAuto), err.Error())
+					return
+				}
 				writeAPI(w, 409, nil, err.Error())
 				return
 			}
