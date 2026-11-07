@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/store"
 	"chatgpt-space-merge/internal/sub2"
 )
 
@@ -99,6 +100,9 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 			if err != nil {
 				return sub2.Account{}, fmt.Errorf("读取 Sub2 代理绑定数失败，已停止推送: %w", err)
 			}
+			if err = s.decorateSub2ProxyUsage(endpoint, proxies); err != nil {
+				return sub2.Account{}, err
+			}
 			proxy, ties, err = sub2.SelectProxy(proxies, settings.ProxyIDs, time.Now())
 			if err != nil {
 				return sub2.Account{}, err
@@ -110,7 +114,12 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 		if err != nil {
 			return sub2.Account{}, err
 		}
-		if err := s.store.SaveSub2PushAttempt(id, string(encoded)); err != nil {
+		if proxy.BindingKey != "" {
+			err = s.store.ReserveSub2ProxyBinding(id, string(encoded), endpoint, proxy.BindingKey, attempt.Key)
+		} else {
+			err = s.store.SaveSub2PushAttempt(id, string(encoded))
+		}
+		if err != nil {
 			return sub2.Account{}, err
 		}
 		if settings.BindProxy {
@@ -123,7 +132,7 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 		// Timeouts, 5xx and idempotency conflicts retain the exact encrypted request.
 		var response *sub2.HTTPError
 		if raw == "" && errors.As(err, &response) && !strings.Contains(strings.ToLower(response.Message), "idempotency") && (response.Status == 400 || response.Status == 401 || response.Status == 403 || response.Status == 404 || response.Status == 422) {
-			if clearErr := s.store.DeleteSub2PushAttempt(id); clearErr != nil {
+			if clearErr := s.store.RejectSub2ProxyBinding(id, attempt.Key); clearErr != nil {
 				return created, fmt.Errorf("%w；清理推送记录失败: %v", err, clearErr)
 			}
 		}
@@ -132,7 +141,7 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 	}
 	attempt.Created = &created
 	encoded, _ := json.Marshal(attempt)
-	if err := s.store.SaveSub2PushAttempt(id, string(encoded)); err != nil {
+	if err := s.store.CompleteSub2ProxyBinding(id, string(encoded), attempt.Key, created.ID); err != nil {
 		return created, err
 	}
 	message := "Sub2 账号已创建"
@@ -193,7 +202,101 @@ func (s *Server) respondSub2Proxies(w http.ResponseWriter, r *http.Request, sett
 		writeAPI(w, 400, nil, err.Error())
 		return
 	}
+	endpoint, err := sub2.EndpointKey(settings.URL)
+	if err == nil {
+		err = s.decorateSub2ProxyUsage(endpoint, proxies)
+	}
+	if err != nil {
+		writeAPI(w, 500, nil, err.Error())
+		return
+	}
 	writeAPI(w, 200, proxies, "")
+}
+
+func (s *Server) decorateSub2ProxyUsage(endpoint string, proxies []sub2.Proxy) error {
+	limit, err := s.store.Sub2ProxyBindingLimit(endpoint)
+	if err != nil {
+		return err
+	}
+	baselines := map[string]int64{}
+	seen := map[int64]bool{}
+	for _, p := range proxies {
+		if !seen[p.ID] && p.BindingKey != "" && p.AccountCount != nil && *p.AccountCount >= 0 {
+			baselines[p.BindingKey] += int64(*p.AccountCount)
+		}
+		seen[p.ID] = true
+	}
+	usage, err := s.store.Sub2ProxyUsages(endpoint, baselines)
+	if err != nil {
+		return fmt.Errorf("读取代理累计绑定次数失败，已停止推送: %w", err)
+	}
+	for i := range proxies {
+		p := &proxies[i]
+		u := usage[p.BindingKey]
+		p.CumulativeBindings, p.PendingBindings, p.BindingRevision, p.BindingSince, p.BindingLimit = u.Count, u.Pending, u.Revision, u.Since, limit
+	}
+	return nil
+}
+
+func (s *Server) getSub2ProxyBindingPolicy(w http.ResponseWriter, r *http.Request) {
+	endpoint, err := sub2.EndpointKey(r.URL.Query().Get("url"))
+	if err != nil {
+		writeAPI(w, 400, nil, err.Error())
+		return
+	}
+	limit, err := s.store.Sub2ProxyBindingLimit(endpoint)
+	if err != nil {
+		writeAPI(w, 500, nil, err.Error())
+		return
+	}
+	writeAPI(w, 200, map[string]int64{"max_bindings": limit}, "")
+}
+
+func (s *Server) saveSub2ProxyBindingPolicy(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		URL string `json:"url"`
+		Max *int64 `json:"max_bindings"`
+	}
+	if decodeJSON(w, r, &input, 8<<10) != nil {
+		return
+	}
+	endpoint, err := sub2.EndpointKey(input.URL)
+	if err != nil || input.Max == nil {
+		writeAPI(w, 400, nil, "请填写下游地址和累计绑定上限")
+		return
+	}
+	if err = s.store.SaveSub2ProxyBindingLimit(endpoint, *input.Max); err != nil {
+		writeAPI(w, 400, nil, err.Error())
+		return
+	}
+	writeAPI(w, 200, map[string]int64{"max_bindings": *input.Max}, "")
+}
+
+func (s *Server) editSub2ProxyBindingUsage(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		URL      string `json:"url"`
+		Key      string `json:"binding_key"`
+		Count    *int64 `json:"count"`
+		Revision *int64 `json:"expected_revision"`
+	}
+	if decodeJSON(w, r, &input, 8<<10) != nil {
+		return
+	}
+	endpoint, err := sub2.EndpointKey(input.URL)
+	if err != nil || input.Count == nil || input.Revision == nil {
+		writeAPI(w, 400, nil, "请填写下游地址、累计次数及当前版本")
+		return
+	}
+	err = s.store.SetSub2ProxyUsage(endpoint, input.Key, *input.Count, *input.Revision)
+	if err != nil {
+		status := 400
+		if errors.Is(err, store.ErrSub2ProxyUsageChanged) {
+			status = 409
+		}
+		writeAPI(w, status, nil, err.Error())
+		return
+	}
+	writeAPI(w, 200, map[string]bool{"saved": true}, "")
 }
 
 func resolveSub2ProxyInput(input *sub2SettingsInput, current model.Sub2Settings) error {

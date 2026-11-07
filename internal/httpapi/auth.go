@@ -84,7 +84,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		// Financial endpoints must reject cross-origin cookie requests, including
 		// same-site sibling origins that SameSite=Lax alone does not block.
-		if (strings.HasPrefix(path, "/api/ejh/") || strings.HasPrefix(path, "/api/nexovcc/") || strings.HasPrefix(path, "/api/mail/gptregister/")) && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if (strings.HasPrefix(path, "/api/ejh/") || strings.HasPrefix(path, "/api/nexovcc/") || strings.HasPrefix(path, "/api/mail/gptregister/") || strings.HasPrefix(path, "/api/sub2-proxy-binding-")) && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			origin := r.Header.Get("Origin")
 			u, err := url.Parse(origin)
 			if r.Header.Get("Sec-Fetch-Site") == "cross-site" || (origin != "" && (err != nil || u.Host != r.Host || (u.Scheme != "http" && u.Scheme != "https"))) {

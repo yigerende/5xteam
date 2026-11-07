@@ -2,6 +2,7 @@ package sub2
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -16,18 +17,41 @@ import (
 
 // Proxy deliberately excludes the administrator API's username/password fields.
 type Proxy struct {
-	ID           int64      `json:"id"`
-	Name         string     `json:"name"`
-	Protocol     string     `json:"protocol"`
-	Host         string     `json:"host"`
-	Port         int        `json:"port"`
-	Status       string     `json:"status"`
-	ExpiresAt    *time.Time `json:"expires_at"`
-	AccountCount *int       `json:"account_count"`
+	ID                 int64      `json:"id"`
+	Name               string     `json:"name"`
+	Protocol           string     `json:"protocol"`
+	Host               string     `json:"host"`
+	Port               int        `json:"port"`
+	Status             string     `json:"status"`
+	ExpiresAt          *time.Time `json:"expires_at"`
+	AccountCount       *int       `json:"account_count"`
+	BindingKey         string     `json:"binding_key"`
+	CumulativeBindings int64      `json:"cumulative_bindings"`
+	PendingBindings    int64      `json:"pending_bindings"`
+	BindingRevision    int64      `json:"binding_revision"`
+	BindingLimit       int64      `json:"binding_limit"`
+	BindingSince       string     `json:"binding_since,omitempty"`
 }
 
 func (p Proxy) Available(now time.Time) bool {
-	return p.ID > 0 && p.Status == "active" && p.AccountCount != nil && *p.AccountCount >= 0 && (p.ExpiresAt == nil || p.ExpiresAt.After(now))
+	return p.ID > 0 && p.Status == "active" && p.AccountCount != nil && *p.AccountCount >= 0 && (p.ExpiresAt == nil || p.ExpiresAt.After(now)) && (p.BindingLimit == 0 || (p.BindingKey != "" && p.CumulativeBindings+p.PendingBindings < p.BindingLimit))
+}
+
+// Names, upstream IDs and passwords can change during a reimport. Preserve
+// identity using the connection endpoint and username, without exposing it.
+func ProxyBindingKey(protocol, host string, port int, username string) string {
+	if strings.TrimSpace(host) == "" || port <= 0 || port > 65535 {
+		return ""
+	}
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		protocol = "http"
+	}
+	host = strings.TrimSuffix(strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]")), ".")
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s", protocol, host, port, username))))
 }
 
 func (c *Client) Proxies(ctx context.Context, settings model.Sub2Settings, password string) ([]Proxy, error) {
@@ -35,9 +59,20 @@ func (c *Client) Proxies(ctx context.Context, settings model.Sub2Settings, passw
 	if err != nil {
 		return nil, err
 	}
-	proxies := []Proxy{}
-	if err := unmarshalList(data, &proxies); err != nil {
+	var rows []struct {
+		Proxy
+		Username string `json:"username"`
+	}
+	if err := unmarshalList(data, &rows); err != nil {
 		return nil, fmt.Errorf("解析 Sub2 代理失败: %w", err)
+	}
+	proxies := make([]Proxy, 0, len(rows))
+	for _, row := range rows {
+		p := row.Proxy
+		p.BindingKey = ProxyBindingKey(p.Protocol, p.Host, p.Port, row.Username)
+		p.CumulativeBindings, p.PendingBindings, p.BindingRevision, p.BindingLimit = 0, 0, 0, 0
+		p.BindingSince = ""
+		proxies = append(proxies, p)
 	}
 	return proxies, nil
 }
@@ -67,7 +102,7 @@ func SelectProxy(proxies []Proxy, ids []int64, now time.Time) (Proxy, int, error
 		}
 	}
 	if len(candidates) == 0 {
-		return Proxy{}, 0, errors.New("所选 Sub2 代理均不可用、已过期或缺少绑定数量，已停止推送")
+		return Proxy{}, 0, errors.New("所选 Sub2 代理均不可用、已过期、缺少绑定数量或累计绑定已达上限，已停止推送")
 	}
 	return candidates[rand.IntN(len(candidates))], len(candidates), nil
 }

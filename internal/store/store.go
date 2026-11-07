@@ -178,6 +178,12 @@ func (s *Store) initSchema() error {
 		CREATE TABLE IF NOT EXISTS pro_sub2_variants (auth_mode TEXT PRIMARY KEY, payload TEXT NOT NULL, encrypted_password TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS vm2api_quality_settings (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS sub2_push_attempts (id TEXT PRIMARY KEY, encrypted_payload TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS sub2_proxy_binding_policy (endpoint TEXT PRIMARY KEY, max_bindings INTEGER NOT NULL DEFAULT 0 CHECK(max_bindings>=0));
+		CREATE TABLE IF NOT EXISTS sub2_proxy_binding_usage (endpoint TEXT NOT NULL, proxy_key TEXT NOT NULL, binding_count INTEGER NOT NULL CHECK(binding_count>=0), revision INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(endpoint,proxy_key));
+		CREATE TABLE IF NOT EXISTS sub2_proxy_binding_events (attempt_key TEXT PRIMARY KEY, endpoint TEXT NOT NULL, proxy_key TEXT NOT NULL, remote_id INTEGER NOT NULL DEFAULT 0, counted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+		CREATE INDEX IF NOT EXISTS sub2_proxy_binding_pending ON sub2_proxy_binding_events(endpoint,proxy_key,counted);
+		CREATE UNIQUE INDEX IF NOT EXISTS sub2_proxy_binding_remote ON sub2_proxy_binding_events(endpoint,remote_id) WHERE remote_id>0;
+		CREATE TABLE IF NOT EXISTS sub2_proxy_binding_edits (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL, proxy_key TEXT NOT NULL, previous_count INTEGER NOT NULL, new_count INTEGER NOT NULL, created_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS proxies (
 			id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, url TEXT NOT NULL,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
