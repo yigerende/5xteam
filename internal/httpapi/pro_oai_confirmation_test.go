@@ -165,6 +165,29 @@ func TestProOAINotDueDisabledOrStopped(t *testing.T) {
 	}
 }
 
+func TestProOAIProducedRefundPersistsConfirmation(t *testing.T) {
+	s, st, email := oaiFixture(t)
+	answer := "系统记录显示账户（" + email + "）该笔款项**已产生退款**，预计 5–10 个工作日入账。\n\n已成功"
+	s.proOAILogin = oaiHook(t, answer)
+	if err := s.runProOAI(context.Background(), email, "merge_v2"); err != nil {
+		t.Fatal(err)
+	}
+	v := oaiRecord(t, st, email)
+	if v.Status != "confirmed" || v.ConfirmedAt == nil || v.ConfirmationSource != "help" || v.Steps["confirm"] != "confirmed" || v.NextAttemptAt != nil {
+		t.Fatalf("refund answer did not complete confirmation: %+v", v)
+	}
+	if v.Answer != answer || len(v.Replies) != 1 || v.Replies[0].Answer != answer || v.Replies[0].Status != "confirmed" {
+		t.Fatalf("original answer or result lost: %+v", v)
+	}
+	s.proOAILogin = func(context.Context, string) (map[string]any, error) {
+		t.Fatal("confirmed reply must not trigger another inquiry")
+		return nil, nil
+	}
+	if err := s.runProOAI(context.Background(), email, "merge_v2"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProOAINegativeAndUnknownAnswersRetry(t *testing.T) {
 	for _, answer := range []string{"没有退款。\n已失败", "无法查询。\n待核实"} {
 		t.Run(answer, func(t *testing.T) {

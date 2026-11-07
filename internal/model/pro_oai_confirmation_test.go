@@ -56,3 +56,33 @@ func TestProOAIAnswerStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestProOAIProducedRefundAnswer(t *testing.T) {
+	for _, tc := range []struct{ name, answer, want string }{
+		{"recorded wording", "我是 OpenAI 的 AI 辅助支持。\n\n我这边看到你的账户（child@example.com）有一笔付款 5794.64 PHP，对应发票号 **TEST-0001**，并且系统记录显示该笔款项**已产生退款**。退款入账时间通常为 **5–10 个工作日**（具体以发卡行/银行处理速度为准）。\n\n已成功", "confirmed"},
+		{"one refund", "系统记录显示已产生了一笔退款，银行尚未到账。\n已成功", "confirmed"},
+		{"refund subject", "这笔退款已经产生，预计五个工作日入账。\n已成功", "confirmed"},
+		{"fee refund", "系统记录显示已产生退费。\n**已成功**", "confirmed"},
+		{"no marker", "系统记录显示已产生退款。", "review"},
+		{"wrong account", "other@example.com 已产生退款。\n已成功", "review"},
+		{"cannot verify", "无法确认是否已产生退款。\n已成功", "review"},
+		{"conditional", "如果已产生退款，通常五天到账。\n已成功", "review"},
+		{"conditional subject", "假如退款已经产生，通常五天到账。\n已成功", "review"},
+		{"negated", "这不代表已产生退款。\n已成功", "review"},
+		{"explicit denial", "并非已产生退款。\n已成功", "review"},
+		{"not yet", "尚未产生退款。\n已成功", "review"},
+		{"conflicting prior refund", "之前已产生退款，但当前这笔尚未产生退款。\n已成功", "review"},
+		{"conflicting subject", "之前退款已完成，但当前退款还未产生。\n已成功", "review"},
+		{"failure marker", "尚未产生退款。\n已失败", "unconfirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ProOAIAnswerStatus("child@example.com", tc.answer); got != tc.want {
+				t.Fatalf("got %s want %s", got, tc.want)
+			}
+		})
+	}
+	rule := ProOAIInquiry{SuccessMarker: "确认完成!", FailureMarker: "未处理", ReviewMarker: "未知"}
+	if got := ProOAIAnswerStatus("child@example.com", "系统记录显示已产生退款。\n确认完成!", rule); got != "confirmed" {
+		t.Fatalf("custom marker: got %s", got)
+	}
+}

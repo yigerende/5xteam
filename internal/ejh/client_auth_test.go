@@ -26,6 +26,8 @@ func TestExpiredTokenQueryRefreshAndMutationSafety(t *testing.T) {
 		{"open_not_repeated", "card.open.info", "token不正确", false, 1, 1, true},
 		{"cancel_not_repeated", "card.cancel.info", "token不正确", false, 1, 1, true},
 		{"generic_not_repeated", "account.balance.info", "请求失败", false, 1, 1, true},
+		{"disabled_not_repeated", "card.list.info", "接口已停用，无法访问！", false, 1, 1, true},
+		{"disabled_sensitive_suffix", "card.list.info", "接口已停用，无法访问！secret-card-number", false, 1, 1, true},
 		{"sensitive_message", "account.balance.info", "token不正确 secret-card-number", false, 1, 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,6 +54,9 @@ func TestExpiredTokenQueryRefreshAndMutationSafety(t *testing.T) {
 			if err != nil && strings.Contains(err.Error(), "secret-card-number") {
 				t.Fatal("supplier message leaked")
 			}
+			if tc.name == "disabled_not_repeated" && !strings.Contains(err.Error(), "请联系 EJH 恢复 API 服务") {
+				t.Fatal("disabled API reason hidden", err)
+			}
 			if !tc.wantError && out["balance"] != "12.34" {
 				t.Fatal("recovered response lost")
 			}
@@ -61,6 +66,23 @@ func TestExpiredTokenQueryRefreshAndMutationSafety(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDisabledAPIAuthenticationReportsReason(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Path != "/api/v3/authenticate" {
+			t.Error("business request sent after authentication failed")
+		}
+		fmt.Fprint(w, `{"code":"000009","msg":"接口已停用，无法访问！"}`)
+	}))
+	defer up.Close()
+	c := New()
+	err := c.Call(context.Background(), Settings{URL: up.URL, AppKey: "fixture"}, "fixture-secret", "card.list.info", map[string]any{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "请联系 EJH 恢复 API 服务") || calls.Load() != 1 || c.token != "" {
+		t.Fatalf("disabled API: err=%v calls=%d", err, calls.Load())
 	}
 }
 

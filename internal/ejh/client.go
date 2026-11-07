@@ -99,6 +99,9 @@ func (c *Client) post(ctx context.Context, address, token string, body any) (jso
 		if code == "000009" && rejectedTokenMessage(env.Msg) {
 			return nil, &APIError{Code: code, Message: "认证令牌失效，请重新认证", authRejected: true}
 		}
+		if code == "000009" && strings.TrimRight(strings.TrimSpace(env.Msg), "！!。.") == "接口已停用，无法访问" {
+			return nil, &APIError{Code: code, Message: "接口已停用，无法访问；请联系 EJH 恢复 API 服务"}
+		}
 		return nil, &APIError{Code: code, Message: knownMessage(code)}
 	}
 	data := bytes.TrimSpace(env.Data)
