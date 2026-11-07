@@ -27,10 +27,15 @@ window.fetch=async(path,options={})=>{
   if(url.pathname==='/api/pro-settings/sub2/groups')return reply([])
   if(url.pathname==='/api/pro-accounts'){
     const state=url.searchParams.get('merge_state')||url.searchParams.get('space_state')
-    const rows=fixture.accounts.filter(a=>state==='merge_v2'?a.pro_merge_v2.completed_at:state==='in_progress'?!a.pro_merge_v2.completed_at:true)
+    const rows=fixture.accounts.filter(a=>fixture.showAll || (state==='merge_v2'?a.pro_merge_v2.completed_at:state==='in_progress'?!a.pro_merge_v2.completed_at:true))
     return reply({items:rows,total:rows.length,summary:{all:2,in_progress:1,merge_v2:1,merchant:0,deleted:0,merged:0,unmerged:0}})
   }
   if(url.pathname.endsWith('/merge-v2'))return reply(fixture.accounts[0])
+  if(url.pathname.endsWith('/merge-v2-restart')) {
+    const account=fixture.accounts.find(a=>url.pathname.includes(encodeURIComponent(a.email)))
+    account.pro_merge_v2_restart={id:body.request_id,status:'pending'}
+    return reply(account)
+  }
   if(url.pathname.endsWith('/merge-v2-stage')){fixture.accounts[0].pro_merge_v2.steps[body.stage]=body.status;fixture.accounts[0].pro_merge_v2.accepted_at=now;fixture.accounts[0].pro_merge_v2.status='interrupted';return reply(fixture.accounts[0])}
   throw Error('Unmocked request '+url.pathname)
 }

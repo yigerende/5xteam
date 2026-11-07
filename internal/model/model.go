@@ -86,6 +86,7 @@ type MailAccountProfile struct {
 	CostCheckedAt              *time.Time                     `json:"cost_checked_at,omitempty"`
 	SpaceMergedOnce            bool                           `json:"space_merged_once"`
 	ProMergeV2                 *ProMergeV2                    `json:"pro_merge_v2,omitempty"`
+	ProMergeV2Restart          *ProMergeV2Restart             `json:"pro_merge_v2_restart,omitempty"`
 	ProMerchant                *ProMerchant                   `json:"pro_merchant,omitempty"`
 	ProDeactivation            *ProDeactivation               `json:"pro_deactivation,omitempty"`
 	ProOAIConfirmations        map[string]*ProOAIConfirmation `json:"pro_oai_confirmations,omitempty"`

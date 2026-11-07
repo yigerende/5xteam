@@ -2,8 +2,8 @@
 import { computed } from 'vue'
 import { formatTime } from '../utils'
 import CompactErrorDetails from './CompactErrorDetails.vue'
-const props=defineProps({account:{type:Object,required:true},disabled:Boolean,readonly:Boolean})
-const emit=defineEmits(['retry','change'])
+const props=defineProps({account:{type:Object,required:true},disabled:Boolean,readonly:Boolean,restarting:Boolean})
+const emit=defineEmits(['retry','change','restart'])
 const state=computed(()=>props.account.pro_merge_v2 || {})
 const steps=[['invite','邀请'],['login','团队登录'],['submit','提交停用'],['remove','移出团队'],['groups','后续分组']]
 const stepStatus=(key)=>key==='submit' && state.value.completion_basis==='plan_free' ? 'verified' : state.value.steps?.[key]||'not_started'
@@ -24,6 +24,9 @@ function change(key,label,event){const status=event.target.value;event.target.va
     <small>受理及流程完成不代表上游停用或退款完成。</small>
     <CompactErrorDetails :messages="[state.error,state.recovery?.original_error,state.recovery?.error,account.pro_post_merge_groups?.error,account.vm2api?.error]"/>
     <button v-if="account.pro_merge_v2 && !state.completed_at" type="button" class="btn ghost compact" :disabled="disabled || state.recovery?.exhausted || !!state.recovery?.next_at || state.status==='unknown' && !state.recovery" @click="$emit('retry')">执行 / 续跑合并空间2.0</button>
+    <button v-if="!readonly" type="button" class="btn ghost compact" :disabled="restarting" @click="$emit('restart')">{{restarting ? '正在提交…' : '重新执行（从邀请开始）'}}</button>
+    <small v-if="['pending','starting'].includes(account.pro_merge_v2_restart?.status)">已接收重新执行，等待旧任务退出后从邀请开始。</small>
+    <CompactErrorDetails :messages="[account.pro_merge_v2_restart?.error]"/>
   </div>
 </template>
 <style scoped>

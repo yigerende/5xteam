@@ -34,6 +34,10 @@ func TestProMergeV2IncompleteLoginUsesConfiguredRetryBudget(t *testing.T) {
 	checkProMergeV2ConfiguredLoginRetry(t, "login_response_incomplete", true)
 }
 
+func TestProMergeV2ExpiredLoginSessionUsesConfiguredRetryBudget(t *testing.T) {
+	checkProMergeV2ConfiguredLoginRetry(t, "login_session_expired", true)
+}
+
 func TestProMergeV2PasswordlessEntryUsesConfiguredRetryBudget(t *testing.T) {
 	checkProMergeV2ConfiguredLoginRetry(t, "password_login_restart_required", false)
 }

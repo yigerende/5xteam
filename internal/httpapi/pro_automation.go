@@ -1226,6 +1226,7 @@ func (s *Server) startProAutomationMonitor() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				s.tickProMergeV2Restarts(ctx)
 				s.queueProRechargeReplacements(ctx)
 				s.tickProDeactivations(ctx)
 				s.tickProMerchants(ctx)
@@ -1312,6 +1313,9 @@ func (s *Server) stopProAutomation(w http.ResponseWriter, r *http.Request) {
 	p, err := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 		p.ProAuto.StopVersion++
 		p.ProAuto.StopRequested = true
+		if p.MergeV2RestartPending() {
+			p.ProMergeV2Restart.Status = "cancelled"
+		}
 		p.ProAuto.Status = "stopped"
 		p.ProAuto.NextCheckAt = nil
 		p.ProAuto.Error = "用户已停止账号流程"
@@ -1369,7 +1373,7 @@ func (s *Server) guardProAutomation(next http.Handler) http.Handler {
 					action = parts[4]
 				}
 			}
-			if strings.Contains(email, "@") && action != "auto-pro" && action != "oai-confirmation" {
+			if strings.Contains(email, "@") && action != "auto-pro" && action != "oai-confirmation" && action != "merge-v2-restart" {
 				s.proAutoMu.Lock()
 				running := s.proAutoJobs[strings.ToLower(email)] != nil
 				if !running && len(parts) >= 5 && parts[1] == "mail" && action != "final-step" {

@@ -360,6 +360,24 @@ func (s *Store) updateProAccount(email string, expected time.Time, mutate func(*
 	if _, err = tx.Exec("UPDATE mail_accounts SET profile=?,updated_at=? WHERE email=?", string(encoded), formatTime(p.UpdatedAt), email); err != nil {
 		return p, err
 	}
+	// Archive the old round in the same transaction that accepts/resets a
+	// manual restart. Never include credentials or the whole account profile.
+	if restart := p.ProMergeV2Restart; restart != nil {
+		requested := previous.ProMergeV2Restart == nil || previous.ProMergeV2Restart.ID != restart.ID
+		reset := previous.ProMergeV2Restart != nil && previous.ProMergeV2Restart.Status == "pending" && restart.Status == "starting"
+		if requested || reset {
+			id := mergeV2RestartEventID(p.ID, restart.ID)
+			message := "已接收手动重新执行，等待旧任务退出"
+			if reset {
+				id += ":archive"
+				message = "已归档上一轮合并2.0，从邀请重新执行"
+			}
+			event := model.AutoRotationEvent{ID: id, AccountID: p.ID, Email: p.Email, Type: "pro_merge_v2_restart", Source: "pro_management", Operation: "merge_v2", Stage: "restart", Message: message, CreatedAt: p.UpdatedAt, Details: map[string]any{"request_id": restart.ID, "previous_merge_v2": previous.ProMergeV2}}
+			if _, err = tx.Exec("INSERT INTO auto_rotation_events(id,run_id,task_id,account_id,payload,created_at) VALUES(?,?,?,?,?,?)", id, "", "", p.ID, mustJSON(event), formatTime(p.UpdatedAt)); err != nil {
+				return p, err
+			}
+		}
+	}
 	// Keep confirmation history available to card return records after the
 	// mailbox is removed locally. It never changes financial status or amounts.
 	if len(p.ProOAIConfirmations) > 0 && mustJSON(previous.ProOAIConfirmations) != mustJSON(p.ProOAIConfirmations) {

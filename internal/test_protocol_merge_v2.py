@@ -22,6 +22,33 @@ def session(team="target-team", email="child@example.com"):
 
 
 class MergeV2ProtocolTests(unittest.TestCase):
+    def test_current_login_invalid_state_requires_fresh_session(self):
+        for path in ["authorize/continue", "password/verify", "mfa/issue_challenge", "mfa/verify"]:
+            flow = self.flow()
+            response = Mock(status=409)
+            response.json.return_value = {"error": {"code": "invalid_state", "type": "invalid_request_error"}}
+            with patch.object(adapter.ProjectProtocolLogin, "request", return_value=response) as request:
+                with self.assertRaises(upstream.LoginFlowError) as caught:
+                    flow.request("https://auth.openai.com/api/accounts/" + path, method="POST")
+                self.assertEqual(caught.exception.code, "login_session_expired")
+                self.assertTrue(caught.exception.retryable)
+                request.assert_called_once()
+
+    def test_other_errors_and_non_login_requests_are_not_reclassified(self):
+        cases = [
+            ("https://auth.openai.com/api/accounts/mfa/verify", 409, {"error": {"code": "invalid_totp_code"}}),
+            ("https://auth.openai.com/api/accounts/password/verify", 401, {"error": {"code": "invalid_state"}}),
+            ("https://auth.openai.com/api/accounts/mfa/verify", 409, {"error": "invalid_state"}),
+            ("https://chatgpt.com/backend-api/accounts/export_and_deactivate", 409, {"error": {"code": "invalid_state"}}),
+            ("https://auth.openai.com/api/accounts/workspace/select", 409, {"error": {"code": "invalid_state"}}),
+        ]
+        for url, status, body in cases:
+            flow = self.flow()
+            response = Mock(status=status)
+            response.json.return_value = body
+            with patch.object(adapter.ProjectProtocolLogin, "request", return_value=response):
+                self.assertIs(flow.request(url), response)
+
     def flow(self):
         f=merge_v2.TeamProtocolLogin("fixture",{"email":"child@example.com","credential_mode":"chatgpt_at","proxy":"http://user:secret@proxy.invalid:8080","merge_v2":{"team_id":"target-team"}})
         self.addCleanup(f.close)

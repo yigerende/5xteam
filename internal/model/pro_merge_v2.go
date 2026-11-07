@@ -13,6 +13,21 @@ type ProMergeV2RecoverySettings struct {
 	MaxCycles                int    `json:"max_cycles"`
 	MaxAttempts              int    `json:"max_attempts"`
 	VerificationHTTPStatuses string `json:"verification_http_statuses"`
+	NetworkRetries           *int   `json:"network_retries,omitempty"`
+	NetworkRetrySeconds      int    `json:"network_retry_seconds,omitempty"`
+}
+
+func (s ProMergeV2RecoverySettings) NetworkRetryCount() int {
+	if s.NetworkRetries == nil {
+		return 5
+	}
+	return *s.NetworkRetries
+}
+func (s ProMergeV2RecoverySettings) NetworkDelay() int {
+	if s.NetworkRetrySeconds == 0 {
+		return 60
+	}
+	return s.NetworkRetrySeconds
 }
 
 func (s ProSettings) MergeV2RecoveryConfig() ProMergeV2RecoverySettings {
@@ -22,6 +37,9 @@ func (s ProSettings) MergeV2RecoveryConfig() ProMergeV2RecoverySettings {
 	return *s.MergeV2Recovery
 }
 func (s ProMergeV2RecoverySettings) Validate() error {
+	if s.NetworkRetryCount() < 0 || s.NetworkRetryCount() > 20 || s.NetworkDelay() < 5 || s.NetworkDelay() > 3600 {
+		return errors.New("网络重试须为0～20次，间隔5～3600秒")
+	}
 	if s.RetrySeconds < 5 || s.RetrySeconds > 3600 || s.MaxCycles < 1 || s.MaxCycles > 5 || s.MaxAttempts < 1 || s.MaxAttempts > 10 {
 		return errors.New("2.0恢复间隔须为5～3600秒，最多1～5轮，每轮1～10次")
 	}
@@ -56,6 +74,9 @@ func (r *ProMergeV2Recovery) PreSubmit() bool {
 
 func (r *ProMergeV2Recovery) Limit(s ProSettings) int {
 	if r.PreSubmit() {
+		if r.NetworkFailure {
+			return s.MergeV2RecoveryConfig().NetworkRetryCount() + 1
+		}
 		return s.RetryCount + 1
 	}
 	return s.MergeV2RecoveryConfig().MaxAttempts
@@ -63,6 +84,9 @@ func (r *ProMergeV2Recovery) Limit(s ProSettings) int {
 
 func (r *ProMergeV2Recovery) Delay(s ProSettings) int {
 	if r.PreSubmit() {
+		if r.NetworkFailure {
+			return s.MergeV2RecoveryConfig().NetworkDelay()
+		}
 		return s.RetryIntervalSeconds
 	}
 	return s.MergeV2RecoveryConfig().RetrySeconds
@@ -71,6 +95,7 @@ func (r *ProMergeV2Recovery) Delay(s ProSettings) int {
 func (r *ProMergeV2Recovery) SetPhase(phase string) {
 	if r.Phase != phase {
 		r.Phase, r.Attempts, r.NextAt = phase, 0, nil
+		r.NetworkFailure = false
 	}
 }
 
@@ -87,6 +112,7 @@ func (r *ProMergeV2Recovery) FinishFailure(m *ProMergeV2) {
 }
 
 type ProMergeV2Recovery struct {
+	NetworkFailure     bool       `json:"network_failure,omitempty"`
 	Phase              string     `json:"phase"`
 	Cycles             int        `json:"cycles"`
 	Attempts           int        `json:"attempts"`
@@ -101,8 +127,21 @@ type ProMergeV2Recovery struct {
 	Submissions []time.Time `json:"submissions,omitempty"`
 }
 
+// Manual requests survive service restarts and wait for the previous worker.
+type ProMergeV2Restart struct {
+	ID          string    `json:"id"`
+	Status      string    `json:"status"`
+	RequestedAt time.Time `json:"requested_at"`
+	Error       string    `json:"error,omitempty"`
+}
+
+func (p MailAccountProfile) MergeV2RestartPending() bool {
+	return p.ProMergeV2Restart != nil && (p.ProMergeV2Restart.Status == "pending" || p.ProMergeV2Restart.Status == "starting")
+}
+
 // A separate durable workflow: acceptance is not proof of a refund.
 type ProMergeV2 struct {
+	ManualRestartID         string                      `json:"manual_restart_id,omitempty"`
 	VerificationOnly        bool                        `json:"verification_only,omitempty"`
 	Recovery                *ProMergeV2Recovery         `json:"recovery,omitempty"`
 	CompletionBasis         string                      `json:"completion_basis,omitempty"`

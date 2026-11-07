@@ -16,6 +16,7 @@ import (
 var errMergeV2Unknown = errors.New("导出停用结果待确认；自动恢复按配置移出原团队并核验个人套餐，不直接重复提交")
 
 type mergeV2LoginKey struct{}
+type mergeV2GenerationKey struct{}
 type mergeV2LoginOptions struct {
 	TeamID                   string
 	VerificationHTTPStatuses []int
@@ -73,6 +74,10 @@ func (s *Server) mergeV2Checkpoint(ctx context.Context, email, team string, meth
 		m := p.ProMergeV2
 		if m == nil || m.TeamID != team {
 			checkpointErr = errors.New("合并空间2.0目标空间已变化")
+			return
+		}
+		if started, ok := ctx.Value(mergeV2GenerationKey{}).(time.Time); ok && !m.StartedAt.Equal(started) {
+			checkpointErr = errors.New("合并空间2.0轮次已变化，旧回调不修改新一轮")
 			return
 		}
 		// Validate under the same store lock as the durable checkpoint. A concurrent
@@ -357,14 +362,19 @@ func (s *Server) performProMergeV2Attempt(ctx context.Context, email string) (ou
 			return p, err
 		}
 		token, e := s.mergeV2AdminAccessToken(ctx, admin.ID, admin.TeamAccountID)
+		operation := "mother_credential"
+		started := time.Now()
 		if e == nil {
 			var present bool
+			operation = "invite_presence_check"
 			present, e = client.MergeV2TargetPresent(ctx, token, admin.TeamAccountID, email)
 			if e == nil && !present {
+				operation = "invite_send"
 				_, e = client.Invite(ctx, token, admin.TeamAccountID, email, settings.TargetSeatType)
 			}
 		}
 		if e != nil {
+			s.auditProEvent(p, "merge_v2_invite", "failed", settings.Provider, "邀请阶段请求失败", map[string]any{"operation": operation, "duration_ms": time.Since(started).Milliseconds(), "network_error": workflow.IsRetryableConnectionError(e), "attempt": p.ProMergeV2.Recovery.Attempts, "error": mergeV2DiagnosticText(e.Error())})
 			return p, &mergeV2RetryError{cause: e}
 		}
 
@@ -388,8 +398,9 @@ func (s *Server) performProMergeV2Attempt(ctx context.Context, email string) (ou
 		if err != nil {
 			return p, err
 		}
+		generationCtx := context.WithValue(ctx, mergeV2GenerationKey{}, p.ProMergeV2.StartedAt)
 		opts := &mergeV2LoginOptions{TeamID: admin.TeamAccountID, VerificationHTTPStatuses: statuses, Call: func(method string, args map[string]any) (any, error) {
-			return s.mergeV2Checkpoint(ctx, email, admin.TeamAccountID, method, args)
+			return s.mergeV2Checkpoint(generationCtx, email, admin.TeamAccountID, method, args)
 		}}
 		loginCtx := context.WithValue(ctx, mergeV2LoginKey{}, opts)
 		result, loginErr := s.loginProMergeV2(loginCtx, p, settings.Provider, waitProAuto)

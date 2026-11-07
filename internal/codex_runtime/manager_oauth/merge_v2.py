@@ -44,6 +44,29 @@ class TeamProtocolLogin(ProjectProtocolLogin):
         self.team_session = None
         self.workspace_selected = False
 
+    def request(self, url, **kwargs):
+        response = super().request(url, **kwargs)
+        parsed = urlsplit(url)
+        # Only the current authentication response can invalidate this login.
+        # Never retry a submission or reinterpret an incorrect password/TOTP.
+        if (parsed.hostname == "auth.openai.com"
+                and parsed.path in {"/api/accounts/authorize/continue",
+                                    "/api/accounts/password/verify",
+                                    "/api/accounts/mfa/issue_challenge",
+                                    "/api/accounts/mfa/verify"}
+                and response.status == 409):
+            try:
+                data = response.json()
+            except (ValueError, TypeError):
+                data = None
+            error = data.get("error") if isinstance(data, dict) else None
+            if isinstance(error, dict) and error.get("code") == "invalid_state":
+                raise upstream.LoginFlowError(
+                    "登录会话已失效，等待按配置重新登录",
+                    code="login_session_expired", status=409, retryable=True,
+                )
+        return response
+
     def inspect_login_step(self, step, phase):
         # Missing continuation is not evidence that an email code is required.
         data = step if isinstance(step, dict) else {}

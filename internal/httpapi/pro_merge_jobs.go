@@ -45,17 +45,21 @@ func (s *Server) startProEndJob(email string, unlock func(), quality *proQuality
 	if err != nil {
 		return p, err
 	}
-	if p.IsProDead() && !(action == "merge_v2" && p.MergeV2DeadCleanupAllowed()) {
+	if p.MergeV2RestartPending() && action != "restart_merge_v2" {
+		return p, errors.New("已安排手动重新执行，等待旧任务退出")
+	}
+	if p.IsProDead() && !((action == "merge_v2" || action == "manual_merge_v2") && p.MergeV2DeadCleanupAllowed()) {
 		return p, errProAccountDead
 	}
 	if !p.ProActionsAllowed() {
 		return p, errors.New("账号不在 Pro 管理中")
 	}
-	manual := action == "manual_deactivate" || action == "manual_merge" || action == "manual_merchant" || action == "manual_merge_v2"
+	restart := action == "restart_merge_v2"
+	manual := action == "manual_deactivate" || action == "manual_merge" || action == "manual_merchant" || action == "manual_merge_v2" || restart
 	if !manual && (p.ProAuto.StopRequested || p.ProAuto.Status == "stopped") && !p.MergeV2DeadCleanupAllowed() {
 		return p, errors.New("用户已停止该账号流程，请手动续跑")
 	}
-	if action == "manual_merge_v2" {
+	if action == "manual_merge_v2" || restart {
 		action = "merge_v2"
 	}
 	if p.MergeV2Started() && !p.MergeV2Completed() && action != "merge_v2" && action != "automatic" {
@@ -64,7 +68,7 @@ func (s *Server) startProEndJob(email string, unlock func(), quality *proQuality
 	if action == "manual_merchant" {
 		action = "merchant"
 	}
-	if p.MerchantNeedsContinuation() && action != "merchant" && action != "automatic" {
+	if p.MerchantNeedsContinuation() && action != "merchant" && action != "automatic" && !restart {
 		return p, errors.New("商户申请尚未结束，请先核对商户处理结果")
 	}
 	resumeDeletion := action == "manual_deactivate"
@@ -129,6 +133,9 @@ func (s *Server) startProEndJob(email string, unlock func(), quality *proQuality
 	}
 	p, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 		p.ProWorkflowRunning, p.ProLastError = true, ""
+		if restart && p.ProMergeV2Restart != nil {
+			p.ProMergeV2Restart.Status = "started"
+		}
 		if manual {
 			p.ProAuto.StopRequested = false
 			if p.ProMigration != nil {

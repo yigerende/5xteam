@@ -40,6 +40,9 @@ func (s *Server) performProMergeV2(ctx context.Context, email string) (out model
 		return p, err
 	}
 	rule := cfg.MergeV2RecoveryConfig()
+	if p.ProMergeV2 != nil && p.ProMergeV2.ManualRestartID != "" {
+		rule.Enabled = true
+	}
 	if p.MergeV2Completed() {
 		return p, nil
 	}
@@ -84,7 +87,9 @@ func (s *Server) performProMergeV2(ctx context.Context, email string) (out model
 				}
 			case r.Phase != "cleanup":
 				var retry *mergeV2RetryError
-				if !errors.As(runErr, &retry) || r.Attempts >= r.Limit(cfg) {
+				canRetry := errors.As(runErr, &retry)
+				r.NetworkFailure = canRetry && workflow.IsRetryableConnectionError(retry.cause)
+				if !canRetry || r.Attempts >= r.Limit(cfg) {
 					if errors.Is(runErr, context.Canceled) || errors.Is(context.Cause(ctx), errProAutoFinalStepPaused) {
 						return
 					}
@@ -110,6 +115,9 @@ func (s *Server) performProMergeV2(ctx context.Context, email string) (out model
 			next := time.Now().Add(time.Duration(delay) * time.Second)
 			r.NextAt = &next
 			m.Message = fmt.Sprintf("%s；%d秒后继续（已执行%d/%d次）", mergeV2RecoveryLabel(r.Phase), delay, r.Attempts, r.Limit(cfg))
+			if r.NetworkFailure {
+				m.Message = "网络故障，" + m.Message
+			}
 			if m.SubmittedAt == nil || p.MergeV2Resolved() {
 				m.Status = "interrupted"
 			}
@@ -401,11 +409,11 @@ func (s *Server) recoverProMergeV2Plan(ctx context.Context, p model.MailAccountP
 }
 
 func (s *Server) tickProMergeV2Recovery(ctx context.Context) {
-	if ctx.Err() != nil || s.checkProAutoFinalStepAllowed() != nil {
+	if ctx.Err() != nil {
 		return
 	}
 	cfg, _, _, err := s.store.ProSettings()
-	if err != nil || !cfg.MergeV2RecoveryConfig().Enabled {
+	if err != nil {
 		return
 	}
 	items, err := s.store.DueProMergeV2Recovery(time.Now())
@@ -415,6 +423,10 @@ func (s *Server) tickProMergeV2Recovery(ctx context.Context) {
 	for _, p := range items {
 		if ctx.Err() != nil {
 			return
+		}
+		manual := p.ProMergeV2 != nil && p.ProMergeV2.ManualRestartID != ""
+		if !manual && (!cfg.MergeV2RecoveryConfig().Enabled || s.checkProAutoFinalStepAllowed() != nil) {
+			continue
 		}
 		value, _ := s.proLocks.LoadOrStore("account:"+p.Email, &sync.Mutex{})
 		lock := value.(*sync.Mutex)
@@ -429,7 +441,11 @@ func (s *Server) tickProMergeV2Recovery(ctx context.Context) {
 			lock.Unlock()
 			continue
 		}
-		if _, err = s.startProEndJob(p.Email, lock.Unlock, nil, "merge_v2"); err != nil {
+		action := "merge_v2"
+		if manual {
+			action = "manual_merge_v2"
+		}
+		if _, err = s.startProEndJob(p.Email, lock.Unlock, nil, action); err != nil {
 			lock.Unlock()
 		}
 	}

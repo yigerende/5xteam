@@ -20,7 +20,7 @@
  assert(document.querySelector('thead').textContent.includes('合并空间2.0状态'),'status column missing')
  const row=[...document.querySelectorAll('tbody tr')].find(r=>r.textContent.includes('pending@example.com'))
  assert(row.querySelector('[data-stage="merge_v2"]')?.textContent.includes('合并2.0'),'final stage missing')
- assert(row.textContent.includes('保留团队成员'),'uncertainty explanation missing')
+ assert(row.textContent.includes('请求结果待确认'),'uncertainty explanation missing')
  assert(row.querySelector('.merge-v2-flow button').disabled,'unknown request can resume blindly')
  const original=window.confirm;window.confirm=()=>true
  try{
@@ -34,6 +34,8 @@
  const tab=[...document.querySelectorAll('.space-filter-tabs button')].find(b=>b.textContent.includes('合并空间2.0'))
  tab.click();await wait(()=>f.requests.some(r=>r.path==='/api/pro-accounts'&&r.query.includes('merge_v2')));await pause(80)
  assert(document.querySelector('tbody').textContent.includes('done@example.com')&&!document.querySelector('tbody').textContent.includes('pending@example.com'),'completed filter incorrect')
- assert(!document.querySelector('tbody .merge-v2-flow button'),'completed workflow can be submitted again')
- return {passed:true,checks:['four exclusive modes and save','independent progress column','last automatic stage','unknown preserves member','versioned manual correction','completed filter and no resubmit']}
+ const restart=[...document.querySelectorAll('tbody .merge-v2-flow button')].find(b=>b.textContent.includes('重新执行（从邀请开始）'))
+ assert(restart&&!restart.disabled,'completed workflow lacks manual restart')
+ assert(![...document.querySelectorAll('tbody .merge-v2-flow button')].some(b=>b.textContent.includes('执行 / 续跑')),'completed workflow exposes ordinary continuation')
+ return {passed:true,checks:['four exclusive modes and save','independent progress column','last automatic stage','unknown preserves member','versioned manual correction','completed filter and explicit manual restart']}
 })()
