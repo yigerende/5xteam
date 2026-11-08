@@ -29,7 +29,7 @@ const plain=v=>JSON.parse(JSON.stringify(v))
 const card=id=>({id,issuer_linked:true,remote:{orderNo:id,status:'1'},local:{}})
 function fixture({enabled=true,defaultPageSize=10,cards=[],cases=[],failSync=false,holdSync=false,holdSettings=false,holdView=false,failView=false,failURLs=new Set(),confirmDelete=true}={}){
  const calls=[],unmounts=[],confirmations=[],timers=[],workers=[]
- let release,percent=6,failSave=false,revision='1',day=beijingDay()
+ let release,percent=6,failSave=false,revision='1',day='2026-11-07'
  const blocked=new Promise(resolve=>{release=resolve})
  const source=()=>({cards,cases,trades:[],operations:[],audit:[],sync:{},reversal_fee_percent:percent,revision})
  const document={hidden:false,addEventListener(){},removeEventListener(){}}

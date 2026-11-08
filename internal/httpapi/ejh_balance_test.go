@@ -16,7 +16,7 @@ type ejhBalanceTransport func(*http.Request) (*http.Response, error)
 
 func (fn ejhBalanceTransport) RoundTrip(r *http.Request) (*http.Response, error) { return fn(r) }
 
-func TestEJHBalanceSnapshotsManualOnly(t *testing.T) {
+func TestEJHBalanceSnapshotsPreserveLastQuery(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(dir)
 	if err != nil {
@@ -136,5 +136,5 @@ func TestEJHBalanceSnapshotsManualOnly(t *testing.T) {
 	if got := snapshot(); got.Balance != "-0.25" || got.BalanceAt == nil {
 		t.Fatal("restart lost snapshot")
 	}
-	// No schedule is involved: balance calls are only explicit handler requests.
+	// Page reads still use snapshots; the automatic balance pass is tested separately.
 }

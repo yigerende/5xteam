@@ -331,6 +331,9 @@ func (s *Server) startEJH(parent context.Context) {
 					return
 				case <-task.done:
 				}
+				// Separate read pass: a trade error must not suppress balance
+				// updates, and slow balance I/O must not hold the sync lock.
+				_ = s.syncEJHAutoBalances(ctx)
 				next = time.Now().Add(time.Duration(cfg.SyncIntervalSeconds) * time.Second)
 			}
 		}

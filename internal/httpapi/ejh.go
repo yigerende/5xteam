@@ -303,6 +303,8 @@ func (s *Server) readEJHDashboard(includeAudit bool) (map[string]any, error) {
 	}
 	var syncState ejh.SyncState
 	_ = s.store.EJHGet("sync", "latest", &syncState)
+	var balanceSync ejh.SyncState
+	_ = s.store.EJHGet("balance_sync", "latest", &balanceSync)
 	var balance any
 	_ = s.store.EJHGet("balance", "latest", &balance)
 	audit := []map[string]any{}
@@ -371,7 +373,7 @@ func (s *Server) readEJHDashboard(includeAudit bool) (map[string]any, error) {
 	}
 	var autoCancel ejhAutoCancelState
 	_ = s.store.EJHGet("auto_cancel", "latest", &autoCancel)
-	return map[string]any{"auto_cancel": autoCancel, "payment_policies": policies, "merchant_fees": merchantFees, "cards": rows, "operations": ops, "trades": trades, "cases": cases, "sync": syncState, "balance": balance, "recharge_ledger": ledger, "recharge_history": recharges, "external_transfer_history": transfers, "refund_fees": refundFees, "reversal_fee_percent": settings.ReversalFeePercent, "page_refresh_seconds": settings.PageRefreshSeconds, "consumption_history": usage, "audit": audit, "server_time": time.Now()}, nil
+	return map[string]any{"auto_cancel": autoCancel, "payment_policies": policies, "merchant_fees": merchantFees, "cards": rows, "operations": ops, "trades": trades, "cases": cases, "sync": syncState, "balance_sync": balanceSync, "balance": balance, "recharge_ledger": ledger, "recharge_history": recharges, "external_transfer_history": transfers, "refund_fees": refundFees, "reversal_fee_percent": settings.ReversalFeePercent, "page_refresh_seconds": settings.PageRefreshSeconds, "consumption_history": usage, "audit": audit, "server_time": time.Now()}, nil
 }
 func maskEJH(n string) string {
 	if len(n) > 4 {

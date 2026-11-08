@@ -41,6 +41,7 @@ async function saveLedger() {
  <section class="ejh-balance-overview" aria-label="余额总览">
   <header class="overview-header"><div><Wallet :size="18"/><h2>余额总览</h2></div><div class="overview-actions"><EJHRefundFees :trades="data.trades||[]" :cards="data.cards||[]" :records="data.refund_fees||[]" :disabled="busy||!ready" @saved="emit('refund-fee-saved',$event)"/><button v-if="failures.length" class="btn ghost" type="button" :disabled="busy||saving||!ready" @click="emit('retry-failed')"><RefreshCw :size="14"/>重试失败项（{{failures.length}}）</button><button class="btn primary" type="button" :disabled="busy||saving||!ready" @click="emit('refresh')"><RefreshCw :size="14" :class="{spin:progress}"/>{{progress?'刷新中 '+progress.done+' / '+progress.total:'刷新数据'}}</button></div></header>
   <p v-if="!enabled" class="overview-disabled">卡台已关闭，可手动查询和操作。</p>
+  <p v-if="enabled&&data.balance_sync?.error" class="overview-disabled danger-text">自动更新余额未全部成功：{{data.balance_sync.error}}。已成功项目已保存，其余保留上次余额，下轮自动重试。</p>
   <EJHReconciliationBar :data="data" :masked="!enabled"/>
   <div class="reconciliation-action"><button class="btn ghost" type="button" :disabled="busy||saving||!ready" @click="emit('refresh-reconciliation')">刷新核对余额</button><small>账户及所有未完成销卡的卡片余额，含正常待定和销卡处理中</small></div>
   <div class="overview-grid">
