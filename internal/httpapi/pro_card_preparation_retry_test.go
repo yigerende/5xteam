@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"chatgpt-space-merge/internal/ejh"
 	"chatgpt-space-merge/internal/model"
 )
 
@@ -61,9 +62,8 @@ func TestProCardBusyRetryResumesOnceAndHonorsStop(t *testing.T) {
 
 func TestProCardPreparationHoldIsNotBusyRetry(t *testing.T) {
 	s, issued, paid, email := allocationFixture(t)
-	order, _, _ := s.store.GPTPayOrder("resident-order")
-	order.Status = "manual_review"
-	if err := s.store.UpdateGPTPayOrder(order); err != nil {
+	op := ejh.Operation{ID: "unconfirmed-opening", Method: "open", Status: "unknown", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	if err := s.store.EJHPut("operation", op.ID, op); err != nil {
 		t.Fatal(err)
 	}
 	r := payCall(t, s.startProAutomation, "email", email, map[string]any{"plan_code": "pro20"})

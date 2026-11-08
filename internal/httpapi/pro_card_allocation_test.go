@@ -142,53 +142,126 @@ func TestEJHAllocationSkipsNormalPendingAndCreatesNormal(t *testing.T) {
 
 func TestEJHAllocationReviewHoldAndExistingAlternative(t *testing.T) {
 	for _, status := range []string{"manual_review", "submission_unknown", "deleted", "failed"} {
+		for _, existing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/existing=%t", status, existing), func(t *testing.T) {
+				s, issued, paid, email := allocationFixture(t)
+				order, _, err := s.store.GPTPayOrder("resident-order")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if status == "deleted" {
+					if err = s.store.DeleteProAccount(order.Email); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					order.Status = status
+					if err = s.store.UpdateGPTPayOrder(order); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if existing {
+					if _, err = s.store.SaveGPTPayCard(gptpay.Card{ID: "available-alternative", CardType: "ejh", Enabled: true}, gptpay.CardSecret{Number: "5555555555554444", Month: 12, Year: 2099, CVV: "123"}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				card, _, err := s.reserveProStartCard(context.Background(), email, "test-card", true, false)
+				wantIssued := int32(1)
+				if existing || status == "failed" {
+					wantIssued = 0
+				}
+				if err != nil || issued.Load() != wantIssued || paid.Load() != 0 {
+					t.Fatal("unrelated occupancy blocked allocation", card.ID, err, issued.Load(), paid.Load())
+				}
+				if status == "failed" && card.ID != "test-card" || status != "failed" && card.ID == "test-card" || status != "failed" && existing && card.ID != "available-alternative" {
+					t.Fatal("wrong card selected", card.ID)
+				}
+				saved, _, err := s.store.GPTPayOrder(order.ID)
+				if err != nil || saved.Status != order.Status || saved.OccupancyResolution != nil {
+					t.Fatal("old payment evidence changed", saved.Status, err)
+				}
+				if err = s.store.ReleaseProCard(email); err != nil {
+					t.Fatal(err)
+				}
+				again, _, err := s.reserveProStartCard(context.Background(), email, "", true, false)
+				if err != nil || again.ID != card.ID || issued.Load() != wantIssued || paid.Load() != 0 {
+					t.Fatal("repeated evaluation duplicated issuance", again.ID, err, issued.Load())
+				}
+			})
+		}
+	}
+}
+
+func TestEJHNormalPendingOccupancyDoesNotBlockUnrelatedIssuance(t *testing.T) {
+	for _, status := range []string{"deleted", "manual_review", "submission_unknown", "unused"} {
 		t.Run(status, func(t *testing.T) {
 			s, issued, paid, email := allocationFixture(t)
-			order, _, err := s.store.GPTPayOrder("resident-order")
+			remote := ejh.Card{OrderNo: "quarantined-card", Number: "5555555555554444", CVV: "123", Validity: "1299", Status: "3", CardCurrency: "USD"}
+			pending, err := s.store.ImportEJHCard(remote, true)
 			if err != nil {
 				t.Fatal(err)
+			}
+			now := time.Now()
+			if err = s.store.EJHPut("operation", "quarantined-open", ejh.Operation{ID: "quarantined-open", Method: "open", CardID: pending.ID, OrderNo: remote.OrderNo, Status: "completed", Automatic: true, Amount: "20", Currency: "USD", CreatedAt: now, UpdatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+			owner := "quarantined@example.com"
+			allocationAccount(t, s, owner)
+			_, secret, err := s.store.GPTPayCard(pending.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paymentStatus := status
+			if status == "deleted" {
+				paymentStatus = "success"
+			}
+			order := gptpay.Order{ID: "quarantined-payment", Email: owner, CardID: pending.ID, Status: paymentStatus, CreatedAt: time.Now()}
+			if status != "unused" {
+				if err = s.store.CreateGPTPayOrder(order, gptpay.Snapshot{Input: gptpay.CreateInput{CardSecret: secret}}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if status == "deleted" {
-				if err = s.store.DeleteProAccount(order.Email); err != nil {
+				if err = s.store.EJHMarkRequested(owner, "manual", time.Now()); err != nil {
 					t.Fatal(err)
 				}
-			} else {
-				order.Status = status
-				if err = s.store.UpdateGPTPayOrder(order); err != nil {
+				if err = s.store.DeleteProAccount(owner); err != nil {
 					t.Fatal(err)
 				}
 			}
-			card, _, err := s.reserveProStartCard(context.Background(), email, "test-card", true, false)
-			if status == "failed" {
-				if err != nil || card.ID != "test-card" {
-					t.Fatal(card, err)
-				}
-				if err = s.store.ReleaseProCard(email); err != nil {
-					t.Fatal(err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), "暂停自动补卡") {
-				t.Fatal("abnormal hold bought a card", err)
-			}
-			if issued.Load() != 0 || paid.Load() != 0 {
-				t.Fatal("unexpected external mutation")
-			}
-			// A different usable card must still be preferred, even with a selected
-			// occupied card and another unresolved/deleted account in the history.
-			if status == "failed" {
-				return
-			}
-			alternative, err := s.store.SaveGPTPayCard(gptpay.Card{ID: "available-alternative", CardType: "ejh", Enabled: true}, gptpay.CardSecret{Number: "5555555555554444", Month: 12, Year: 2099, CVV: "123"})
-			if err != nil {
+			if _, err = s.store.SetEJHCardNormalPending(pending.ID, true); err != nil {
 				t.Fatal(err)
 			}
-			for _, selected := range []string{"", "test-card"} {
-				card, _, err = s.reserveProStartCard(context.Background(), email, selected, true, false)
-				if err != nil || card.ID != alternative.ID || issued.Load() != 0 || paid.Load() != 0 {
-					t.Fatal(card, err, issued.Load(), paid.Load())
+			before, _, err := s.store.GPTPayCard(pending.ID)
+			wantOccupants := 1
+			if status == "unused" {
+				wantOccupants = 0
+			}
+			if err != nil || !before.NormalPending || before.Available || len(before.Occupants) != wantOccupants {
+				t.Fatal("fixture must retain quarantined occupancy", before, err)
+			}
+			if _, _, err = s.reserveProStartCard(context.Background(), email, pending.ID, true, false); err == nil || !strings.Contains(err.Error(), "正常待定") {
+				t.Fatal("explicit pending selection was accepted", err)
+			}
+			card, _, err := s.reserveProStartCard(context.Background(), email, "", true, false)
+			if err != nil || card.ID == pending.ID || card.ID == "test-card" || issued.Load() != 1 || paid.Load() != 0 {
+				t.Fatal("quarantined history blocked unrelated issuance", card.ID, err, issued.Load(), paid.Load())
+			}
+			after, _, err := s.store.GPTPayCard(pending.ID)
+			if err != nil || !after.NormalPending || after.Available || len(after.Occupants) != wantOccupants || (wantOccupants > 0 && after.Occupants[0] != before.Occupants[0]) {
+				t.Fatal("quarantined occupancy was changed", after, err)
+			}
+			if status != "unused" {
+				saved, _, err := s.store.GPTPayOrder(order.ID)
+				if err != nil || saved.Status != paymentStatus || saved.OccupancyResolution != nil {
+					t.Fatal("original payment was resolved or rewritten", saved.Status, err)
 				}
-				if err = s.store.ReleaseProCard(email); err != nil {
-					t.Fatal(err)
-				}
+			}
+			if err = s.store.ReleaseProCard(email); err != nil {
+				t.Fatal(err)
+			}
+			again, _, err := s.reserveProStartCard(context.Background(), email, "", true, false)
+			if err != nil || again.ID != card.ID || issued.Load() != 1 || paid.Load() != 0 {
+				t.Fatal("repeated evaluation issued another card", again.ID, err)
 			}
 		})
 	}

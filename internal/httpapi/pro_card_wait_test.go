@@ -66,7 +66,7 @@ func TestCardPreparationLockBoundedAndCancelled(t *testing.T) {
 	}
 }
 
-func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterReview(t *testing.T) {
+func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterOpeningReview(t *testing.T) {
 	s, issued, paid, email := allocationFixture(t)
 	s.proAutoCancel()
 	s.proAutoWG.Wait()
@@ -77,9 +77,8 @@ func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterReview(t *testing.T) {
 	if _, err := s.store.SaveProSettings(p, "test-password", ""); err != nil {
 		t.Fatal(err)
 	}
-	order, _, _ := s.store.GPTPayOrder("resident-order")
-	order.Status = "manual_review"
-	if err := s.store.UpdateGPTPayOrder(order); err != nil {
+	op := ejh.Operation{ID: "unconfirmed-opening", Method: "open", Status: "unknown", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	if err := s.store.EJHPut("operation", op.ID, op); err != nil {
 		t.Fatal(err)
 	}
 	c := restock.DefaultConfig()
@@ -122,10 +121,10 @@ func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterReview(t *testing.T) {
 	if again.Status != "reserved" {
 		t.Fatal("monitor terminalized hold", again)
 	}
-	// Test-only authoritative resolution releases the original payment. The
-	// successor can reserve the matching card, without changing the old order.
-	order.Status = "failed"
-	if err = s.store.UpdateGPTPayOrder(order); err != nil {
+	// Test-only issuer evidence confirms the original opening was not executed.
+	// The same queued task may now issue once; old payment occupancy stays held.
+	op.Status, op.Resolution = "failed", "not_executed"
+	if err = s.store.EJHPut("operation", op.ID, op); err != nil {
 		t.Fatal(err)
 	}
 	again.Status = "submitting"
@@ -135,7 +134,7 @@ func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterReview(t *testing.T) {
 	}
 	ctx := context.WithValue(context.Background(), proRestockContextKey{}, task.ID)
 	card, _, err := s.reserveProStartCard(ctx, email, "", true, false)
-	if err != nil || card.ID != "test-card" || issued.Load() != 0 || paid.Load() != 0 {
+	if err != nil || card.ID == "test-card" || issued.Load() != 1 || paid.Load() != 0 {
 		t.Fatal("original task cannot resume", card, err)
 	}
 	_ = s.store.ReleaseProCard(email)

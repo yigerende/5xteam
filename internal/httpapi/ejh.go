@@ -885,26 +885,9 @@ func (s *Server) ensureEJHCard(ctx context.Context, admissionChecks ...func() er
 			return card, nil
 		}
 	}
-	cards, _, e = s.store.GPTPayCards(int(^uint(0)>>1), 0, false)
-	if e != nil {
-		return gptpay.Card{}, e
-	}
-	// An abnormal hold is not evidence that more cards are needed. Prefer any
-	// usable existing card above; otherwise stop before spending on issuance.
-	for _, card := range cards {
-		if card.CardType != "ejh" || !card.Enabled || card.IssuerStatus == "2" {
-			continue
-		}
-		for _, occupant := range card.Occupants {
-			if occupant.Deleted || occupant.Status == "submission_unknown" || occupant.Status == "manual_review" {
-				reason := "支付结果待核实"
-				if occupant.Deleted {
-					reason = "账号已删除，但原订单占用尚未解除"
-				}
-				return gptpay.Card{}, cardPreparationWait("EJH 卡尾号 %s 的账号 %s：%s（订单 %s）；请到 EJH 卡台点击“处理占用”，或在账号回款→未开通中核实后删除该记录，暂停自动补卡；本次未开卡、未付款，原任务等待核实后继续", card.Last4, occupant.Email, reason, occupant.OrderID)
-			}
-		}
-	}
+	// Selection above already excludes unavailable, pending and closed cards,
+	// and enforces the purchase template. If none qualifies, issue a new card;
+	// another card's historical occupancy must not block unrelated accounts.
 	if !pro.EJHAutoOpen {
 		return gptpay.Card{}, fmt.Errorf("无可用银行卡；EJH 自动补卡未启用")
 	}
@@ -943,25 +926,8 @@ func (s *Server) ensureEJHCard(ctx context.Context, admissionChecks ...func() er
 		if o.Automatic && o.Status == "failed" && o.Resolution != "not_executed" && o.ErrorCode != "100004" && o.ErrorCode != "800003" && time.Since(o.UpdatedAt) < 5*time.Minute {
 			return gptpay.Card{}, cardPreparationWait("自动开卡失败后冷却至 %s，本次未开卡，原任务等待后继续", o.UpdatedAt.Add(5*time.Minute).Format("15:04:05"))
 		}
-		if o.Automatic && o.Status == "completed" && o.CardID != "" {
-			if err := s.store.ReconcileEJHRejectedIncrease(o.CardID); err != nil {
-				return gptpay.Card{}, err
-			}
-			prior, _, err := s.store.GPTPayCard(o.CardID)
-			if err != nil {
-				return gptpay.Card{}, fmt.Errorf("自动开卡记录对应的银行卡 %s 无法读取，请先核实该卡，暂停自动补卡", o.CardID)
-			}
-			closed := prior.Source == "ejh" && prior.IssuerStatus == "2"
-			closing := prior.Source == "ejh" && prior.IssuerCancelStatus == "processing"
-			if (closed || closing) && ((!closing && prior.IssuerLocked) || prior.PendingAccounts > 0 || prior.ActiveAccounts > 0 || len(prior.Occupants) > 0) {
-				return gptpay.Card{}, fmt.Errorf("EJH 卡尾号 %s 已进入销卡流程，但仍有未决付款、账号占用或卡片资料待核实，暂停自动补卡", prior.Last4)
-			}
-			// Confirmed cancellation with no outstanding work permits replacement.
-			// It must still reach the daily count and amount accounting below.
-			if !prior.DeadAccount && !closed && !closing && prior.OpenedAccounts == 0 && prior.PendingAccounts == 0 && prior.ActiveAccounts == 0 && !prior.Available {
-				return gptpay.Card{}, fmt.Errorf("EJH 卡尾号 %s 尚无成功开通记录且当前不可用，请先核实该卡，暂停自动补卡", prior.Last4)
-			}
-		}
+		// Completed issuance history contributes to the daily budget only.
+		// Do not reconcile, release or reopen those cards during allocation.
 		if o.Method == "open" && (o.Status == "submitting" || o.Status == "unknown" || o.Status == "import_pending") {
 			return gptpay.Card{}, cardPreparationWait("存在未核实开卡（%s），先在 EJH 操作记录核对，原任务等待，禁止重复扣款", o.ID)
 		}
