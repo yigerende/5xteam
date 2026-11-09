@@ -1,1 +1,0 @@
-import{a as i,b as r,f as t,p as c,s as o,c as l,d as m,r as d,e as y,g as p}from"./index-wN3cqxzX.js";function f(n,e=Date.now()){const a=i(r(n)),s=t(a);return{finance:s,today:y(a,p(e)),reconciliation:d(a,e,600,s),balances:m(a.cards),usd:l(a.cards,a.operations),inFlight:o(a.cases,a.cards,a.operations,a.trades),paymentOnly:c(a,"ejh")}}export{f as calculateEJHOverview};

@@ -31,13 +31,18 @@ type proQualityFixture struct {
 	connectionTests int
 	connectionHook  func()
 	hook            func()
+	schedulable     bool
+	pauseCalls      int
+	pauseMode       string
+	pauseHook       func()
+	events          []string
 	cfg             model.ProSettings
 	policy          model.ProQualitySettings
 }
 
 func newProQualityFixture(t *testing.T, action string) *proQualityFixture {
 	t.Helper()
-	f := &proQualityFixture{proExecutionFixture: newProExecutionFixture(t), mode: "bad", groups: map[int64][]int64{42: {1, 9}}}
+	f := &proQualityFixture{proExecutionFixture: newProExecutionFixture(t), mode: "bad", schedulable: true, groups: map[int64][]int64{42: {1, 9}}}
 	// Drive polling explicitly; only merge jobs remain asynchronous.
 	f.s.stopProQuality()
 	f.s.stopProAutomations()
@@ -150,6 +155,31 @@ func newProQualityFixture(t *testing.T, action string) *proQualityFixture {
 			return
 		}
 		const prefix = "/api/v1/admin/accounts/"
+		if r.URL.Path == prefix+"42/schedulable" && r.Method == "POST" {
+			var input struct {
+				Schedulable *bool `json:"schedulable"`
+			}
+			if json.NewDecoder(r.Body).Decode(&input) != nil || input.Schedulable == nil || *input.Schedulable {
+				t.Error("expected account scheduling pause only")
+			}
+			f.mu.Lock()
+			f.pauseCalls++
+			f.events = append(f.events, "pause")
+			mode, hook := f.pauseMode, f.pauseHook
+			if mode != "fail" && mode != "ignored" {
+				f.schedulable = false
+			}
+			f.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
+			if mode == "fail" || mode == "ambiguous" {
+				http.Error(w, "pause response unavailable", 503)
+			} else {
+				reply(map[string]any{"id": 42})
+			}
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, prefix) {
 			id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, prefix), 10, 64)
 			f.mu.Lock()
@@ -160,7 +190,12 @@ func newProQualityFixture(t *testing.T, action string) *proQualityFixture {
 					http.Error(w, "verification unavailable", 503)
 					return
 				}
-				reply(map[string]any{"id": id, "group_ids": f.groups[id]})
+				f.events = append(f.events, "read")
+				if f.pauseMode == "missing" {
+					reply(map[string]any{"id": id, "group_ids": f.groups[id]})
+				} else {
+					reply(map[string]any{"id": id, "group_ids": f.groups[id], "schedulable": f.schedulable})
+				}
 				return
 			}
 			if r.Method == "PUT" {
@@ -170,6 +205,7 @@ func newProQualityFixture(t *testing.T, action string) *proQualityFixture {
 				_ = json.NewDecoder(r.Body).Decode(&body)
 				f.groups[id] = body.Groups
 				f.writes++
+				f.events = append(f.events, "groups")
 				if f.ambiguous {
 					f.ambiguous = false
 					f.failGroupRead = true

@@ -15,6 +15,7 @@ type ProQualitySettings struct {
 	ModelAuditEnabled   bool             `json:"model_audit_enabled"`
 	ConditionMode       string           `json:"condition_mode"`
 	Action              string           `json:"action"`
+	PauseBeforeAction   bool             `json:"pause_before_action"`
 	NormalGroupIDs      []int64          `json:"normal_group_ids"`
 	DegradedGroupIDs    []int64          `json:"degraded_group_ids"`
 	AutoRestore         bool             `json:"auto_restore"`

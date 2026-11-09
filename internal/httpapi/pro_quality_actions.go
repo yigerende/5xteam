@@ -143,6 +143,7 @@ func (s *Server) applyProQuality(ctx context.Context, initial model.MailAccountP
 		bad, recovered = state.Degraded, state.SourceRecovered
 	}
 	if q.Action == "siwc" && bad && proQualityCanAct(p) {
+		state.Action = "siwc"
 		_, err = s.store.UpdateProAccount(p.Email, func(p *model.MailAccountProfile) { p.ProQuality = state })
 		if err != nil {
 			return
@@ -153,6 +154,10 @@ func (s *Server) applyProQuality(ctx context.Context, initial model.MailAccountP
 				p.ProQuality.ActionStatus = "completed"
 				p.ProQuality.ActionError = ""
 			})
+			return
+		}
+		if err = s.pauseProQualityScheduling(ctx, p, q, c, password, state); err != nil {
+			s.recordProQualityPauseFailure(p, state, err)
 			return
 		}
 		if err = s.queueProSIWC(p, c, password); err != nil {
@@ -192,6 +197,10 @@ func (s *Server) applyProQuality(ctx context.Context, initial model.MailAccountP
 	}
 	if state.Action == "merge" {
 		if s.checkProAutoFinalStepAllowed() != nil {
+			return
+		}
+		if err = s.pauseProQualityScheduling(ctx, updated, q, c, password, state); err != nil {
+			s.recordProQualityPauseFailure(updated, state, err)
 			return
 		}
 		// Persist attempts before dispatch; a restart cannot create an unbounded retry loop.
@@ -246,6 +255,9 @@ func (s *Server) applyProQualityGroups(ctx context.Context, p model.MailAccountP
 			if readErr != nil || !proQualityCanAct(latest) || !proQualityEligible(latest, c) || proQualityIdentity(latest, c) != state.Identity || state.ValidUntil == nil || !time.Now().Before(*state.ValidUntil) {
 				err = errors.New("账号状态已变化或检测结果过期，本次切组已取消")
 			}
+		}
+		if err == nil && state.Action == "groups" {
+			err = s.pauseProQualityScheduling(ctx, p, q, c, password, state)
 		}
 		if err == nil {
 			// A timed out write can already have succeeded. Preserve unrelated groups
@@ -335,6 +347,9 @@ func (s *Server) checkProQualityMerge(ctx context.Context, p model.MailAccountPr
 	if !state.Degraded || !s.proQualityPolicyCurrent(q, c) {
 		return errors.New("最新结果未确认降智或配置已变化，取消本次自动合并")
 	}
+	if err = s.pauseProQualityScheduling(ctx, latest, q, c, password, state); err != nil {
+		return err
+	}
 	_, err = s.store.UpdateProAccount(p.Email, func(p *model.MailAccountProfile) { p.ProQuality.ActionStarted = true; p.ProMergeTrigger = "quality" })
 	return err
 }
@@ -362,6 +377,9 @@ func (s *Server) finishProQualityMerge(email string, request *proQualityMergeReq
 		}
 		if runErr != nil {
 			p.ProQuality.ActionStatus, p.ProQuality.ActionError = "failed", runErr.Error()
+			if errors.Is(runErr, errProQualitySchedulingPause) && !p.ProQuality.ActionStarted && !p.DispositionStarted() {
+				p.ProQuality.MergeAttempts = max(0, p.ProQuality.MergeAttempts-1)
+			}
 		} else if p.MerchantStarted() && !p.MerchantCompleted() {
 			p.ProQuality.ActionStatus, p.ProQuality.ActionError = "pending", "商户已提交，等待最终处理结果"
 		} else if p.DeletionSubmitted() && !p.DeletionAccepted() {

@@ -13,7 +13,7 @@ const expanded = ref(new Set())
 let generation = 0
 let request
 let observer
-const labels = { quality_result: '降智结果', quality_action: '降智处理', login: '首次登录', recharge: '开通 Pro', oauth: '获取新 RT/AT', merge: '自动合并', invite: '邀请空间', accept: '进入空间', transfer: '合并空间', remove: '移出空间', post_merge_groups: '移出后调整分组', space_merge: '四步流程', credentials: '准备凭据', push: '推送', quota: '额度查询', stage: '手动修正' }
+const labels = { quality_result: '降智结果', quality_action: '降智处理', quality_scheduling: '降智暂停调度', login: '首次登录', recharge: '开通 Pro', oauth: '获取新 RT/AT', merge: '自动合并', invite: '邀请空间', accept: '进入空间', transfer: '合并空间', remove: '移出空间', post_merge_groups: '移出后调整分组', space_merge: '四步流程', credentials: '准备凭据', push: '推送', quota: '额度查询', stage: '手动修正' }
 const statuses = { running: '执行中', completed: '成功', failed: '失败', unknown: '待确认', pending: '待处理', not_started: '未开始' }
 const label = event => labels[event.stage] || labels[event.operation] || event.stage || event.type
 const path = account => `${props.endpointPrefix}/${encodeURIComponent(account.email)}/events`

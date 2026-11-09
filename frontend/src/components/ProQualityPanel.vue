@@ -68,6 +68,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         <div class="field"><span>检测条件</span><label class="quality-check"><input v-model="form.question_enabled" type="checkbox" />答题已确认异常</label><label class="quality-check"><input v-model="form.model_audit_enabled" type="checkbox" />模型已确认不一致</label></div>
         <label class="field"><span>触发条件</span><select v-model="form.condition_mode"><option value="any">任一勾选条件满足</option><option value="all">所有勾选条件同时满足</option></select></label>
         <label class="field"><span>降智后处理</span><select v-model="form.action" aria-label="降智后处理"><option value="groups">切换分组</option><option value="merge">按配置执行合并/删除/API 商户</option><option value="siwc">推送 SIWC</option></select></label>
+        <div class="field"><span>处理前暂停调度</span><label class="quality-check"><input v-model="form.pause_before_action" type="checkbox" />达到降智条件后，先暂停该账号的 Sub2 调度</label><small>确认暂停后才执行降智后处理；暂停失败记录原因并在下轮检测重试。仅暂停当前账号，恢复分组不会自动恢复调度。</small></div>
         <label class="field"><span>结果处理并发</span><input v-model.number="form.concurrency" type="number" min="1" max="8" required /><small>空间合并仍按合并并发执行，同母号串行。</small></label>
       </div>
       <div v-if="form.action === 'groups' || form.action === 'siwc'" class="quality-groups">
