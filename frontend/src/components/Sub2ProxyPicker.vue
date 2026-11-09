@@ -110,6 +110,7 @@ onBeforeUnmount(cancel)
       <p v-else-if="!loading && !error">点击“刷新代理”读取列表和绑定账号数。</p>
       <div v-for="id in missing" :key="id" class="proxy-missing">已选代理 #{{ id }} 已禁用、删除或不可见 <button class="btn ghost compact" type="button" :disabled="disabled" @click="toggle(id, false)">取消选择</button></div>
       <p v-if="!selectedIDs.length" class="proxy-error">请至少选择一个代理；开启后无可用代理会停止推送。</p>
+      <p>推送时优先选择累计绑定次数最少的可用代理，待确认预占计入次数，并列时随机。</p>
       <p>当前绑定：Sub2 所有未删除账号（含已禁用账号）。累计次数由 Space 保存，删除账号、代理改名或重新导入不会清零。</p>
       <p>首次记录以现有绑定数量为基数，之前已删除的历史绑定可手动补录。同一下游、协议、地址、端口和用户名视为同一个代理。</p>
     </template>

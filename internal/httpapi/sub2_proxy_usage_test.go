@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,100 @@ import (
 	"chatgpt-space-merge/internal/store"
 	"chatgpt-space-merge/internal/sub2"
 )
+
+func TestSub2ProxySelectionUsesLifetimeUsageAndPending(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	secondID := int64(2)
+	uncertain := false
+	var chosen []int64
+	var keys []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/login":
+			fmt.Fprint(w, `{"code":0,"data":{"access_token":"admin"}}`)
+		case "/api/v1/admin/proxies/all":
+			// The lifetime preference must win even when the live count is higher.
+			fmt.Fprintf(w, `{"code":0,"data":[{"id":1,"host":"first.example","port":8080,"status":"active","account_count":0},{"id":%d,"host":"second.example","port":8080,"status":"active","account_count":7}]}`, secondID)
+		case "/api/v1/admin/accounts":
+			var input struct {
+				ProxyID *int64 `json:"proxy_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.ProxyID == nil {
+				t.Errorf("invalid create payload: %v", err)
+				http.Error(w, "invalid payload", 400)
+				return
+			}
+			chosen = append(chosen, *input.ProxyID)
+			keys = append(keys, r.Header.Get("Idempotency-Key"))
+			if uncertain {
+				http.Error(w, "timeout", 502)
+				return
+			}
+			fmt.Fprintf(w, `{"code":0,"data":{"id":%d}}`, 100+len(chosen))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer up.Close()
+	s := &Server{store: st, sub2: sub2.New()}
+	cfg := model.Sub2Settings{URL: up.URL, Email: "admin@example.test", BindProxy: true, ProxyIDs: []int64{1, 2}}
+	firstKey := sub2.ProxyBindingKey("http", "first.example", 8080, "")
+	secondKey := sub2.ProxyBindingKey("http", "second.example", 8080, "")
+	if _, err = st.Sub2ProxyUsages(up.URL, map[string]int64{firstKey: 6, secondKey: 2}); err != nil {
+		t.Fatal(err)
+	}
+	create := func(scope string) error {
+		_, e := s.createSub2WithProxy(context.Background(), cfg, "secret", sub2.CreateAccountInput{Name: scope, GroupIDs: []int64{1}}, scope, "legacy", quietProxyLog)
+		return e
+	}
+	for _, scope := range []string{"team:first", "pro:reimported"} {
+		if err = create(scope); err != nil {
+			t.Fatal(err)
+		}
+		s.completeSub2Push(cfg, scope)
+		secondID = 99
+		cfg.ProxyIDs = []int64{1, 99}
+	}
+	if !reflect.DeepEqual(chosen, []int64{2, 99}) {
+		t.Fatalf("live count or reimport overrode lifetime usage: %v", chosen)
+	}
+	usage, err := st.Sub2ProxyUsages(up.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.SetSub2ProxyUsage(up.URL, firstKey, 0, usage[firstKey].Revision); err != nil {
+		t.Fatal(err)
+	}
+	uncertain = true
+	if err = create("pro:uncertain"); err == nil {
+		t.Fatal("expected ambiguous create")
+	}
+	// A pending create reserves one lifetime use, even with an unlimited quota.
+	if err = st.SetSub2ProxyUsage(up.URL, secondKey, 0, usage[secondKey].Revision); err != nil {
+		t.Fatal(err)
+	}
+	uncertain = false
+	if err = create("team:after-edit"); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh server retries the original request despite newer counts/selections.
+	s = &Server{store: st, sub2: sub2.New()}
+	cfg.ProxyIDs = []int64{99}
+	if err = create("pro:uncertain"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(chosen, []int64{2, 99, 1, 99, 1}) || keys[2] != keys[4] {
+		t.Fatalf("selection or original request changed: %v", chosen)
+	}
+	usage, err = st.Sub2ProxyUsages(up.URL, nil)
+	if err != nil || usage[firstKey].Count != 1 || usage[secondKey].Count != 1 || usage[firstKey].Pending != 0 {
+		t.Fatalf("incorrect completed/pending counts: %+v, %v", usage, err)
+	}
+}
 
 func TestSub2ProxyCumulativeReimportManualEditAndPending(t *testing.T) {
 	st, err := store.Open(t.TempDir())

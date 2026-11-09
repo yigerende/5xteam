@@ -18,9 +18,9 @@ func TestSelectProxyCountsAvailabilityAndTies(t *testing.T) {
 	past, future := now.Add(-time.Second), now.Add(time.Hour)
 	zero, two, nine, negative := 0, 2, 9, -1
 	proxies := []Proxy{
-		{ID: 1, Status: "active", AccountCount: &nine},
-		{ID: 2, Status: "active", AccountCount: &two, ExpiresAt: &future},
-		{ID: 3, Status: "active", AccountCount: &two},
+		{ID: 1, Status: "active", AccountCount: &zero, CumulativeBindings: 9},
+		{ID: 2, Status: "active", AccountCount: &nine, CumulativeBindings: 2, ExpiresAt: &future},
+		{ID: 3, Status: "active", AccountCount: &two, CumulativeBindings: 1, PendingBindings: 1},
 		{ID: 4, Status: "active", AccountCount: &zero, ExpiresAt: &past},
 		{ID: 5, Status: "disabled", AccountCount: &zero},
 		{ID: 6, Status: "active"},

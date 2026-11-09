@@ -37,7 +37,7 @@ func newLivePushRemote(t *testing.T) *livePushRemote {
 			fmt.Fprint(w, `{"code":0,"data":{"access_token":"fixture-admin"}}`)
 		case "/api/v1/admin/proxies/all":
 			f.lists++
-			fmt.Fprint(w, `{"code":0,"data":[{"id":26,"status":"active","account_count":3},{"id":35,"status":"active","account_count":0},{"id":25,"status":"active","account_count":0}]}`)
+			fmt.Fprint(w, `{"code":0,"data":[{"id":26,"host":"proxy26.example","port":8080,"status":"active","account_count":3},{"id":35,"host":"proxy35.example","port":8080,"status":"active","account_count":0},{"id":25,"host":"proxy25.example","port":8080,"status":"active","account_count":0}]}`)
 		case "/api/v1/admin/accounts":
 			if r.Method != http.MethodPost {
 				t.Errorf("unexpected method: %s", r.Method)

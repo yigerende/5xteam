@@ -123,7 +123,7 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 			return sub2.Account{}, err
 		}
 		if settings.BindProxy {
-			log("已选择绑定数最少的 Sub2 代理（并列时随机）", map[string]any{"proxy_id": proxy.ID, "proxy_name": proxy.Name, "account_count": *proxy.AccountCount, "tied_candidates": ties})
+			log("已选择累计绑定次数最少的 Sub2 代理（含待确认预占，并列时随机）", map[string]any{"proxy_id": proxy.ID, "proxy_name": proxy.Name, "account_count": *proxy.AccountCount, "cumulative_bindings": proxy.CumulativeBindings, "pending_bindings": proxy.PendingBindings, "tied_candidates": ties})
 		}
 	}
 	created, err := s.sub2.CreateAccount(ctx, settings, password, attempt.Input, attempt.Key)

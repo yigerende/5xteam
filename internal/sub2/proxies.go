@@ -77,7 +77,8 @@ func (c *Client) Proxies(ctx context.Context, settings model.Sub2Settings, passw
 	return proxies, nil
 }
 
-// SelectProxy uses the server's current count of all undeleted bound accounts.
+// SelectProxy balances lifetime bindings, including unresolved reservations.
+// Current account counts remain an availability check, not a selection weight.
 func SelectProxy(proxies []Proxy, ids []int64, now time.Time) (Proxy, int, error) {
 	selected := map[int64]bool{}
 	for _, id := range ids {
@@ -95,9 +96,10 @@ func SelectProxy(proxies []Proxy, ids []int64, now time.Time) (Proxy, int, error
 			continue
 		}
 		seen[p.ID] = true
-		if len(candidates) == 0 || *p.AccountCount < *candidates[0].AccountCount {
+		count := p.CumulativeBindings + p.PendingBindings
+		if len(candidates) == 0 || count < candidates[0].CumulativeBindings+candidates[0].PendingBindings {
 			candidates = []Proxy{p}
-		} else if *p.AccountCount == *candidates[0].AccountCount {
+		} else if count == candidates[0].CumulativeBindings+candidates[0].PendingBindings {
 			candidates = append(candidates, p)
 		}
 	}

@@ -44,7 +44,7 @@ func TestSub2ProxyConcurrentTeamAndProCreates(t *testing.T) {
 				t.Error("overlapping count-read/create sequences")
 			}
 			listCalls.Add(1)
-			fmt.Fprintf(w, `{"code":0,"data":[{"id":1,"status":"active","account_count":%d},{"id":2,"status":"active","account_count":%d},{"id":3,"status":"active","account_count":%d}]}`, counts[1], counts[2], counts[3])
+			fmt.Fprintf(w, `{"code":0,"data":[{"id":1,"host":"one.example","port":8080,"status":"active","account_count":%d},{"id":2,"host":"two.example","port":8080,"status":"active","account_count":%d},{"id":3,"host":"three.example","port":8080,"status":"active","account_count":%d}]}`, counts[1], counts[2], counts[3])
 		case "/api/v1/admin/accounts":
 			var body struct {
 				ProxyID int64 `json:"proxy_id"`
