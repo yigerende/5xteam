@@ -77,8 +77,9 @@ func (c *Client) Proxies(ctx context.Context, settings model.Sub2Settings, passw
 	return proxies, nil
 }
 
-// SelectProxy balances lifetime bindings, including unresolved reservations.
-// Current account counts remain an availability check, not a selection weight.
+// SelectProxy balances current accounts first, then lifetime bindings, with
+// random choice only when both counts tie. Unresolved reservations count toward
+// both totals so an unconfirmed create does not make a busy proxy look unused.
 func SelectProxy(proxies []Proxy, ids []int64, now time.Time) (Proxy, int, error) {
 	selected := map[int64]bool{}
 	for _, id := range ids {
@@ -90,16 +91,19 @@ func SelectProxy(proxies []Proxy, ids []int64, now time.Time) (Proxy, int, error
 		return Proxy{}, 0, errors.New("已开启绑定代理，请至少选择一个 Sub2 代理")
 	}
 	candidates := []Proxy{}
+	var leastCurrent, leastLifetime int64
 	seen := map[int64]bool{}
 	for _, p := range proxies {
 		if !selected[p.ID] || seen[p.ID] || !p.Available(now) {
 			continue
 		}
 		seen[p.ID] = true
-		count := p.CumulativeBindings + p.PendingBindings
-		if len(candidates) == 0 || count < candidates[0].CumulativeBindings+candidates[0].PendingBindings {
+		current := int64(*p.AccountCount) + p.PendingBindings
+		lifetime := p.CumulativeBindings + p.PendingBindings
+		if len(candidates) == 0 || current < leastCurrent || (current == leastCurrent && lifetime < leastLifetime) {
 			candidates = []Proxy{p}
-		} else if count == candidates[0].CumulativeBindings+candidates[0].PendingBindings {
+			leastCurrent, leastLifetime = current, lifetime
+		} else if current == leastCurrent && lifetime == leastLifetime {
 			candidates = append(candidates, p)
 		}
 	}

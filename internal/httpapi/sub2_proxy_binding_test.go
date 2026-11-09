@@ -65,6 +65,14 @@ func TestSub2ProxyConcurrentTeamAndProCreates(t *testing.T) {
 	defer upstream.Close()
 	s := &Server{store: st, sub2: sub2.New()}
 	settings := model.Sub2Settings{URL: upstream.URL, Email: "admin@example.test", BindProxy: true, ProxyIDs: []int64{1, 2, 3}}
+	// An uneven lifetime history must not concentrate new concurrent bindings.
+	if _, err := st.Sub2ProxyUsages(upstream.URL, map[string]int64{
+		sub2.ProxyBindingKey("http", "one.example", 8080, ""):   100,
+		sub2.ProxyBindingKey("http", "two.example", 8080, ""):   2,
+		sub2.ProxyBindingKey("http", "three.example", 8080, ""): 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var wg sync.WaitGroup
 	for i := range 12 {
 		wg.Add(1)

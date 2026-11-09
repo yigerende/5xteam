@@ -16,7 +16,63 @@ import (
 	"chatgpt-space-merge/internal/sub2"
 )
 
-func TestSub2ProxySelectionUsesLifetimeUsageAndPending(t *testing.T) {
+func TestSub2ProxyNewPushesUseFreshCurrentCountsBeforeLifetime(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	counts := map[int64]int{1: 0, 2: 1}
+	var chosen []int64
+	listCalls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/login":
+			fmt.Fprint(w, `{"code":0,"data":{"access_token":"admin"}}`)
+		case "/api/v1/admin/proxies/all":
+			listCalls++
+			fmt.Fprintf(w, `{"code":0,"data":[{"id":1,"host":"first.example","port":8080,"status":"active","account_count":%d},{"id":2,"host":"second.example","port":8080,"status":"active","account_count":%d}]}`, counts[1], counts[2])
+		case "/api/v1/admin/accounts":
+			var input struct {
+				ProxyID int64 `json:"proxy_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || (input.ProxyID != 1 && input.ProxyID != 2) {
+				t.Errorf("invalid proxy selection: %+v %v", input, err)
+				http.Error(w, "invalid proxy", 400)
+				return
+			}
+			chosen = append(chosen, input.ProxyID)
+			counts[input.ProxyID]++
+			fmt.Fprintf(w, `{"code":0,"data":{"id":%d}}`, 100+len(chosen))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer up.Close()
+	s := &Server{store: st, sub2: sub2.New()}
+	cfg := model.Sub2Settings{URL: up.URL, Email: "admin@example.test", BindProxy: true, ProxyIDs: []int64{1, 2}}
+	if _, err = st.Sub2ProxyUsages(up.URL, map[string]int64{
+		sub2.ProxyBindingKey("http", "first.example", 8080, ""):  7,
+		sub2.ProxyBindingKey("http", "second.example", 8080, ""): 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i, scope := range []string{"team:new", "pro:new", "pro-siwc:new"} {
+		if i == 2 {
+			// A manual reassignment on the downstream must affect the next push.
+			counts[1], counts[2] = 2, 0
+		}
+		if _, err = s.createSub2WithProxy(context.Background(), cfg, "secret", sub2.CreateAccountInput{Name: scope, GroupIDs: []int64{1}}, scope, "legacy", quietProxyLog); err != nil {
+			t.Fatal(err)
+		}
+		s.completeSub2Push(cfg, scope)
+	}
+	if !reflect.DeepEqual(chosen, []int64{1, 2, 2}) || listCalls != 3 {
+		t.Fatalf("current counts, lifetime tie-break or fresh lookup ignored: choices=%v listCalls=%d", chosen, listCalls)
+	}
+}
+
+func TestSub2ProxySelectionUsesLifetimeWithinEqualCurrentCountsAndPending(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -31,8 +87,8 @@ func TestSub2ProxySelectionUsesLifetimeUsageAndPending(t *testing.T) {
 		case "/api/v1/auth/login":
 			fmt.Fprint(w, `{"code":0,"data":{"access_token":"admin"}}`)
 		case "/api/v1/admin/proxies/all":
-			// The lifetime preference must win even when the live count is higher.
-			fmt.Fprintf(w, `{"code":0,"data":[{"id":1,"host":"first.example","port":8080,"status":"active","account_count":0},{"id":%d,"host":"second.example","port":8080,"status":"active","account_count":7}]}`, secondID)
+			// Equal current counts allow lifetime usage to break the tie.
+			fmt.Fprintf(w, `{"code":0,"data":[{"id":1,"host":"first.example","port":8080,"status":"active","account_count":0},{"id":%d,"host":"second.example","port":8080,"status":"active","account_count":0}]}`, secondID)
 		case "/api/v1/admin/accounts":
 			var input struct {
 				ProxyID *int64 `json:"proxy_id"`
@@ -74,7 +130,7 @@ func TestSub2ProxySelectionUsesLifetimeUsageAndPending(t *testing.T) {
 		cfg.ProxyIDs = []int64{1, 99}
 	}
 	if !reflect.DeepEqual(chosen, []int64{2, 99}) {
-		t.Fatalf("live count or reimport overrode lifetime usage: %v", chosen)
+		t.Fatalf("equal current counts or reimport lost lifetime preference: %v", chosen)
 	}
 	usage, err := st.Sub2ProxyUsages(up.URL, nil)
 	if err != nil {
@@ -87,7 +143,7 @@ func TestSub2ProxySelectionUsesLifetimeUsageAndPending(t *testing.T) {
 	if err = create("pro:uncertain"); err == nil {
 		t.Fatal("expected ambiguous create")
 	}
-	// A pending create reserves one lifetime use, even with an unlimited quota.
+	// A pending create reserves current occupancy and lifetime use, even with an unlimited quota.
 	if err = st.SetSub2ProxyUsage(up.URL, secondKey, 0, usage[secondKey].Revision); err != nil {
 		t.Fatal(err)
 	}

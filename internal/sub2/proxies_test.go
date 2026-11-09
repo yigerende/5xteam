@@ -19,17 +19,19 @@ func TestSelectProxyCountsAvailabilityAndTies(t *testing.T) {
 	zero, two, nine, negative := 0, 2, 9, -1
 	proxies := []Proxy{
 		{ID: 1, Status: "active", AccountCount: &zero, CumulativeBindings: 9},
-		{ID: 2, Status: "active", AccountCount: &nine, CumulativeBindings: 2, ExpiresAt: &future},
-		{ID: 3, Status: "active", AccountCount: &two, CumulativeBindings: 1, PendingBindings: 1},
+		{ID: 2, Status: "active", AccountCount: &zero, CumulativeBindings: 2, ExpiresAt: &future},
+		{ID: 3, Status: "active", AccountCount: &zero, CumulativeBindings: 2},
 		{ID: 4, Status: "active", AccountCount: &zero, ExpiresAt: &past},
 		{ID: 5, Status: "disabled", AccountCount: &zero},
 		{ID: 6, Status: "active"},
 		{ID: 7, Status: "active", AccountCount: &negative},
 		{ID: 8, Status: "active", AccountCount: &zero},
+		{ID: 9, Status: "active", AccountCount: &nine},
+		{ID: 10, Status: "active", AccountCount: &two},
 	}
 	seen := map[int64]bool{}
 	for range 128 {
-		p, ties, err := SelectProxy(proxies, []int64{1, 2, 2, 3, 4, 5, 6, 7}, now)
+		p, ties, err := SelectProxy(proxies, []int64{1, 2, 2, 3, 4, 5, 6, 7, 9, 10}, now)
 		if err != nil || ties != 2 || (p.ID != 2 && p.ID != 3) {
 			t.Fatalf("selection=%+v ties=%d err=%v", p, ties, err)
 		}
@@ -45,6 +47,34 @@ func TestSelectProxyCountsAvailabilityAndTies(t *testing.T) {
 	}
 	if p, ties, err := SelectProxy(proxies, []int64{1, 2}, now); err != nil || p.ID != 2 || ties != 1 {
 		t.Fatal("minimum count not selected")
+	}
+}
+
+func TestSelectProxyCurrentCountBeforeLifetime(t *testing.T) {
+	zero, one, two := 0, 1, 2
+	for _, tc := range []struct {
+		name   string
+		first  Proxy
+		second Proxy
+		want   int64
+	}{
+		{"unused before lower lifetime", Proxy{AccountCount: &zero, CumulativeBindings: 7}, Proxy{AccountCount: &two, CumulativeBindings: 2}, 1},
+		{"fewer current before lower lifetime", Proxy{AccountCount: &two, CumulativeBindings: 2}, Proxy{AccountCount: &one, CumulativeBindings: 9}, 2},
+		{"same current uses lifetime", Proxy{AccountCount: &one, CumulativeBindings: 7}, Proxy{AccountCount: &one, CumulativeBindings: 2}, 2},
+		{"pending is current occupancy", Proxy{AccountCount: &zero, PendingBindings: 1}, Proxy{AccountCount: &zero, CumulativeBindings: 7}, 2},
+		{"same effective current uses lifetime", Proxy{AccountCount: &zero, PendingBindings: 1, CumulativeBindings: 3}, Proxy{AccountCount: &one, CumulativeBindings: 2}, 2},
+		{"full lifetime quota excluded first", Proxy{AccountCount: &zero, BindingKey: "full", BindingLimit: 7, CumulativeBindings: 7}, Proxy{AccountCount: &two, BindingKey: "available", BindingLimit: 7, CumulativeBindings: 2}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.first.ID, tc.second.ID = 1, 2
+			tc.first.Status, tc.second.Status = "active", "active"
+			for _, proxies := range [][]Proxy{{tc.first, tc.second}, {tc.second, tc.first}} {
+				p, ties, err := SelectProxy(proxies, []int64{1, 2}, time.Now())
+				if err != nil || p.ID != tc.want || ties != 1 {
+					t.Fatalf("selected=%d ties=%d err=%v; want=%d", p.ID, ties, err, tc.want)
+				}
+			}
+		})
 	}
 }
 
