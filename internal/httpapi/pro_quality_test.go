@@ -74,6 +74,9 @@ func newProQualityFixture(t *testing.T, action string) *proQualityFixture {
 				hook()
 			}
 			if mode == "error" {
+				// Production polls are seconds apart. Keep synthetic query samples
+				// distinct even on Windows clocks with a coarse time resolution.
+				time.Sleep(20 * time.Millisecond)
 				http.Error(w, "upstream unavailable", 503)
 				return
 			}
@@ -150,7 +153,12 @@ func newProQualityFixture(t *testing.T, action string) *proQualityFixture {
 			case "empty":
 				fmt.Fprint(w, "data: {\"type\":\"test_complete\",\"success\":true}\n\n")
 			default:
-				fmt.Fprint(w, "data: {\"type\":\"error\",\"error\":\"API returned 401: unauthorized\"}\n\n")
+				code := 429
+				if strings.HasPrefix(mode, "upstream_") && mode != "upstream_error" {
+					code, _ = strconv.Atoi(strings.TrimPrefix(mode, "upstream_"))
+				}
+				payload, _ := json.Marshal(map[string]string{"type": "error", "error": fmt.Sprintf("API returned %d: fixture upstream error", code)})
+				fmt.Fprintf(w, "data: %s\n\n", payload)
 			}
 			return
 		}

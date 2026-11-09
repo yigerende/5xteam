@@ -2,31 +2,34 @@ package model
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 )
 
 // Pro uses its own connection and policy; Team rotation settings are independent.
 type ProQualitySettings struct {
-	Enabled             bool             `json:"enabled"`
-	PollIntervalSeconds int              `json:"poll_interval_seconds"`
-	MaxResultAgeSeconds int              `json:"max_result_age_seconds"`
-	ErrorFailureLimit   int              `json:"error_failure_limit"`
-	QuestionEnabled     bool             `json:"question_enabled"`
-	ModelAuditEnabled   bool             `json:"model_audit_enabled"`
-	ConditionMode       string           `json:"condition_mode"`
-	Action              string           `json:"action"`
-	PauseBeforeAction   bool             `json:"pause_before_action"`
-	NormalGroupIDs      []int64          `json:"normal_group_ids"`
-	DegradedGroupIDs    []int64          `json:"degraded_group_ids"`
-	AutoRestore         bool             `json:"auto_restore"`
-	RecoveryLimit       int              `json:"recovery_limit"`
-	Concurrency         int              `json:"concurrency"`
-	Revision            string           `json:"revision"`
-	Downstream          ProDownstreamRef `json:"downstream"`
+	Enabled                       bool             `json:"enabled"`
+	PollIntervalSeconds           int              `json:"poll_interval_seconds"`
+	MaxResultAgeSeconds           int              `json:"max_result_age_seconds"`
+	ErrorFailureLimit             int              `json:"error_failure_limit"`
+	ConnectionFailureHTTPStatuses string           `json:"connection_failure_http_statuses"`
+	QuestionEnabled               bool             `json:"question_enabled"`
+	ModelAuditEnabled             bool             `json:"model_audit_enabled"`
+	ConditionMode                 string           `json:"condition_mode"`
+	Action                        string           `json:"action"`
+	PauseBeforeAction             bool             `json:"pause_before_action"`
+	NormalGroupIDs                []int64          `json:"normal_group_ids"`
+	DegradedGroupIDs              []int64          `json:"degraded_group_ids"`
+	AutoRestore                   bool             `json:"auto_restore"`
+	RecoveryLimit                 int              `json:"recovery_limit"`
+	Concurrency                   int              `json:"concurrency"`
+	Revision                      string           `json:"revision"`
+	Downstream                    ProDownstreamRef `json:"downstream"`
 }
 
 func DefaultProQualitySettings() ProQualitySettings {
-	return ProQualitySettings{PollIntervalSeconds: 60, MaxResultAgeSeconds: 900, ErrorFailureLimit: 2, QuestionEnabled: true,
+	return ProQualitySettings{PollIntervalSeconds: 60, MaxResultAgeSeconds: 900, ErrorFailureLimit: 2, ConnectionFailureHTTPStatuses: "429,502,503", QuestionEnabled: true,
 		ConditionMode: "any", Action: "merge", RecoveryLimit: 2, Concurrency: 4,
 		NormalGroupIDs: []int64{}, DegradedGroupIDs: []int64{}}
 }
@@ -45,6 +48,9 @@ func (q ProQualitySettings) DecisionSettings() QualitySettings {
 }
 
 func (q ProQualitySettings) Validate() error {
+	if _, err := q.ConnectionFailureStatuses(); err != nil {
+		return err
+	}
 	if q.ErrorFailureLimit < 1 || q.ErrorFailureLimit > 20 {
 		return errors.New("连续检测失败次数应为 1～20 次")
 	}
@@ -55,6 +61,41 @@ func (q ProQualitySettings) Validate() error {
 		return errors.New("查询间隔至少 10 秒，结果有效期至少 30 秒")
 	}
 	return q.DecisionSettings().Validate()
+}
+
+// Missing/blank values retain the default for existing saved policies and clients.
+func (q ProQualitySettings) ConnectionFailureStatuses() ([]int, error) {
+	raw := strings.TrimSpace(q.ConnectionFailureHTTPStatuses)
+	if raw == "" {
+		raw = "429,502,503"
+	}
+	var statuses []int
+	seen := map[int]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		code, err := strconv.Atoi(part)
+		if err != nil || len(part) != 3 || code < 400 || code > 599 {
+			return nil, errors.New("复核降智状态码须为400～599的三位整数，多个用英文逗号分隔")
+		}
+		if !seen[code] {
+			statuses = append(statuses, code)
+			seen[code] = true
+		}
+	}
+	return statuses, nil
+}
+
+func (q ProQualitySettings) ConnectionFailureMatches(code int) bool {
+	statuses, err := q.ConnectionFailureStatuses()
+	if err != nil {
+		return false
+	}
+	for _, allowed := range statuses {
+		if allowed == code {
+			return true
+		}
+	}
+	return false
 }
 
 type ProQualityState struct {

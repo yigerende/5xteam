@@ -23,7 +23,7 @@ const tone = computed(() => ({ normal: 'success', degraded: 'danger', error: 'da
       <span v-if="q.source_question_at">答题时间：{{ formatTime(q.source_question_at) }}</span>
       <span v-if="q.source_model_at">模型时间：{{ formatTime(q.source_model_at) }}</span>
       <span v-if="q.fetched_at">查询时间：{{ formatTime(q.fetched_at) }}</span>
-      <span v-if="q.connection_check">连接复核：{{ q.connection_check.status === 'normal' ? '正常' : '失败' }} · {{ formatTime(q.connection_check.checked_at) }}</span>
+      <span v-if="q.connection_check">连接复核：{{ q.connection_check.status === 'normal' ? '正常' : q.connection_check.status === 'unconfirmed' ? '未确认降智' : '失败' }}<template v-if="q.connection_check.http_status"> · HTTP {{ q.connection_check.http_status }}</template> · {{ formatTime(q.connection_check.checked_at) }}</span>
       <span v-if="q.model_audit?.response_model">返回模型：{{ q.model_audit.response_model }}</span>
       <span v-if="q.reason">{{ q.reason }}</span><span v-if="q.error" class="danger-text">{{ q.error }}</span><span v-if="q.action_error" class="danger-text">{{ q.action_error }}</span>
     </div></details>

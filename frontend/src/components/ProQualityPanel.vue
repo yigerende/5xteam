@@ -64,7 +64,8 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
       <div class="quality-fields">
         <label class="field"><span>查询间隔（秒）</span><input v-model.number="form.poll_interval_seconds" type="number" min="10" max="86400" required /></label>
         <label class="field"><span>结果有效期（秒）</span><input v-model.number="form.max_result_age_seconds" type="number" min="30" max="86400" required /></label>
-        <label class="field"><span>连续检测失败次数</span><input v-model.number="form.error_failure_limit" aria-label="连续检测失败次数" type="number" min="1" max="20" step="1" required /><small>默认 2 次，达限后先测试该账号连接；正常则恢复并清零，仍失败才执行降智处理。</small></label>
+        <label class="field"><span>连续检测失败次数</span><input v-model.number="form.error_failure_limit" aria-label="连续检测失败次数" type="number" min="1" max="20" step="1" required /><small>默认 2 次，达限后先测试该账号连接；正常则恢复并清零，复核命中配置状态码才执行降智处理。</small></label>
+        <label class="field"><span>复核降智状态码</span><input v-model="form.connection_failure_http_statuses" aria-label="复核降智状态码" type="text" placeholder="429,502,503" /><small>默认 429,502,503，多个用英文逗号分隔，留空使用默认值。复核上游状态码命中才按降智处理；其他错误记录后等待下次检测。</small></label>
         <div class="field"><span>检测条件</span><label class="quality-check"><input v-model="form.question_enabled" type="checkbox" />答题已确认异常</label><label class="quality-check"><input v-model="form.model_audit_enabled" type="checkbox" />模型已确认不一致</label></div>
         <label class="field"><span>触发条件</span><select v-model="form.condition_mode"><option value="any">任一勾选条件满足</option><option value="all">所有勾选条件同时满足</option></select></label>
         <label class="field"><span>降智后处理</span><select v-model="form.action" aria-label="降智后处理"><option value="groups">切换分组</option><option value="merge">按配置执行合并/删除/API 商户</option><option value="siwc">推送 SIWC</option></select></label>
@@ -83,7 +84,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         <label v-if="form.action === 'groups'" class="quality-check"><input v-model="form.auto_restore" type="checkbox" />恢复正常后自动恢复原分组</label>
         <label v-if="form.auto_restore" class="field recovery-count"><span>连续正常次数</span><input v-model.number="form.recovery_limit" type="number" min="1" max="20" required /></label>
       </div>
-      <p class="table-note">{{ form.action === 'siwc' ? '降智后转入 SIWC。已直接推送 SIWC 的账号只更新检测结果，不重复转入；未选择移除分组时移除原推送分组。' : form.action === 'merge' ? '确认降智后，跳过额度等待，执行全自动配置的最后一步。' : '确认降智后切组，保留其他分组；切组失败下次查询重试。' }} 连续检测失败达限后，先用 gpt-6.1-sol 测试该账号连接：成功则恢复正常并清零，仍失败才执行处理。接口查询失败按查询轮次累计，同一条 Sub2 检测失败结果不重复计数；未确认、过期结果不触发。</p>
+      <p class="table-note">{{ form.action === 'siwc' ? '降智后转入 SIWC。已直接推送 SIWC 的账号只更新检测结果，不重复转入；未选择移除分组时移除原推送分组。' : form.action === 'merge' ? '确认降智后，跳过额度等待，执行全自动配置的最后一步。' : '确认降智后切组，保留其他分组；切组失败下次查询重试。' }} 连续检测失败达限后，先用 gpt-6.1-sol 测试该账号连接：成功则恢复正常并清零，仅复核上游状态码命中配置才执行处理。网络超时、Sub2 管理接口错误、响应不完整或状态码未命中时，仅记录错误并等待下次检测。接口查询失败按查询轮次累计，同一条 Sub2 检测失败结果不重复计数；未确认、过期结果不触发。</p>
       <div class="panel-actions"><button class="btn primary" type="submit" :disabled="!!busy"><LoaderCircle v-if="busy === 'save'" class="spin" :size="15" /><Save v-else :size="15" />{{ busy === 'save' ? '保存中…' : '保存设置' }}</button><button class="btn ghost" type="button" :disabled="!!busy || running || !data?.settings?.enabled || !!data?.inactive_reason" @click="run"><LoaderCircle v-if="busy === 'run' || running" class="spin" :size="15" /><Play v-else :size="15" />立即查询并处理</button></div>
     <ProSIWCSettings v-if="form.action === 'siwc'"/>
     </form>

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"chatgpt-space-merge/internal/model"
@@ -29,6 +30,12 @@ func (s *Store) SaveProQualitySettings(v model.ProQualitySettings) (model.ProQua
 	if err := v.Validate(); err != nil {
 		return v, err
 	}
+	statuses, _ := v.ConnectionFailureStatuses()
+	parts := make([]string, len(statuses))
+	for i, code := range statuses {
+		parts[i] = strconv.Itoa(code)
+	}
+	v.ConnectionFailureHTTPStatuses = strings.Join(parts, ",")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v.Revision = strconv.FormatInt(time.Now().UnixNano(), 10)
