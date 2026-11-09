@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"chatgpt-space-merge/internal/model"
+	"context"
 	"database/sql"
 	"errors"
 )
@@ -33,7 +34,7 @@ func (s *Server) restockExitSettled(p model.MailAccountProfile, orderID string) 
 	if !restockAccountExiting(p) {
 		return false, nil
 	}
-	if _, err := s.store.ActiveGPTPayOrder(p.Email); err == nil {
+	if _, err := s.store.ActiveGPTPayOrderState(p.Email); err == nil {
 		return false, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return false, err
@@ -48,7 +49,7 @@ func (s *Server) restockExitSettled(p model.MailAccountProfile, orderID string) 
 	if orderID == "" {
 		return true, nil // Historical/manual delivery without a payment link.
 	}
-	order, _, err := s.store.GPTPayOrder(orderID)
+	order, err := s.store.GPTPayOrderState(orderID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return !linked, nil
 	}
@@ -56,4 +57,55 @@ func (s *Server) restockExitSettled(p model.MailAccountProfile, orderID string) 
 		return false, err
 	}
 	return order.Status == "success", nil
+}
+
+// History is read in one independent WAL snapshot. Repeated per-account reads
+// on the shared store mutex can consume the entire monitoring freshness window.
+// Return only candidates; the caller rechecks their live payment/workflow state
+// before applying the original observation and reservation rules.
+func (s *Server) restockExternalCandidates(ctx context.Context, seen map[string]bool) ([]model.MailAccountProfile, error) {
+	reader, err := s.store.ProListReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	profiles, err := reader.ProRestockExternalProfiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	view := &Server{store: reader}
+	candidates := make([]model.MailAccountProfile, 0)
+	for _, profile := range profiles {
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+		if seen[profile.Email] || profile.ProRestockTaskID != "" {
+			continue
+		}
+		settled, err := view.restockExitSettled(profile, "")
+		if err != nil {
+			return nil, err
+		}
+		if settled {
+			continue
+		}
+		if profile.ProAuto.ID == "" && !restockManualWork(profile) {
+			if _, err = reader.ActiveGPTPayOrderState(profile.Email); errors.Is(err, sql.ErrNoRows) {
+				continue
+			} else if err != nil {
+				return nil, err
+			}
+		}
+		candidates = append(candidates, profile)
+	}
+	return candidates, nil
+}
+
+func restockManualWork(p model.MailAccountProfile) bool {
+	for _, stage := range p.ProManualStages {
+		if stage.Status == "running" {
+			return true
+		}
+	}
+	return p.PushStatus != "completed" && p.ProManualStages["recharge"].Status == "completed"
 }

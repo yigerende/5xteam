@@ -2,6 +2,7 @@ package store
 
 import (
 	"chatgpt-space-merge/internal/model"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -116,13 +117,17 @@ func captureProOrderTimeout(tx *sql.Tx, email string) error {
 
 // Complete profile scan with error propagation: a read failure is never an empty pool.
 func (s *Store) ProRestockProfiles() ([]model.MailAccountProfile, error) {
+	return s.proRestockProfiles(context.Background(), "SELECT profile,updated_at FROM mail_accounts WHERE json_extract(profile,'$.management_scope')='pro'")
+}
+
+func (s *Store) proRestockProfiles(ctx context.Context, query string) ([]model.MailAccountProfile, error) {
 	// Copy a consistent set under the store lock, then decode outside it.
 	// Monitoring never needs encrypted mailbox/session credentials.
 	type profileRow struct{ raw, updated string }
 	read := func() ([]profileRow, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		rows, err := s.db.Query("SELECT profile,updated_at FROM mail_accounts WHERE json_extract(profile,'$.management_scope')='pro'")
+		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {
 			return nil, err
 		}

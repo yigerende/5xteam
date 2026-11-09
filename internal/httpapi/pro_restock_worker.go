@@ -16,6 +16,10 @@ import (
 )
 
 func (s *Server) restockTasks(snap restock.Snapshot, p model.ProSettings, c restock.Config) ([]restock.Task, float64, error) {
+	return s.restockTasksContext(context.Background(), snap, p, c)
+}
+
+func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot, p model.ProSettings, c restock.Config) ([]restock.Task, float64, error) {
 	// The tick is the only launcher. Capture ownership before reading tasks so
 	// a preparation finishing during this read cannot be overwritten by stale data.
 	s.proAutoMu.Lock()
@@ -33,6 +37,9 @@ func (s *Server) restockTasks(snap restock.Snapshot, p model.ProSettings, c rest
 	seen := map[string]bool{}
 	durations := []float64{}
 	for i := range tasks {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		t := &tasks[i]
 		if t.Active() {
 			seen[t.Email] = true
@@ -292,9 +299,7 @@ func (s *Server) restockTasks(snap restock.Snapshot, p model.ProSettings, c rest
 		sort.Float64s(durations)
 		lead = durations[min(len(durations)-1, int(math.Ceil(float64(len(durations))*.9))-1)]
 	}
-	// Reconciliation only needs workflow state. The mailbox list decrypts every
-	// credential (including large session payloads) under the shared store lock.
-	profiles, err := s.store.ProRestockProfiles()
+	profiles, err := s.restockExternalCandidates(ctx, seen)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -310,16 +315,8 @@ func (s *Server) restockTasks(snap restock.Snapshot, p model.ProSettings, c rest
 			continue
 		}
 		if profile.ProAuto.ID == "" {
-			manual := false
-			for _, stage := range profile.ProManualStages {
-				if stage.Status == "running" {
-					manual = true
-				}
-			}
-			if profile.PushStatus != "completed" && profile.ProManualStages["recharge"].Status == "completed" {
-				manual = true
-			}
-			order, err := s.store.ActiveGPTPayOrder(profile.Email)
+			manual := restockManualWork(profile)
+			order, err := s.store.ActiveGPTPayOrderState(profile.Email)
 			if err == nil {
 				manual = true
 			} else if !errors.Is(err, sql.ErrNoRows) {
@@ -476,6 +473,9 @@ func (s *Server) restockTasks(snap restock.Snapshot, p model.ProSettings, c rest
 var errProRestockBusy = errors.New("正在采集或更新补货配置，请稍后重试")
 
 func (s *Server) tickProRestock(ctx context.Context, force bool) (resultErr error) {
+	if ctx.Err() != nil {
+		return nil
+	}
 	if !s.proRestock.tick.TryLock() {
 		return errProRestockBusy
 	}
@@ -576,7 +576,7 @@ func (s *Server) tickProRestock(ctx context.Context, force bool) (resultErr erro
 		c.DemandGate = &gate
 		snap.DemandGate = &gate
 	}
-	tasks, lead, e := s.restockTasks(snap, p, c)
+	tasks, lead, e := s.restockTasksContext(ctx, snap, p, c)
 	if e != nil {
 		return e
 	}
