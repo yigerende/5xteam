@@ -47,6 +47,8 @@ automation.oai_confirmation_concurrency=2
 automation.oai_inquiry={...defaultOAIInquiry}
 watch(()=>automation.oai_confirmation, value=>{if(!value || Object.keys(dispositionLabels).some(mode=>!value[mode]))automation.oai_confirmation=normalizeOAISettings(value)},{immediate:true})
 const merchantAPIKey=ref('')
+const merchantStarBridgeAPIKey=ref('')
+Object.assign(automation,{merchant_provider:'original',merchant_starbridge_api_url:'https://bridge.ccgpai.com/api/v1/refund/orders',merchant_starbridge_key_present:false})
 const selectDisposition=(key)=>{if(automation[key])for(const name of ['auto_merge_enabled','auto_delete_enabled','auto_merchant_enabled','auto_merge_v2_enabled'])if(name!==key)automation[name]=false}
 const selectedAdmin = computed(() => props.adminAccounts.find(a => a.id === automation.target_admin_id))
 Object.assign(automation,{card_provider:'ejh',nexovcc_auto_open:false,nexovcc_template_id:'',nexovcc_daily_open_limit:1,nexovcc_daily_amount_limit:'',ejh_auto_open:false,ejh_template_id:'',ejh_daily_open_limit:1,ejh_daily_amount_limit:'',force_merge_enabled:false,force_merge_minutes:60})
@@ -127,8 +129,8 @@ function changeCardFilter(value) {
 async function saveSettings() {
   if (!settingsReady.value || providerRows.value.length !== 3) return
   await action(async () => {
-    const saved = await api('/api/pro-settings/automation', { method: 'PUT', body: { automation:{...automation,merchant_success_fee_usd:String(automation.merchant_success_fee_usd??'0.00')}, gptpay: settings, providers: providerRows.value, merchant_api_key:merchantAPIKey.value } })
-    Object.assign(settings, saved.gptpay, { api_key: '', backup_provider: saved.gptpay.backup_provider || '' }); Object.assign(automation, saved.automation); merchantAPIKey.value=''
+    const saved = await api('/api/pro-settings/automation', { method: 'PUT', body: { automation:{...automation,merchant_success_fee_usd:String(automation.merchant_success_fee_usd??'0.00')}, gptpay: settings, providers: providerRows.value, merchant_api_key:merchantAPIKey.value, merchant_starbridge_api_key:merchantStarBridgeAPIKey.value } })
+    Object.assign(settings, saved.gptpay, { api_key: '', backup_provider: saved.gptpay.backup_provider || '' }); Object.assign(automation, saved.automation); merchantAPIKey.value=''; merchantStarBridgeAPIKey.value=''
     providerRows.value = saved.providers.map(row => ({ ...row, api_key: '' })); savedProvider.value = saved.gptpay.provider; savedBackup.value = settings.backup_provider; savedVersion.value++
     notify('Pro 全自动配置已保存', 'success'); emit('saved')
   })
@@ -293,9 +295,16 @@ onBeforeUnmount(() => { disposed = true; purchaseGroupsController?.abort(); edit
             <label class="oai-delay"><span>总尝试</span><input v-model.number="automation.oai_confirmation[mode].max_attempts" type="number" min="1" max="10" step="1" required :aria-label="label+' OAI 总尝试次数'"/><span>次</span></label>
           </div>
         </section>
-        <label class="field wide"><span>API 商户每次成功收费（USD）</span><input v-model="automation.merchant_success_fee_usd" type="number" min="0" max="1000000" step="0.01" required/><small>最终处理成功后计入所属卡台的 API 收费成本；每个申请只记一次，提交时锁定金额，默认 0。</small></label>
-        <label class="field wide"><span>API 商户地址</span><input v-model="automation.merchant_api_url" type="url" placeholder="https://refunds.llmrefund.com/v1/refunds"/><small>填写完整提交接口，例如 http://127.0.0.1:18740/open/v1/requests 或 http://127.0.0.1:18740/v1/cemifh。直接请求填写的地址，进度查询在其后加 /申请ID；留空使用原接口。</small></label>
-        <label class="field wide"><span>API 商户密钥</span><input v-model="merchantAPIKey" type="password" autocomplete="new-password" :placeholder="automation.merchant_key_present?'已保存，留空保留原密钥':'填写该商户的 API Key'"/><small>密钥加密保存，不回显。修改地址和密钥仅影响新申请；已有申请继续使用提交时的地址和密钥。</small></label>
+        <label class="field wide"><span>API 商户供应商</span><select v-model="automation.merchant_provider"><option value="original">原 API 商户</option><option value="starbridge">星桥 StarBridge · 代退办理</option></select><small>用于查额度达标后的 API 商户流程。切换仅影响新申请，已有申请继续查询原供应商。</small></label>
+        <label class="field wide"><span>API 商户每次成功收费（USD）</span><input v-model="automation.merchant_success_fee_usd" type="number" min="0" max="1000000" step="0.01" required/><small>手工设置的卡台成本，成功后只记一次，提交时锁定。星桥钱包扣费另按星桥报价执行，不将积分直接计为 USD。</small></label>
+        <template v-if="automation.merchant_provider === 'starbridge'">
+          <label class="field wide"><span>星桥代退 API 地址</span><input v-model="automation.merchant_starbridge_api_url" type="url" placeholder="https://bridge.ccgpai.com/api/v1/refund/orders"/><small>填写完整提交接口；留空使用星桥默认地址。受理后每 15 秒查询原订单，办理成功不代表银行卡已回款。</small></label>
+          <label class="field wide"><span>星桥 API 密钥</span><input v-model="merchantStarBridgeAPIKey" type="password" autocomplete="new-password" :placeholder="automation.merchant_starbridge_key_present?'已保存，留空保留星桥密钥':'填写星桥账户的 API Key'"/><small>与原商户分别加密保存。星桥需已开放代退受理，并有足够的钱包余额。</small></label>
+        </template>
+        <template v-else>
+          <label class="field wide"><span>API 商户地址</span><input v-model="automation.merchant_api_url" type="url" placeholder="https://refunds.llmrefund.com/v1/refunds"/><small>填写完整提交接口，进度查询在其后加 /申请ID；留空使用原接口。</small></label>
+          <label class="field wide"><span>API 商户密钥</span><input v-model="merchantAPIKey" type="password" autocomplete="new-password" :placeholder="automation.merchant_key_present?'已保存，留空保留原密钥':'填写该商户的 API Key'"/><small>密钥加密保存，不回显。已有申请继续使用提交时的地址和密钥。</small></label>
+        </template>
         <label class="field wide"><span>目标母号（空间合并及2.0使用）</span><select v-model="automation.target_admin_id"><option value="">请选择母号</option><option v-for="admin in adminAccounts" :key="admin.id" :value="admin.id">{{ admin.label || admin.email }} · {{ admin.team_account_id || '无 Team ID' }}</option></select></label>
         <label class="field"><span>空间席位套餐</span><select v-model="automation.target_seat_type"><option value="default">Standard（普通空间）</option><option value="prolite">Premium（5x）</option></select></label>
         <div class="target-summary wide"><strong>{{ selectedAdmin?.label || selectedAdmin?.email || '尚未选择母号' }}</strong><span>{{ selectedAdmin?.team_account_id || '选择后显示目标 Team ID' }}</span></div>

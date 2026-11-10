@@ -27,6 +27,12 @@ func normalizeProSettings(v *model.ProSettings) {
 	if strings.TrimSpace(v.MerchantAPIURL) == "" {
 		v.MerchantAPIURL = refundmerchant.DefaultSubmitURL
 	}
+	if v.MerchantProvider == "" {
+		v.MerchantProvider = refundmerchant.ProviderOriginal
+	}
+	if strings.TrimSpace(v.MerchantStarBridgeAPIURL) == "" {
+		v.MerchantStarBridgeAPIURL = refundmerchant.StarBridgeSubmitURL
+	}
 	groupNames := make(map[int64]string)
 	for index, id := range v.PostMergeGroupIDs {
 		if index < len(v.PostMergeGroupNames) && groupNames[id] == "" {
@@ -123,6 +129,11 @@ func (s *Store) ProSettings() (model.ProSettings, string, string, error) {
 		return v, "", "", err
 	}
 	v.MerchantKeyPresent = merchantKey != ""
+	var starBridgeKey string
+	if err := s.db.QueryRow("SELECT encrypted_key FROM pro_starbridge_merchant_secret WHERE id=1").Scan(&starBridgeKey); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return v, "", "", err
+	}
+	v.MerchantStarBridgeKeyPresent = starBridgeKey != ""
 	return v, subPassword, cpaKey, nil
 }
 

@@ -13,9 +13,10 @@ import (
 )
 
 type ProMerchantSubmission struct {
-	APIURL  string          `json:"api_url"`
-	APIKey  string          `json:"api_key"`
-	Payload json.RawMessage `json:"payload"`
+	Provider string          `json:"provider"`
+	APIURL   string          `json:"api_url"`
+	APIKey   string          `json:"api_key"`
+	Payload  json.RawMessage `json:"payload"`
 }
 
 // Pin the endpoint, key and exact payload before sending anything. Retrying a lost POST
@@ -48,7 +49,10 @@ func (s *Store) PrepareProMerchant(email string) (model.MailAccountProfile, ProM
 		}
 		e = json.Unmarshal([]byte(plain), &submission)
 		if e == nil {
-			submission.APIURL, e = refundmerchant.NormalizeSubmitURL(submission.APIURL)
+			submission.Provider, e = refundmerchant.NormalizeProvider(submission.Provider)
+		}
+		if e == nil {
+			submission.APIURL, e = refundmerchant.NormalizeProviderURL(submission.Provider, submission.APIURL)
 		}
 		return p, submission, e
 	}
@@ -60,13 +64,6 @@ func (s *Store) PrepareProMerchant(email string) (model.MailAccountProfile, ProM
 	}
 	if p.DeletionNeedsContinuation() {
 		return p, submission, errors.New("已有删除请求等待确认，不能另行提交商户")
-	}
-	if err = s.db.QueryRow("SELECT encrypted_key FROM pro_merchant_secret WHERE id=1").Scan(&encrypted); err != nil {
-		return p, submission, errors.New("请先配置 API 商户密钥")
-	}
-	submission.APIKey, err = s.decrypt(encrypted)
-	if err != nil {
-		return p, submission, err
 	}
 	// Legacy snapshots without an address belong to the original merchant.
 	// Only a new request reads the current merchant configuration.
@@ -80,7 +77,22 @@ func (s *Store) PrepareProMerchant(email string) (model.MailAccountProfile, ProM
 			return p, submission, err
 		}
 	}
-	submission.APIURL, err = refundmerchant.NormalizeSubmitURL(settings.MerchantAPIURL)
+	submission.Provider, err = refundmerchant.NormalizeProvider(settings.MerchantProvider)
+	if err != nil {
+		return p, submission, err
+	}
+	endpoint, keyQuery := settings.MerchantAPIURL, "SELECT encrypted_key FROM pro_merchant_secret WHERE id=1"
+	if submission.Provider == refundmerchant.ProviderStarBridge {
+		endpoint, keyQuery = settings.MerchantStarBridgeAPIURL, "SELECT encrypted_key FROM pro_starbridge_merchant_secret WHERE id=1"
+	}
+	if err = s.db.QueryRow(keyQuery).Scan(&encrypted); err != nil || encrypted == "" {
+		return p, submission, errors.New("请先配置所选 API 商户的密钥")
+	}
+	submission.APIKey, err = s.decrypt(encrypted)
+	if err != nil {
+		return p, submission, err
+	}
+	submission.APIURL, err = refundmerchant.NormalizeProviderURL(submission.Provider, endpoint)
 	if err != nil {
 		return p, submission, err
 	}
@@ -105,7 +117,7 @@ func (s *Store) PrepareProMerchant(email string) (model.MailAccountProfile, ProM
 	}
 	now := time.Now().UTC()
 	next := now.Add(15 * time.Second)
-	p.ProMerchant = &model.ProMerchant{RequestID: "space-" + rand.Text(), Status: "pending", Message: "准备提交商户", StartedAt: now, UpdatedAt: now, NextCheckAt: &next}
+	p.ProMerchant = &model.ProMerchant{Provider: submission.Provider, RequestID: "space-" + rand.Text(), Status: "pending", Message: "准备提交商户", StartedAt: now, UpdatedAt: now, NextCheckAt: &next}
 	if err = s.pinProMerchantFee(p.ProMerchant, p); err != nil {
 		return p, submission, err
 	}

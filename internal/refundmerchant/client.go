@@ -66,6 +66,7 @@ func (j Job) Label() string {
 }
 
 type Client struct {
+	Provider string
 	// SubmitURL is the complete endpoint. BaseURL is retained for existing
 	// callers using the original API at a different host.
 	SubmitURL string
@@ -78,7 +79,7 @@ func (c Client) request(ctx context.Context, method, path, key, idempotency stri
 	if endpoint == "" && c.BaseURL != "" {
 		endpoint = strings.TrimRight(c.BaseURL, "/") + "/v1/refunds"
 	}
-	endpoint, err := NormalizeSubmitURL(endpoint)
+	endpoint, err := NormalizeProviderURL(c.Provider, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -133,6 +134,15 @@ func (c Client) Submit(ctx context.Context, key, idempotency string, payload []b
 	var value any
 	if json.Unmarshal(raw, &value) != nil {
 		return Receipt{}, errors.New("商户已响应，但申请编号无法解析；续跑仍使用原幂等键")
+	}
+	if c.Provider == ProviderStarBridge {
+		var response struct {
+			IDs []string `json:"ids"`
+		}
+		if json.Unmarshal(raw, &response) != nil || len(response.IDs) != 1 || !validID(response.IDs[0]) {
+			return Receipt{}, errors.New("星桥未返回唯一申请编号；续跑仍使用原幂等键")
+		}
+		return Receipt{JobID: response.IDs[0]}, nil
 	}
 	// The published OpenAPI leaves response schemas unspecified. Accept single
 	// account envelopes, never treat a batch_id as a queryable account job ID.
@@ -191,6 +201,9 @@ func submissionID(v any, email string) string {
 // Some versions return a batch receipt. Resolve its one submitted account from
 // the documented batch filter, then use GET {SubmitURL}/{id} for all checks.
 func (c Client) ResolveBatch(ctx context.Context, key, batch, email string) (string, error) {
+	if c.Provider == ProviderStarBridge {
+		return "", errors.New("星桥申请须按订单编号查询，不支持批次查询")
+	}
 	if !validID(batch) {
 		return "", errors.New("商户批次编号无效")
 	}
@@ -236,13 +249,21 @@ func (c Client) Progress(ctx context.Context, key, id, email string) (Job, error
 	var response struct {
 		Job
 		Refund *Job `json:"refund"`
+		Order  *Job `json:"order"`
 	}
 	if json.Unmarshal(raw, &response) != nil {
 		return Job{}, errors.New("商户进度格式无效")
 	}
-	job = response.Job
-	if response.Refund != nil && job.ID == "" {
-		job = *response.Refund
+	if c.Provider == ProviderStarBridge {
+		if response.Order == nil {
+			return Job{}, errors.New("星桥进度缺少 order，未标记完成")
+		}
+		job = *response.Order
+	} else {
+		job = response.Job
+		if response.Refund != nil && job.ID == "" {
+			job = *response.Refund
+		}
 	}
 	if job.ID != id || !strings.EqualFold(job.Email, email) || job.Status == "" {
 		return Job{}, errors.New("商户进度缺少状态或申请编号、账号不匹配，未标记完成")

@@ -61,6 +61,9 @@ type ProSettings struct {
 	OAIInquiry                   ProOAIInquiry               `json:"oai_inquiry"`
 	OAIConfirmation              ProOAIConfirmationSettings  `json:"oai_confirmation"`
 	MerchantAPIURL               string                      `json:"merchant_api_url"`
+	MerchantProvider             string                      `json:"merchant_provider"`
+	MerchantStarBridgeAPIURL     string                      `json:"merchant_starbridge_api_url"`
+	MerchantStarBridgeKeyPresent bool                        `json:"merchant_starbridge_key_present"`
 	MerchantSuccessFeeUSD        string                      `json:"merchant_success_fee_usd"`
 	PurchaseScheduleEnabled      bool                        `json:"purchase_schedule_enabled"`
 	PurchaseWindows              []ProPurchaseWindow         `json:"purchase_windows"`
@@ -115,6 +118,8 @@ func DefaultProSettings() ProSettings {
 		OAIInquiry:                 DefaultProOAIInquiry(),
 		OAIConfirmation:            DefaultProOAIConfirmationSettings(),
 		MerchantAPIURL:             "https://refunds.llmrefund.com/v1/refunds",
+		MerchantProvider:           "original",
+		MerchantStarBridgeAPIURL:   "https://bridge.ccgpai.com/api/v1/refund/orders",
 		EJHDailyOpenLimit:          1, ForceMergeMinutes: 60, CardProvider: "ejh", NexovccDailyOpenLimit: 1,
 		MaxUnmerged: 5, ScheduleIntervalSeconds: 120,
 		Provider: "sub2", Sub2: DefaultSub2Settings(), CPA: DefaultCPASettings(), VM2API: DefaultVM2APISettings(),

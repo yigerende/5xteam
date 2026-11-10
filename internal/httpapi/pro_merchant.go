@@ -74,9 +74,10 @@ func (s *Server) performProMerchant(ctx context.Context, email string) (out mode
 	if err != nil {
 		return p, err
 	}
-	client := refundmerchant.Client{SubmitURL: submission.APIURL}
+	client := refundmerchant.Client{Provider: submission.Provider, SubmitURL: submission.APIURL}
 	if s.proMerchantClient != nil {
 		client = *s.proMerchantClient
+		client.Provider = submission.Provider
 		if client.BaseURL == "" && client.SubmitURL == "" {
 			client.SubmitURL = submission.APIURL
 		}
@@ -115,7 +116,7 @@ func (s *Server) performProMerchant(ctx context.Context, email string) (out mode
 		})
 		runErr = errors.Join(runErr, err)
 		if out.ProMerchant != nil {
-			s.auditProEvent(out, "merchant", out.ProMerchant.Status, "api_merchant", out.ProMerchant.Message, map[string]any{"job_id": out.ProMerchant.JobID, "error": out.ProMerchant.Error})
+			s.auditProEvent(out, "merchant", out.ProMerchant.Status, "api_merchant", out.ProMerchant.Message, map[string]any{"merchant_provider": submission.Provider, "job_id": out.ProMerchant.JobID, "error": out.ProMerchant.Error})
 		}
 	}()
 	if p.ProMerchant.JobID == "" && p.ProMerchant.BatchID == "" {

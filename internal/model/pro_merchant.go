@@ -3,6 +3,7 @@ package model
 import "time"
 
 type ProMerchant struct {
+	Provider      string     `json:"provider,omitempty"`
 	SuccessFeeUSD string     `json:"success_fee_usd"`
 	FeeOrderID    string     `json:"fee_order_id,omitempty"`
 	FeeCardID     string     `json:"fee_card_id,omitempty"`

@@ -12,10 +12,11 @@ import (
 
 func (s *Server) saveProAutomationSettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		MerchantAPIKey string                 `json:"merchant_api_key"`
-		Automation     model.ProSettings      `json:"automation"`
-		GPTPay         gptpay.SettingsInput   `json:"gptpay"`
-		Providers      []gptpay.SettingsInput `json:"providers"`
+		MerchantAPIKey           string                 `json:"merchant_api_key"`
+		MerchantStarBridgeAPIKey string                 `json:"merchant_starbridge_api_key"`
+		Automation               model.ProSettings      `json:"automation"`
+		GPTPay                   gptpay.SettingsInput   `json:"gptpay"`
+		Providers                []gptpay.SettingsInput `json:"providers"`
 	}
 	current, subPassword, _, readErr := s.store.ProSettings()
 	if readErr != nil {
@@ -33,6 +34,8 @@ func (s *Server) saveProAutomationSettings(w http.ResponseWriter, r *http.Reques
 	input.Automation.AutoMergeV2Enabled = current.AutoMergeV2Enabled
 	input.Automation.MerchantSuccessFeeUSD = current.MerchantSuccessFeeUSD
 	input.Automation.MerchantAPIURL = current.MerchantAPIURL
+	input.Automation.MerchantProvider = current.MerchantProvider
+	input.Automation.MerchantStarBridgeAPIURL = current.MerchantStarBridgeAPIURL
 	input.Automation.DeletionCheckIntervalSeconds = current.DeletionCheckIntervalSeconds
 	input.Automation.OAIConfirmation = current.OAIConfirmation.Normalized()
 	input.Automation.OAIConfirmationConcurrency = current.OAIConfirmationConcurrency
@@ -61,7 +64,21 @@ func (s *Server) saveProAutomationSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	v.MerchantAPIURL = merchantURL
-	if v.AutoMerchantEnabled && strings.TrimSpace(input.MerchantAPIKey) == "" && !current.MerchantKeyPresent {
+	v.MerchantProvider, urlErr = refundmerchant.NormalizeProvider(v.MerchantProvider)
+	if urlErr != nil {
+		writeAPI(w, 400, nil, urlErr.Error())
+		return
+	}
+	v.MerchantStarBridgeAPIURL, urlErr = refundmerchant.NormalizeProviderURL(refundmerchant.ProviderStarBridge, v.MerchantStarBridgeAPIURL)
+	if urlErr != nil {
+		writeAPI(w, 400, nil, urlErr.Error())
+		return
+	}
+	keyPresent := current.MerchantKeyPresent || strings.TrimSpace(input.MerchantAPIKey) != ""
+	if v.MerchantProvider == refundmerchant.ProviderStarBridge {
+		keyPresent = current.MerchantStarBridgeKeyPresent || strings.TrimSpace(input.MerchantStarBridgeAPIKey) != ""
+	}
+	if v.AutoMerchantEnabled && !keyPresent {
 		writeAPI(w, 400, nil, "请填写 API 商户密钥")
 		return
 	}
@@ -116,7 +133,7 @@ func (s *Server) saveProAutomationSettings(w http.ResponseWriter, r *http.Reques
 		writeAPI(w, 400, nil, err.Error())
 		return
 	}
-	v, pay, err = s.store.SaveProAutomationProviderSettings(v, pay, key, input.Providers, input.MerchantAPIKey)
+	v, pay, err = s.store.SaveProAutomationProviderSettings(v, pay, key, input.Providers, input.MerchantAPIKey, input.MerchantStarBridgeAPIKey)
 	if err != nil {
 		writeAPI(w, 500, nil, "保存 Pro 全自动配置失败")
 		return

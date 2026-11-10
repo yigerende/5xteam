@@ -19,6 +19,7 @@ function time(value){return value?new Date(value).toLocaleString('zh-CN',{hour12
   <div class="merchant-stages">
     <div class="merchant-strip"><span v-for="step in stages" :key="step.label" :class="step.state">{{step.label}}<small>{{names[step.state]}}</small></span></div>
     <template v-if="merchant">
+      <small>供应商：{{merchant.provider === 'starbridge' ? '星桥 StarBridge' : '原 API 商户'}}</small>
       <small>{{merchant.message || '等待商户处理'}}</small>
       <small v-if="merchant.job_id" :title="merchant.job_id">申请编号：{{merchant.job_id}}</small>
       <small v-if="merchant.accepted_at">受理：{{time(merchant.accepted_at)}}</small>

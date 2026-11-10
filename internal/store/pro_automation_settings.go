@@ -18,11 +18,19 @@ func (s *Store) SaveProAutomationSettings(input model.ProSettings, pay gptpay.Se
 	return s.saveProAutomationSettings(input, pay, key, nil, merchantKeys...)
 }
 
-func (s *Store) SaveProAutomationProviderSettings(input model.ProSettings, pay gptpay.Settings, key string, rows []gptpay.SettingsInput, merchantKey string) (model.ProSettings, gptpay.Settings, error) {
-	return s.saveProAutomationSettings(input, pay, key, rows, merchantKey)
+func (s *Store) SaveProAutomationProviderSettings(input model.ProSettings, pay gptpay.Settings, key string, rows []gptpay.SettingsInput, merchantKeys ...string) (model.ProSettings, gptpay.Settings, error) {
+	return s.saveProAutomationSettings(input, pay, key, rows, merchantKeys...)
 }
 
 func (s *Store) saveProAutomationSettings(input model.ProSettings, pay gptpay.Settings, key string, rows []gptpay.SettingsInput, merchantKeys ...string) (model.ProSettings, gptpay.Settings, error) {
+	merchantProvider, providerErr := refundmerchant.NormalizeProvider(input.MerchantProvider)
+	if providerErr != nil {
+		return input, pay, providerErr
+	}
+	starBridgeURL, providerErr := refundmerchant.NormalizeProviderURL(refundmerchant.ProviderStarBridge, input.MerchantStarBridgeAPIURL)
+	if providerErr != nil {
+		return input, pay, providerErr
+	}
 	merchantURL, urlErr := refundmerchant.NormalizeSubmitURL(input.MerchantAPIURL)
 	if urlErr != nil {
 		return input, pay, urlErr
@@ -74,6 +82,8 @@ func (s *Store) saveProAutomationSettings(input model.ProSettings, pay gptpay.Se
 	v.OAIInquiry = input.OAIInquiry.Normalized()
 	v.MerchantSuccessFeeUSD = input.MerchantSuccessFeeUSD
 	v.MerchantAPIURL = merchantURL
+	v.MerchantProvider = merchantProvider
+	v.MerchantStarBridgeAPIURL = starBridgeURL
 	var merchantSecret string
 	if err = tx.QueryRow("SELECT encrypted_key FROM pro_merchant_secret WHERE id=1").Scan(&merchantSecret); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return v, pay, err
@@ -88,7 +98,25 @@ func (s *Store) saveProAutomationSettings(input model.ProSettings, pay gptpay.Se
 		}
 	}
 	v.MerchantKeyPresent = merchantSecret != ""
-	if v.AutoMerchantEnabled && !v.MerchantKeyPresent {
+	var starBridgeSecret string
+	if err = tx.QueryRow("SELECT encrypted_key FROM pro_starbridge_merchant_secret WHERE id=1").Scan(&starBridgeSecret); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return v, pay, err
+	}
+	if len(merchantKeys) > 1 && strings.TrimSpace(merchantKeys[1]) != "" {
+		starBridgeSecret, err = s.encrypt(strings.TrimSpace(merchantKeys[1]))
+		if err != nil {
+			return v, pay, err
+		}
+		if _, err = tx.Exec("INSERT INTO pro_starbridge_merchant_secret(id,encrypted_key) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key", starBridgeSecret); err != nil {
+			return v, pay, err
+		}
+	}
+	v.MerchantStarBridgeKeyPresent = starBridgeSecret != ""
+	selectedKeyPresent := v.MerchantKeyPresent
+	if merchantProvider == refundmerchant.ProviderStarBridge {
+		selectedKeyPresent = v.MerchantStarBridgeKeyPresent
+	}
+	if v.AutoMerchantEnabled && !selectedKeyPresent {
 		return v, pay, errors.New("请先填写 API 商户密钥")
 	}
 	v.CardProvider = input.AutoCardProvider()

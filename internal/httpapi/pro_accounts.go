@@ -772,6 +772,9 @@ func (s *Server) saveProSettings(w http.ResponseWriter, r *http.Request) {
 	input.AutoMerchantEnabled, input.MerchantKeyPresent = current.AutoMerchantEnabled, current.MerchantKeyPresent
 	input.MerchantSuccessFeeUSD = current.MerchantSuccessFeeUSD
 	input.MerchantAPIURL = current.MerchantAPIURL
+	input.MerchantProvider = current.MerchantProvider
+	input.MerchantStarBridgeAPIURL = current.MerchantStarBridgeAPIURL
+	input.MerchantStarBridgeKeyPresent = current.MerchantStarBridgeKeyPresent
 	input.DeletionCheckIntervalSeconds = current.DeletionCheckIntervalSeconds
 	input.OAIConfirmation = current.OAIConfirmation
 	input.OAIConfirmationConcurrency = current.OAIConfirmationConcurrency

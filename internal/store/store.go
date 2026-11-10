@@ -253,6 +253,7 @@ func (s *Store) initSchema() error {
 		CREATE TABLE IF NOT EXISTS pro_merchant_fees (request_id TEXT PRIMARY KEY, order_id TEXT NOT NULL, email TEXT NOT NULL, card_id TEXT NOT NULL, issuer TEXT NOT NULL, amount_cents INTEGER NOT NULL, at TEXT NOT NULL);
 		CREATE INDEX IF NOT EXISTS pro_merchant_fees_order ON pro_merchant_fees(order_id);
 		CREATE TABLE IF NOT EXISTS pro_merchant_secret (id INTEGER PRIMARY KEY CHECK(id=1), encrypted_key TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS pro_starbridge_merchant_secret (id INTEGER PRIMARY KEY CHECK(id=1), encrypted_key TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pro_merchant_requests (email TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, encrypted_submission TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pro_vm2api_secret (id INTEGER PRIMARY KEY CHECK(id=1), encrypted_key TEXT NOT NULL DEFAULT '');
 		CREATE TABLE IF NOT EXISTS gptpay_settings (id INTEGER PRIMARY KEY CHECK(id=1), profile TEXT NOT NULL, encrypted_key TEXT NOT NULL DEFAULT '');
