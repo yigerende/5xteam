@@ -111,7 +111,7 @@ function reloadOpenAI() {}
 async function reloadProxies() { try { proxies.value = await api('/api/proxies'); referenceLoaded.proxies = true } catch (error) { loadingError.value = error.message } }
 function reloadHistory() {}
 function reloadFreeAccounts() {}
-async function reloadProAccounts() { try { proAccounts.value = await api('/api/pro-accounts'); referenceLoaded.pro = true } catch (error) { loadingError.value = error.message } }
+async function reloadProAccounts() { try { proAccounts.value = await api('/api/pro-accounts/options'); referenceLoaded.pro = true } catch (error) { loadingError.value = error.message } }
 async function syncProAccounts() { if (referenceLoaded.pro) await reloadProAccounts() }
 async function ensureTabData(id) {
   const requests = []

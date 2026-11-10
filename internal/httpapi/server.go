@@ -87,6 +87,7 @@ type Server struct {
 	proCardAdmissionMu        sync.Mutex
 	proCardPriorityActive     atomic.Int64
 	proCardPriorityUntil      atomic.Int64
+	proCardPreparing          atomic.Int64
 	proAutoWG                 sync.WaitGroup
 	proAutoJobs               map[string]context.CancelFunc
 	proRestockStartJobs       map[string]context.CancelFunc
@@ -338,6 +339,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/mail/accounts/invalid-at-outside", s.listOutsideInvalidATMailEmails)
 	mux.HandleFunc("POST /api/mail/accounts/select", s.selectMailAccounts)
 	mux.HandleFunc("GET /api/pro-accounts", s.listProAccounts)
+	mux.HandleFunc("GET /api/pro-accounts/options", func(w http.ResponseWriter, r *http.Request) {
+		items, err := s.store.ProAccountOptions(r.Context())
+		if err != nil {
+			writeAPI(w, 500, nil, "读取 Pro 账号选项失败")
+			return
+		}
+		writeProAccountList(w, r, items)
+	})
 	mux.HandleFunc("GET /api/pro-accounts/select-unlogged", s.selectUnloggedProAccounts)
 	mux.HandleFunc("POST /api/pro-accounts/delete", s.deleteProAccounts)
 	mux.HandleFunc("POST /api/pro-accounts/export", s.exportProAccounts)

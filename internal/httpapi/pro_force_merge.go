@@ -87,7 +87,11 @@ func (s *Server) tickProForceMerge(ctx context.Context) {
 	} else if run != nil {
 		slog.Info("每日 EJH 定点合并已登记", "day", run.Day, "count", run.Count)
 	}
-	for _, p := range s.store.MailAccountsByManagementScope("pro") {
+	profiles, err := s.store.ProForceMergeCandidates(ctx, now)
+	if err != nil {
+		return
+	}
+	for _, p := range profiles {
 		reason := s.forcedMergeReason(p, cfg, now)
 		if reason == "" {
 			continue

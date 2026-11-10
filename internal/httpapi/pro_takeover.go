@@ -41,7 +41,11 @@ func (s *Server) takeoverPending() (int, error) {
 	}
 	s.proRestock.mu.Unlock()
 	// Include manually launched chains before the next restock observation.
-	for _, p := range s.store.MailAccountsByManagementScope("pro") {
+	profiles, e := s.store.ProUnpushedProfiles(context.Background())
+	if e != nil {
+		return 0, e
+	}
+	for _, p := range profiles {
 		if p.PushStatus != "completed" && s.proAutomationRunning(p.Email) {
 			seen[p.Email] = true
 		}
@@ -309,7 +313,7 @@ func (s *Server) observeTakeoverRecovery(c restock.Config, snap restock.Snapshot
 }
 
 func (s *Server) takeoverOwnedProfiles(p model.ProSettings, provider string) (map[int64]model.MailAccountProfile, error) {
-	profiles, e := s.store.ProRestockProfiles()
+	profiles, e := s.store.ProSupplyProfiles(context.Background())
 	if e != nil {
 		return nil, e
 	}
@@ -536,7 +540,11 @@ func (s *Server) reconcileTakeoverGroups(ctx context.Context, p model.ProSetting
 				return err
 			}
 			var unlock func()
-			for _, v := range s.store.MailAccountsByManagementScope("pro") {
+			profiles, err := s.store.ProSub2Profiles(check, b.AccountID)
+			if err != nil {
+				return err
+			}
+			for _, v := range profiles {
 				if v.Sub2AccountID == b.AccountID {
 					lockValue, _ := s.proLocks.LoadOrStore("account:"+v.Email, &sync.Mutex{})
 					lock := lockValue.(*sync.Mutex)

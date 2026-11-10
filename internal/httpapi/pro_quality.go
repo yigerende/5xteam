@@ -76,7 +76,7 @@ func (s *Server) getProQualitySettings(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 500, nil, err.Error())
 		return
 	}
-	profiles, err := s.store.ProRestockProfiles()
+	profiles, err := s.store.ProQualityCandidates(r.Context())
 	if err != nil {
 		writeAPI(w, 500, nil, err.Error())
 		return
@@ -266,7 +266,7 @@ func (s *Server) runProQualityBatch(ctx context.Context, force bool) error {
 	if !proQualityConnection(q, c) {
 		return errors.New("Pro 推送连接已变化，请重新保存降智设置")
 	}
-	profiles, err := s.store.ProRestockProfiles()
+	profiles, err := s.store.ProQualityCandidates(ctx)
 	if err != nil {
 		return err
 	}

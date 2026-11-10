@@ -70,7 +70,11 @@ func (s *Server) syncEJH(w http.ResponseWriter, r *http.Request) {
 	}
 	writeAPI(w, 200, map[string]bool{"synced": true}, "")
 }
-func (s *Server) syncEJHLocked(ctx context.Context, start, end time.Time) (retErr error) {
+func (s *Server) syncEJHLocked(ctx context.Context, start, end time.Time) error {
+	return s.syncEJHWithYield(ctx, start, end, nil)
+}
+
+func (s *Server) syncEJHWithYield(ctx context.Context, start, end time.Time, yield func() error) (retErr error) {
 	var state ejh.SyncState
 	_ = s.store.EJHGet("sync", "latest", &state)
 	now := time.Now()
@@ -107,6 +111,18 @@ func (s *Server) syncEJHLocked(ctx context.Context, start, end time.Time) (retEr
 		if e = ctx.Err(); e != nil {
 			return e
 		}
+		if page > 1 && yield != nil {
+			if e = yield(); e != nil {
+				return e
+			}
+		}
+		currentCfg, _, configErr := s.ejhConfig()
+		if configErr != nil {
+			return configErr
+		}
+		if currentCfg.URL != cfg.URL || currentCfg.AppKey != cfg.AppKey {
+			return fmt.Errorf("卡台配置已变化，下轮重新同步")
+		}
 		var out struct {
 			Cards []ejh.Card `json:"cardInfos"`
 		}
@@ -117,6 +133,11 @@ func (s *Server) syncEJHLocked(ctx context.Context, start, end time.Time) (retEr
 			return fmt.Errorf("卡台响应缺少有效 cardInfos 列表，不能确认卡片同步完整")
 		}
 		for _, remote := range out.Cards {
+			// A card may have been moved or cancelled while this sync yielded.
+			var latest ejh.CardRecord
+			if s.store.EJHGet("card", ejhCardID(remote.OrderNo), &latest) == nil && (latest.NormalPending || latest.Remote.Status == "2") {
+				continue
+			}
 			if closed[remote.OrderNo] {
 				continue
 			}
@@ -155,6 +176,26 @@ func (s *Server) syncEJHLocked(ctx context.Context, start, end time.Time) (retEr
 	settledClosures := ejhSettledClosures(trades)
 	var failures []error
 	for _, card := range cards {
+		// Already settled history remains excluded. Only current candidates need
+		// a fresh read after yielding to a card operation.
+		if card.NormalPending || card.Remote.OrderNo == "" || card.Remote.Status == "2" && settledClosures[card.ID] {
+			continue
+		}
+		if yield != nil {
+			if e = yield(); e != nil {
+				return e
+			}
+		}
+		currentCfg, _, configErr := s.ejhConfig()
+		if configErr != nil {
+			return configErr
+		}
+		if currentCfg.URL != cfg.URL || currentCfg.AppKey != cfg.AppKey {
+			return fmt.Errorf("卡台配置已变化，下轮重新同步")
+		}
+		if e = s.store.EJHGet("card", card.ID, &card); e != nil {
+			return e
+		}
 		if card.NormalPending || card.Remote.OrderNo == "" || card.Remote.Status == "2" && settledClosures[card.ID] {
 			continue
 		}

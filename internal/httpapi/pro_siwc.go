@@ -156,7 +156,7 @@ func (s *Server) performDirectSIWCPush(ctx context.Context, p model.MailAccountP
 }
 
 func (s *Server) proSIWCBlock() string {
-	profiles, e := s.store.ProRestockProfiles()
+	profiles, e := s.store.ProSIWCCandidates(context.Background(), true)
 	if e != nil {
 		return "SIWC 转入状态读取失败，暂停自动补货"
 	}
@@ -228,7 +228,7 @@ func (s *Server) startProSIWCWorker(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				profiles, e := s.store.ProRestockProfiles()
+				profiles, e := s.store.ProSIWCCandidates(ctx, false)
 				if e != nil {
 					continue
 				}

@@ -72,7 +72,7 @@ func (s *Server) syncNexovccCardSnapshotLocked(ctx context.Context, id string) (
 // leave the independent monitor to handle this card on its next tick.
 func (s *Server) afterNexovccCardSnapshotLocked(ctx context.Context, id string) error {
 	scheduled, _ := ctx.Value(nexovccScheduledSyncKey{}).(bool)
-	if !scheduled || ctx.Err() != nil || !s.tryBackgroundCardLock(&s.proCardAdmissionMu) {
+	if !scheduled || ctx.Err() != nil || !s.tryMaintenanceCardLock(&s.proCardAdmissionMu) {
 		return ctx.Err()
 	}
 	defer s.proCardAdmissionMu.Unlock()

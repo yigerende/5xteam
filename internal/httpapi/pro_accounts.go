@@ -1616,7 +1616,14 @@ func (s *Server) monitorProAccounts(ctx context.Context) {
 				_ = s.store.UpdateProQuotaSweep(last, next)
 			}
 			emails := []string{}
-			for _, p := range s.store.MailAccountsByManagementScope("pro") {
+			profiles, readErr := s.store.ProQuotaCandidates(ctx)
+			if readErr != nil {
+				s.proMonitorMu.Lock()
+				s.proMonitorRunning = false
+				s.proMonitorMu.Unlock()
+				continue
+			}
+			for _, p := range profiles {
 				// The new full workflow owns its own quota threshold and due time.
 				if p.MergeV2Started() || p.ProAuto.ID != "" || p.ProAuto.StopRequested || p.ProAuto.Status == "stopped" || (p.ProMigration != nil && p.ProMigration.Paused) {
 					continue

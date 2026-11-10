@@ -104,7 +104,7 @@ func (s *Server) collectProRestock(ctx context.Context, c restock.Config, p mode
 	}
 	// Local profile reads can wait for the store lock. Do them before taking
 	// the upstream concurrency sample so they do not consume its freshness.
-	profiles, e := s.store.ProRestockProfiles()
+	profiles, e := s.store.ProSupplyProfiles(ctx)
 	if e != nil {
 		return snap, e
 	}

@@ -71,6 +71,19 @@ func (s *Server) tryBackgroundCardLock(lock *sync.Mutex) bool {
 	return true
 }
 
+// Maintenance yields to either kind of preparation; automatic dispatch itself
+// continues using tryBackgroundCardLock so it cannot block on its own priority.
+func (s *Server) tryMaintenanceCardLock(lock *sync.Mutex) bool {
+	if s.proCardPreparing.Load() > 0 || !s.tryBackgroundCardLock(lock) {
+		return false
+	}
+	if s.proCardPreparing.Load() > 0 {
+		lock.Unlock()
+		return false
+	}
+	return true
+}
+
 func (s *Server) lockBackgroundCard(ctx context.Context, lock *sync.Mutex) (func(), error) {
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -78,7 +91,7 @@ func (s *Server) lockBackgroundCard(ctx context.Context, lock *sync.Mutex) (func
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if s.tryBackgroundCardLock(lock) {
+		if s.tryMaintenanceCardLock(lock) {
 			return lock.Unlock, nil
 		}
 		select {

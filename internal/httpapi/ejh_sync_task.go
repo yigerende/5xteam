@@ -101,12 +101,24 @@ func (s *Server) requestEJHSync(key string, start, end time.Time) (*ejhSyncTask,
 
 func (s *Server) performEJHSyncTask(ctx context.Context, task *ejhSyncTask, waitLimit, runLimit time.Duration) error {
 	wait, cancel := context.WithTimeout(ctx, waitLimit)
+	finishRun, err := s.lockBackgroundCard(wait, &s.ejh.syncRun)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("等待其他同步结束超时，本次未开始同步：%w", err)
+	}
+	defer finishRun()
 	unlock, err := s.lockBackgroundCard(wait, &s.ejh.mu)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("等待其他卡台操作结束超时或服务停止，本次未开始同步；已有数据保留：%w", err)
 	}
-	defer unlock()
+	// Release between pages/cards, never in the middle of a card read/commit.
+	// All synchronization tasks remain serialized by syncRun.
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	s.ejh.syncMu.Lock()
 	now := time.Now()
 	task.result.Status, task.result.StartedAt = "running", &now
@@ -114,7 +126,17 @@ func (s *Server) performEJHSyncTask(ctx context.Context, task *ejhSyncTask, wait
 	slog.Info("EJH sync started", "task_id", task.result.ID, "wait_ms", now.Sub(task.result.QueuedAt).Milliseconds())
 	job, done := context.WithTimeout(ctx, runLimit)
 	defer done()
-	return s.syncEJHLocked(job, task.start, task.end)
+	yield := func() error {
+		unlock()
+		unlock = nil
+		next, err := s.lockBackgroundCard(job, &s.ejh.mu)
+		if err != nil {
+			return err
+		}
+		unlock = next
+		return nil
+	}
+	return s.syncEJHWithYield(job, task.start, task.end, yield)
 }
 
 func (s *Server) ejhSyncSnapshot(task *ejhSyncTask) ejhSyncResult {

@@ -7,7 +7,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// Reuse the compressor's buffers. Large overview/history responses benefit
+// from the standard compression level without changing any financial input.
+var listGzipWriters = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
 
 // Pro rows carry the full workflow and financial history. Compress transport,
 // preserving the API shape and no-store policy rather than dropping details.
@@ -22,9 +27,12 @@ func writeProAccountList(w http.ResponseWriter, r *http.Request, data any) {
 	w.Header().Add("Vary", "Accept-Encoding")
 	if len(body) >= 2048 && acceptsListGzip(r.Header.Get("Accept-Encoding")) {
 		var compressed bytes.Buffer
-		writer, _ := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
+		writer := listGzipWriters.Get().(*gzip.Writer)
+		writer.Reset(&compressed)
 		_, _ = writer.Write(body)
 		_ = writer.Close()
+		writer.Reset(nil)
+		listGzipWriters.Put(writer)
 		if compressed.Len() < len(body) {
 			body = compressed.Bytes()
 			w.Header().Set("Content-Encoding", "gzip")

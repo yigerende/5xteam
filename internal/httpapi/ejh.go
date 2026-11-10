@@ -29,6 +29,7 @@ type ejhRuntime struct {
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	syncMu       sync.Mutex
+	syncRun      sync.Mutex
 	syncJobs     map[string]*ejhSyncTask
 	ctx          context.Context
 	views        ejhViewCache

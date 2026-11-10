@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -73,6 +74,10 @@ func Open(dataDir string) (*Store, error) {
 		return nil, err
 	}
 	if err := s.initSchema(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := s.initializeProMonitorIndexes(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -374,12 +379,21 @@ func (s *Store) DeleteMailMessages(ids []string) error {
 }
 
 func (s *Store) MailAccounts() []model.MailAccountProfile {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.mailAccountsWhere("1=1")
+}
+
+func (s *Store) mailAccountsWhere(where string) []model.MailAccountProfile {
+	// Preserve legacy credential-derived flags, but decode on a dedicated WAL
+	// reader so full exports/rotation cannot block unrelated writes or settings.
+	reader, err := s.ProListReader(context.Background())
+	if err != nil {
+		return []model.MailAccountProfile{}
+	}
+	defer reader.Close()
 	// The mailbox's created_at is stored in the profile JSON.  Do not sort by
 	// the table's updated_at column: credential refreshes and status changes
 	// update that value and would make the list order jump around.
-	rows, err := s.db.Query("SELECT profile, encrypted_credentials, updated_at FROM mail_accounts")
+	rows, err := reader.db.Query("SELECT profile, encrypted_credentials, updated_at FROM mail_accounts WHERE " + where)
 	if err != nil {
 		return []model.MailAccountProfile{}
 	}
@@ -417,7 +431,11 @@ func (s *Store) MailAccounts() []model.MailAccountProfile {
 
 func (s *Store) MailAccountsByManagementScope(scope string) []model.MailAccountProfile {
 	scope = normalizeMailManagementScope(scope)
-	accounts := s.MailAccounts()
+	where := "lower(trim(COALESCE(json_extract(profile,'$.management_scope'),'')))='pro'"
+	if scope != "pro" {
+		where = "NOT (" + where + ")"
+	}
+	accounts := s.mailAccountsWhere(where)
 	result := make([]model.MailAccountProfile, 0, len(accounts))
 	for _, account := range accounts {
 		if normalizeMailManagementScope(account.ManagementScope) == scope {
