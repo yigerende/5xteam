@@ -94,7 +94,7 @@ async function submitAuto(retryCurrent=false){
 async function start(){await submitAuto()}
 async function retryStep(){await submitAuto(true)}
 async function resumeMergeV2(){if(busy.value)return;busy.value=true;error.value='';try{await api(`/api/pro-accounts/${encodeURIComponent(email.value)}/merge-v2`,{method:'POST'});await refresh()}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
-async function resumeMerchant(){if(busy.value)return;busy.value=true;error.value='';try{await api(`/api/pro-accounts/${encodeURIComponent(email.value)}/merchant`,{method:'POST'});await refresh()}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
+async function resumeMerchant(reissue=false){if(busy.value)return;busy.value=true;error.value='';try{await api(`/api/pro-accounts/${encodeURIComponent(email.value)}/${reissue?'merchant-retry':'merchant'}`,{method:'POST',...(reissue?{body:{request_id:state.value.pro_merchant?.request_id}}:{})});await refresh()}catch(e){error.value=e.message;await refresh()}finally{busy.value=false;schedule()}}
 async function resumeDeletion(){if(busy.value)return;busy.value=true;error.value='';try{await api(`/api/pro-accounts/${encodeURIComponent(email.value)}/deactivate`,{method:'POST',body:{}});await refresh()}catch(e){error.value=e.message}finally{busy.value=false;schedule()}}
 async function resumeQuota(){if(busy.value)return;busy.value=true;error.value='';try{const p=await api(path(),{method:'POST',body:{resume_quota:true,expected_flow_id:state.value.id,expected_stop_version:state.value.stop_version||0}});state.value=p.pro_auto;emit('updated')}catch(e){error.value=e.message;await refresh()}finally{busy.value=false;schedule()}}
 async function stop(){if(busy.value)return;busy.value=true;try{await api(path()+'/stop',{method:'POST',body:{}});await refresh()}catch(e){error.value=e.message}finally{preparingCard.value=false;busy.value=false;schedule()}}
@@ -115,7 +115,7 @@ defineExpose({open})
 <p v-if="state.proxy_retry_attempts" role="status">代理连接重试：第 {{ state.proxy_retry_attempts }} 次 / 最多 3 次（保留原账号和原卡）</p>
 <p v-if="state.status==='running'&&state.retry_at" role="status">正在等待重试 · 下次执行：{{ formatTime(state.retry_at) }}</p>
 <ProMergeV2Stages v-if="state.pro_merge_v2" :account="{pro_merge_v2:state.pro_merge_v2,pro_auto:state}" :disabled="busy || state.pro_workflow_running" readonly @retry="resumeMergeV2"/>
-<ProMerchantStages v-if="state.pro_merchant" :account="{pro_merchant:state.pro_merchant,pro_auto:state}" :disabled="busy || state.pro_workflow_running" @retry="resumeMerchant"/>
+<ProMerchantStages v-if="state.pro_merchant" :account="{pro_merchant:state.pro_merchant,pro_auto:state}" :disabled="busy || state.pro_workflow_running" @retry="resumeMerchant()" @reissue="resumeMerchant(true)"/>
 <p v-if="state.status==='completed'" class="done">{{ state.stage === 'merge_v2' ? '合并空间2.0流程完成，上游停用和退款另行核实。' : state.stage === 'merchant' ? 'API 商户已处理成功。' : state.stage === 'deactivate' ? '删除账户及后续处理已完成。' : '全自动流程已完成，已移出空间。' }}</p>
 <p v-if="state.status==='awaiting_deletion'">删除已提交，等待上游明确确认；可在账号菜单续跑核验，不会重复提交删除。</p>
 <p v-if="state.stop_requested" role="status">{{state.pro_workflow_running?'正在停止当前任务…':'已停止，定时任务不会继续执行。'}}<span v-if="deletionSubmitted">已提交上游的删除请求无法撤回。</span></p>

@@ -2,8 +2,9 @@
 import { computed } from 'vue'
 import CompactErrorDetails from './CompactErrorDetails.vue'
 const props=defineProps({account:{type:Object,default:()=>({})},disabled:Boolean})
-defineEmits(['retry'])
+defineEmits(['retry','reissue'])
 const merchant=computed(()=>props.account.pro_merchant)
+const canReissue=computed(()=>!!merchant.value?.request_id&&!!merchant.value?.job_id&&!merchant.value?.completed_at&&merchant.value?.status==='failed'&&['failed','cancelled'].includes(merchant.value?.remote_status))
 const stages=computed(()=>{
   const m=merchant.value
   return [
@@ -29,6 +30,7 @@ function time(value){return value?new Date(value).toLocaleString('zh-CN',{hour12
       <small v-if="account.pro_auto?.stop_requested && !merchant.completed_at">已停止本地查询，商户已受理的申请无法撤回</small>
       <CompactErrorDetails :messages="[merchant.error,account.pro_post_merge_groups?.error,account.vm2api?.error]" />
       <button v-if="!merchant.completed_at || account.pro_post_merge_groups?.status==='failed' || account.vm2api?.stage==='delete_failed'" type="button" class="btn ghost compact" :disabled="disabled" @click="$emit('retry')">{{merchant.job_id?'查询 / 续跑进度':'执行 / 续跑申请'}}</button>
+      <button v-if="canReissue" type="button" class="btn ghost compact" :disabled="disabled" title="确认原单失败后，使用原供应商及申请资料重新发一单，保留旧单日志" @click="$emit('reissue')">重试（重新发单）</button>
     </template>
     <small v-else>达到所选条件后提交商户，每 15 秒查询；最终成功才完成。</small>
   </div>

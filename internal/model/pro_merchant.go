@@ -32,6 +32,14 @@ func (p MailAccountProfile) MerchantStarted() bool {
 func (p MailAccountProfile) MerchantCompleted() bool {
 	return p.ProMerchant != nil && p.ProMerchant.CompletedAt != nil
 }
+
+// A lost submission response is not a failed order. It must keep its original
+// idempotency key; only an identified, terminally failed job can be reissued.
+func (p MailAccountProfile) MerchantCanReissue() bool {
+	m := p.ProMerchant
+	return m != nil && m.RequestID != "" && m.JobID != "" && m.CompletedAt == nil &&
+		m.Status == "failed" && (m.RemoteStatus == "failed" || m.RemoteStatus == "cancelled")
+}
 func (p MailAccountProfile) MerchantAccepted() bool {
 	return p.ProMerchant != nil && p.ProMerchant.AcceptedAt != nil
 }

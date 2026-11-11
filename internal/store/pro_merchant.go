@@ -19,6 +19,33 @@ type ProMerchantSubmission struct {
 	Payload  json.RawMessage `json:"payload"`
 }
 
+// Read an existing immutable submission without creating an order or changing
+// stopped workflows. This is used to verify the original job before reissue.
+func (s *Store) ProMerchantSubmission(email, expectedRequestID string) (string, ProMerchantSubmission, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var requestID, encrypted string
+	var submission ProMerchantSubmission
+	err := s.db.QueryRow("SELECT request_id,encrypted_submission FROM pro_merchant_requests WHERE email=?", strings.ToLower(strings.TrimSpace(email))).Scan(&requestID, &encrypted)
+	if err != nil {
+		return requestID, submission, err
+	}
+	if requestID != expectedRequestID {
+		return requestID, submission, errors.New("商户申请已经变化，请刷新进度")
+	}
+	plain, err := s.decrypt(encrypted)
+	if err == nil {
+		err = json.Unmarshal([]byte(plain), &submission)
+	}
+	if err == nil {
+		submission.Provider, err = refundmerchant.NormalizeProvider(submission.Provider)
+	}
+	if err == nil {
+		submission.APIURL, err = refundmerchant.NormalizeProviderURL(submission.Provider, submission.APIURL)
+	}
+	return requestID, submission, err
+}
+
 // Pin the endpoint, key and exact payload before sending anything. Retrying a lost POST
 // response uses the original idempotency key even after credentials are edited.
 func (s *Store) PrepareProMerchant(email string) (model.MailAccountProfile, ProMerchantSubmission, error) {

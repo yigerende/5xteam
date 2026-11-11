@@ -10,6 +10,7 @@ import (
 
 	"chatgpt-space-merge/internal/model"
 	"chatgpt-space-merge/internal/refundmerchant"
+	"chatgpt-space-merge/internal/store"
 )
 
 func (s *Server) merchantProAccount(w http.ResponseWriter, r *http.Request) {
@@ -74,14 +75,7 @@ func (s *Server) performProMerchant(ctx context.Context, email string) (out mode
 	if err != nil {
 		return p, err
 	}
-	client := refundmerchant.Client{Provider: submission.Provider, SubmitURL: submission.APIURL}
-	if s.proMerchantClient != nil {
-		client = *s.proMerchantClient
-		client.Provider = submission.Provider
-		if client.BaseURL == "" && client.SubmitURL == "" {
-			client.SubmitURL = submission.APIURL
-		}
-	}
+	client := s.merchantClient(submission)
 	defer func() {
 		// Keep the existing downstream retirement rule, without invoking any
 		// local OpenAI merge/deletion flow. Failed cleanup remains resumable.
@@ -192,6 +186,18 @@ func (s *Server) performProMerchant(ctx context.Context, email string) (out mode
 		}
 	})
 	return p, errors.Join(queryErr, err)
+}
+
+func (s *Server) merchantClient(submission store.ProMerchantSubmission) refundmerchant.Client {
+	client := refundmerchant.Client{Provider: submission.Provider, SubmitURL: submission.APIURL}
+	if s.proMerchantClient != nil {
+		client = *s.proMerchantClient
+		client.Provider = submission.Provider
+		if client.BaseURL == "" && client.SubmitURL == "" {
+			client.SubmitURL = submission.APIURL
+		}
+	}
+	return client
 }
 
 func (s *Server) finishProMerchantRetirement(ctx context.Context, p model.MailAccountProfile) (model.MailAccountProfile, error) {

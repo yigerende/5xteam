@@ -390,6 +390,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pro-accounts/{email}/oai-confirmation", s.manageProOAI)
 	mux.HandleFunc("PUT /api/pro-accounts/{email}/merge-v2-stage", s.updateProMergeV2Stage)
 	mux.HandleFunc("POST /api/pro-accounts/{email}/merchant", s.merchantProAccount)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/merchant-retry", s.reissueProMerchant)
 	mux.HandleFunc("POST /api/pro-accounts/{email}/deactivate", s.deactivateProAccount)
 	mux.HandleFunc("PUT /api/pro-accounts/{email}/deletion-stage", s.updateProDeletionStage)
 	mux.HandleFunc("PUT /api/pro-accounts/{email}/stage", s.updateProAccountStage)
