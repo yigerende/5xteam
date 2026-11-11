@@ -160,7 +160,7 @@ func (s *Store) ClaimProRechargeReplacement(email string) (next model.MailAccoun
 			return next, e
 		}
 		var active int
-		if err = tx.QueryRow(`SELECT count(*) FROM pro_restock_tasks WHERE id<>? AND status NOT IN ('ready','failed','cancelled')`, task.ID).Scan(&active); err != nil {
+		if err = tx.QueryRow(`SELECT count(*) FROM pro_restock_tasks WHERE id<>? AND status NOT IN ('ready','failed','cancelled') AND NOT `+restockReplacementDeliveredSQL, task.ID).Scan(&active); err != nil {
 			return next, err
 		}
 		if active >= c.MaxInflight || l.HourCount >= c.HourLimit || l.DayCount >= c.DayLimit || c.HourBudget > 0 && l.HourCost+c.UnitCost > c.HourBudget || c.DayBudget > 0 && l.DayCost+c.UnitCost > c.DayBudget {

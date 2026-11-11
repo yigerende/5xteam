@@ -68,7 +68,7 @@ func (s *Store) SaveProRestockConfig(c restock.Config) (restock.Config, error) {
 	return c, err
 }
 func (s *Store) ProRestockTasks() ([]restock.Task, error) {
-	return s.proRestockTasksWhere("status NOT IN ('ready','failed','cancelled') OR created_at>?1 OR json_extract(payload,'$.updated_at')>?1 OR EXISTS(SELECT 1 FROM pro_restock_replacements WHERE task_id=pro_restock_tasks.id) OR EXISTS(SELECT 1 FROM pro_restock_payment_risk WHERE task_id=pro_restock_tasks.id AND replacement_id IS NULL)", formatTime(time.Now().Add(-48*time.Hour)))
+	return s.proRestockTasksWhere("(status NOT IN ('ready','failed','cancelled') AND NOT "+restockReplacementDeliveredSQL+") OR created_at>?1 OR json_extract(payload,'$.updated_at')>?1 OR EXISTS(SELECT 1 FROM pro_restock_replacements WHERE task_id=pro_restock_tasks.id) OR EXISTS(SELECT 1 FROM pro_restock_payment_risk WHERE task_id=pro_restock_tasks.id AND replacement_id IS NULL)", formatTime(time.Now().Add(-48*time.Hour)))
 }
 func (s *Store) ProRestockDecisionTasks(id string) ([]restock.Task, error) {
 	return s.proRestockTasksWhere("json_extract(payload,'$.decision_id')=?", id)
@@ -268,7 +268,7 @@ func (s *Store) ReserveProRestock(d restock.Decision, target string, existingInf
 		return nil, err
 	}
 	var active int
-	if err = tx.QueryRow(`SELECT count(*) FROM pro_restock_tasks WHERE status NOT IN ('ready','failed','cancelled')`).Scan(&active); err != nil {
+	if err = tx.QueryRow(`SELECT count(*) FROM pro_restock_tasks WHERE status NOT IN ('ready','failed','cancelled') AND NOT ` + restockReplacementDeliveredSQL).Scan(&active); err != nil {
 		return nil, err
 	}
 	if active > 0 || existingInflight > 0 {
@@ -278,7 +278,7 @@ func (s *Store) ReserveProRestock(d restock.Decision, target string, existingInf
 	// confirmed failures and cancellations. Restart or an obsolete decision
 	// must not bypass the final monitoring round.
 	var completedJSON string
-	if err = tx.QueryRow(`SELECT coalesce(json_group_array(json(payload)),'[]') FROM pro_restock_tasks WHERE status IN ('ready','failed','cancelled') AND json_extract(payload,'$.binding')=? AND json_extract(payload,'$.group_id')=?`, d.Snapshot.Binding, d.Snapshot.GroupID).Scan(&completedJSON); err != nil {
+	if err = tx.QueryRow(`SELECT coalesce(json_group_array(json(payload)),'[]') FROM pro_restock_tasks WHERE (status IN ('ready','failed','cancelled') OR `+restockReplacementDeliveredSQL+`) AND json_extract(payload,'$.binding')=? AND json_extract(payload,'$.group_id')=?`, d.Snapshot.Binding, d.Snapshot.GroupID).Scan(&completedJSON); err != nil {
 		return nil, err
 	}
 	var completed []restock.Task

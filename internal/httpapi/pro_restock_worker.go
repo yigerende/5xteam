@@ -294,6 +294,11 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			return nil, 0, err
 		}
 	}
+	// A replacement's verified delivery completes this replenishment chain,
+	// even when the original payment still needs a separate financial review.
+	if err := s.store.ReconcileProRestockDeliveries(tasks); err != nil {
+		return nil, 0, err
+	}
 	lead := float64(c.LeadMinutes)
 	if len(durations) >= c.LeadSamples {
 		sort.Float64s(durations)

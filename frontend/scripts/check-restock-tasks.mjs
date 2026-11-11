@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { restockTaskRows, restockTaskProgress, restockTaskTimeline } from '../src/restockTasks.js'
+import { restockTaskRows, restockTaskProgress, restockTaskTimeline, restockTaskActive } from '../src/restockTasks.js'
 const old={id:'old',email:'old@example.test',status:'ready',stage:'quota',created_at:'2026-10-19T10:00:00+08:00',submitted_at:'2026-10-19T10:01:00+08:00',ready_at:'2026-10-19T10:08:00+08:00',eta:'2026-10-19T10:09:00+08:00',stages:{'login:running':'2026-10-19T10:02:00+08:00','push:completed':'2026-10-19T10:07:00+08:00','login:completed':'2026-10-19T10:03:00+08:00'}}
 const latest={...old,id:'latest',created_at:'2026-10-20T10:00:00+08:00'}
 const pending={id:'pending',email:'pending@example.test',status:'reserved',created_at:'2026-10-20T09:00:00+08:00'}
@@ -37,3 +37,20 @@ assert.equal(restockTaskProgress({status:'submitting',stage:'queued'}).stage,'�
 assert.equal(restockTaskProgress({status:'failed',stage:'queued'}).stage,'准备失败')
 assert.equal(restockTaskProgress({status:'cancelled',stage:'queued',stopped_at:'2026-10-28T09:00:00Z'}).stage,'已停止')
 assert.equal(restockTaskProgress({status:'reserved',stage:'queued'}).stage,'排队')
+
+const replaced={...failure,status:'unknown',card_id:'held-card',fulfilled_by_task_id:'replacement',fulfilled_by_email:'replacement@example.test',fulfilled_at:old.ready_at}
+const replacementProgress=restockTaskProgress(replaced)
+assert.equal(restockTaskActive(replaced),false)
+assert.equal(replacementProgress.status,'换号补货成功')
+assert.equal(replacementProgress.success,old.ready_at)
+assert.equal(replacementProgress.eta,null)
+assert.match(replacementProgress.message,/replacement@example.test/)
+assert.match(replacementProgress.message,/原订单核实记录及卡片占用保留/)
+assert.equal(restockTaskRows([replaced],'active').length,0)
+assert.equal(restockTaskRows([replaced],'ready','replacement@example.test').length,1)
+assert.equal(restockTaskRows([replaced],'ended').length,0)
+for(const field of ['fulfilled_by_task_id','fulfilled_by_email','fulfilled_at']) {
+ assert.equal(restockTaskActive({...replaced,[field]:null}),true,'partial evidence must retain inflight')
+}
+assert.equal(restockTaskActive({...replaced,fulfilled_at:'0001-01-01T00:00:00Z'}),true)
+assert.equal(replaced.status,'unknown','display must not rewrite original financial status')

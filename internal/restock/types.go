@@ -204,6 +204,11 @@ type Snapshot struct {
 type Task struct {
 	// Opaque read version used only for monitoring compare-and-swap. Never exposed.
 	ObservedPayload string `json:"-"`
+	// Delivery can finish through an explicitly linked replacement while the
+	// original payment remains unknown. Never change its financial status.
+	FulfilledByTaskID string     `json:"fulfilled_by_task_id,omitempty"`
+	FulfilledByEmail  string     `json:"fulfilled_by_email,omitempty"`
+	FulfilledAt       *time.Time `json:"fulfilled_at,omitempty"`
 
 	PaymentRiskPending  bool                    `json:"payment_risk_pending,omitempty"`
 	PaymentRiskSource   string                  `json:"payment_risk_source,omitempty"`
@@ -256,7 +261,10 @@ func PaymentRiskPending(s Snapshot, tasks []Task) bool {
 }
 
 func (t Task) Active() bool {
-	return t.Status != "ready" && t.Status != "failed" && t.Status != "cancelled"
+	return !t.ReplacementDelivered() && t.Status != "ready" && t.Status != "failed" && t.Status != "cancelled"
+}
+func (t Task) ReplacementDelivered() bool {
+	return t.FulfilledByTaskID != "" && t.FulfilledByEmail != "" && t.FulfilledAt != nil && !t.FulfilledAt.IsZero()
 }
 func (t Task) Predictable() bool {
 	return t.Active() && t.ETA != nil && t.Status != "unknown" && t.Status != "attention" && t.Status != "waiting_card"
