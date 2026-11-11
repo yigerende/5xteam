@@ -70,12 +70,17 @@ func TestRestockDeliveryReconcilesRealReplacementChain(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// The operator may delete the failed original before the monitor observes
+	// the replacement. Its order and the child's backlink still prove delivery.
+	if err = st.DeleteMailAccountFromManagement(email); err != nil {
+		t.Fatal(err)
+	}
 	for range 2 {
 		got, _, err := s.restockTasks(snap, p, c)
 		if err != nil || len(got) != 2 {
 			t.Fatal(got, err)
 		}
-		if got[0].Active() || !got[0].ReplacementDelivered() || got[0].Status != "unknown" || got[0].ReadyAt != nil || got[0].FulfilledByEmail != child.Email {
+		if got[0].Active() || !got[0].ReplacementDelivered() || got[0].Status != "attention" || got[0].ReadyAt != nil || got[0].FulfilledByEmail != child.Email {
 			t.Fatal(got[0])
 		}
 		order, _, err := st.GPTPayOrder(parent.OrderID)

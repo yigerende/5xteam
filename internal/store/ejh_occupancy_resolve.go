@@ -77,7 +77,10 @@ func (s *Store) resolveCardOccupancy(provider, id string, in EJHOccupancyResolut
 		if order.OccupancyResolution.Outcome != in.Outcome {
 			return fmt.Errorf("该订单已有不同核实结果，不能覆盖")
 		}
-		return nil // A retried response must not release a newer order or reservation.
+		if err = finishReconciledRestockTx(tx, order); err != nil {
+			return err
+		}
+		return tx.Commit() // Never release a newer order or reservation.
 	}
 	var exists bool
 	if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM mail_accounts WHERE email=? COLLATE NOCASE)`, email).Scan(&exists); err != nil {
@@ -86,7 +89,7 @@ func (s *Store) resolveCardOccupancy(provider, id string, in EJHOccupancyResolut
 	if exists && in.Outcome != "not_activated" {
 		return fmt.Errorf("账号仍在管理列表或已重新导入，请通过账号的正常开通 / 合并流程处理")
 	}
-	if busy, e := caseAccountWorking(tx, email); e != nil {
+	if busy, e := caseAccountWorking(tx, email, id); e != nil {
 		return e
 	} else if busy {
 		return fmt.Errorf("账号仍在执行，请等本轮执行结束后核实")
@@ -152,5 +155,8 @@ func (s *Store) resolveCardOccupancy(provider, id string, in EJHOccupancyResolut
 		}
 	}
 
+	if err = finishReconciledRestockTx(tx, order); err != nil {
+		return err
+	}
 	return tx.Commit()
 }

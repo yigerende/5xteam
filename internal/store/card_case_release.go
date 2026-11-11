@@ -9,11 +9,12 @@ import (
 
 	"chatgpt-space-merge/internal/gptpay"
 	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/restock"
 )
 
 var errCaseStillRunning = errors.New("原订单仍在执行或已有付款成功证据，本次未删除；请等待执行结束后处理")
 
-func caseAccountWorking(tx *sql.Tx, email string) (bool, error) {
+func caseAccountWorking(tx *sql.Tx, email, orderID string) (bool, error) {
 	var raw string
 	err := tx.QueryRow(`SELECT profile FROM mail_accounts WHERE email=? COLLATE NOCASE`, email).Scan(&raw)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -34,8 +35,56 @@ func caseAccountWorking(tx *sql.Tx, email string) (bool, error) {
 		}
 	}
 	var working bool
-	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pro_restock_tasks WHERE email=? COLLATE NOCASE AND status NOT IN ('ready','failed','cancelled'))`, email).Scan(&working)
+	// An unresolved observation of this exact order is not a running worker.
+	// Live account execution and the order's remote-running flags are checked
+	// separately; other reservations and orders still block reconciliation.
+	err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pro_restock_tasks WHERE email=? COLLATE NOCASE AND status NOT IN ('ready','failed','cancelled') AND NOT (status IN ('unknown','attention') AND coalesce(json_extract(payload,'$.order_id'),'')=?))`, email, orderID).Scan(&working)
 	return working, err
+}
+
+// Only explicit operator reconciliation ends the matching financial wait. A
+// deleted account alone is never proof that a payment failed.
+func finishReconciledRestockTx(tx *sql.Tx, order gptpay.Order) error {
+	if order.OccupancyResolution == nil {
+		return nil
+	}
+	rows, err := tx.Query(`SELECT payload FROM pro_restock_tasks WHERE email=? COLLATE NOCASE AND status IN ('unknown','attention') AND json_extract(payload,'$.order_id')=?`, order.Email, order.ID)
+	if err != nil {
+		return err
+	}
+	var tasks []restock.Task
+	for rows.Next() {
+		var raw string
+		var task restock.Task
+		if err = rows.Scan(&raw); err == nil {
+			err = json.Unmarshal([]byte(raw), &task)
+		}
+		if err != nil {
+			break
+		}
+		tasks = append(tasks, task)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		task.Status = "cancelled"
+		task.Message = "已人工核实开通并移出，结束原补货等待；回款按卡台原规则跟踪"
+		if order.OccupancyResolution.Outcome == "not_activated" {
+			task.Status = "failed"
+			task.Message = "已人工核实未开通，结束原补货等待并解除该订单卡片占用"
+		}
+		task.UpdatedAt = order.OccupancyResolution.At
+		task.StoppedAt, task.ETA, task.NextCardCheckAt = &task.UpdatedAt, nil, nil
+		if _, err = tx.Exec(`UPDATE pro_restock_tasks SET status=?,payload=? WHERE id=?`, task.Status, mustJSON(task), task.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Deleting an unopened return record is the operator's explicit reconciliation.
@@ -50,7 +99,7 @@ func (s *Store) releaseUnopenedCaseTx(tx *sql.Tx, provider, id string, now time.
 		return err
 	}
 	if order.OccupancyResolution != nil || order.Status == "success" {
-		return nil
+		return finishReconciledRestockTx(tx, order)
 	}
 	if order.SucceededAt != nil || order.Remote.PaymentState == "succeeded" || order.Remote.Status == "success" || order.Remote.AutomaticRunning || order.CheckPending {
 		return errCaseStillRunning
@@ -60,7 +109,7 @@ func (s *Store) releaseUnopenedCaseTx(tx *sql.Tx, provider, id string, now time.
 	default:
 		return errCaseStillRunning
 	}
-	working, err := caseAccountWorking(tx, order.Email)
+	working, err := caseAccountWorking(tx, order.Email, order.ID)
 	if err != nil {
 		return err
 	}
@@ -81,6 +130,9 @@ func (s *Store) releaseUnopenedCaseTx(tx *sql.Tx, provider, id string, now time.
 		return err
 	}
 	if err = ejhSaveCaseTx(tx, order); err != nil {
+		return err
+	}
+	if err = finishReconciledRestockTx(tx, order); err != nil {
 		return err
 	}
 	audit := map[string]any{"action": "delete_unopened_release", "order_id": id, "before": before, "after": order, "at": now}

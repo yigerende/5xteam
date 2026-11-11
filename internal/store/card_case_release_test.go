@@ -7,7 +7,110 @@ import (
 
 	"chatgpt-space-merge/internal/gptpay"
 	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/restock"
 )
+
+func TestCardCaseReconciliationEndsOnlyMatchingRestockWait(t *testing.T) {
+	for _, provider := range []string{"ejh", "nexovcc"} {
+		for _, entry := range []string{"resolve", "delete"} {
+			for _, status := range []string{"unknown", "attention"} {
+				t.Run(provider+"/"+entry+"/"+status, func(t *testing.T) {
+					s := transferStore(t)
+					var card string
+					if provider == "nexovcc" {
+						card = nexStoreCard(t, s).ID
+					} else {
+						card = ejhFixtureCard(t, s).ID
+					}
+					o := transferOrder("deleted-wait@example.com", "unpaid-wait", "manual_review")
+					o.Order.CardID = card
+					if err := s.CreateGPTPayOrder(o.Order, o.Snapshot); err != nil {
+						t.Fatal(err)
+					}
+					now := time.Now()
+					task := restock.Task{ID: "waiting-task", Email: o.Order.Email, OrderID: o.Order.ID, CardID: card, Status: status, Cost: 25, CreatedAt: now, UpdatedAt: now, SubmittedAt: &now}
+					if _, err := s.db.Exec(`INSERT INTO pro_restock_tasks VALUES(?,?,?,?,?,?)`, task.ID, task.Email, task.Status, formatTime(now), task.Cost, mustJSON(task)); err != nil {
+						t.Fatal(err)
+					}
+					if entry == "resolve" {
+						in := EJHOccupancyResolutionInput{CardID: card, Email: o.Order.Email, ExpectedStatus: "manual_review", Outcome: "not_activated", Confirm: true, Evidence: "Operator verified no payment or activation"}
+						var err error
+						if provider == "ejh" {
+							err = s.ResolveEJHOccupancy(o.Order.ID, in)
+						} else {
+							err = s.ResolveNexovccOccupancy(o.Order.ID, in)
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+					} else if provider == "ejh" {
+						if _, err := s.DeleteEJHUnopenedCases(o.Order.ID); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						if _, err := s.DeleteNexovccUnopenedCases(); err != nil {
+							t.Fatal(err)
+						}
+					}
+					got, err := s.ProRestockTask(task.ID)
+					if err != nil || got.Active() || got.Status != "failed" || got.StoppedAt == nil || got.Cost != 25 || got.OrderID != task.OrderID || got.ReadyAt != nil {
+						t.Fatal(got, err)
+					}
+					c, _, err := s.GPTPayCard(card)
+					if err != nil || c.ActiveAccounts != 0 || c.PendingAccounts != 0 {
+						t.Fatal("card still held", c, err)
+					}
+					order, _, err := s.GPTPayOrder(o.Order.ID)
+					if err != nil || order.Active() || order.Status != "failed" || order.OccupancyResolution == nil || !reflect.DeepEqual(order.Remote, o.Order.Remote) {
+						t.Fatal(order, err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCardCaseRestockWaitNeverOverridesRunningOrDifferentOrder(t *testing.T) {
+	for _, scenario := range []string{"running", "submitting", "reserved", "waiting_card", "other_order", "unknown_without_link", "remote_running", "paid", "account_running"} {
+		t.Run(scenario, func(t *testing.T) {
+			s := transferStore(t)
+			_, order, in := occupancyResolutionFixture(t, s, "manual_review")
+			in.Outcome = "not_activated"
+			now := time.Now()
+			task := restock.Task{ID: "wait", Email: order.Email, OrderID: order.ID, Status: "unknown", CreatedAt: now}
+			switch scenario {
+			case "running", "submitting", "reserved", "waiting_card":
+				task.Status = scenario
+			case "other_order":
+				task.OrderID = "newer-order"
+			case "unknown_without_link":
+				task.OrderID = ""
+			case "remote_running":
+				order.Remote.AutomaticRunning = true
+			case "paid":
+				order.Remote.PaymentState = "succeeded"
+			case "account_running":
+				transferSource(t, s, order.Email)
+				if _, err := s.UpdateProAccount(order.Email, func(p *model.MailAccountProfile) { p.ProAuto.Status = "running" }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.db.Exec(`INSERT INTO pro_restock_tasks VALUES(?,?,?,?,?,?)`, task.ID, task.Email, task.Status, formatTime(now), task.Cost, mustJSON(task)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`UPDATE gptpay_orders SET profile=? WHERE id=?`, mustJSON(order), order.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ResolveEJHOccupancy(order.ID, in); err == nil {
+				t.Fatal("live or unlinked task incorrectly released")
+			}
+			got, _ := s.ProRestockTask(task.ID)
+			if !got.Active() {
+				t.Fatal("task changed after rejected resolution")
+			}
+		})
+	}
+}
 
 func TestCardCaseDeletionReleasesOnlyVerifiedOrder(t *testing.T) {
 	for _, provider := range []string{"ejh", "nexovcc"} {

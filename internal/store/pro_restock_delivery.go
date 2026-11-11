@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"chatgpt-space-merge/internal/gptpay"
@@ -85,24 +86,46 @@ func replacementDelivery(tx *sql.Tx, source restock.Task) (restock.Task, bool, e
 		}
 		visited[current.ID] = true
 		p, err := replacementProfile(tx, current.Email)
-		if errors.Is(err, sql.ErrNoRows) {
-			return restock.Task{}, false, nil
-		}
-		if err != nil {
+		missing := errors.Is(err, sql.ErrNoRows)
+		if err != nil && !missing {
 			return restock.Task{}, false, err
 		}
-		r := p.ProAuto.Replacement
-		if p.ProRestockTaskID != current.ID || p.ProAuto.ID == "" || r == nil || r.NextEmail == "" || r.RootEmail == "" {
-			return restock.Task{}, false, nil
-		}
-		if root == "" {
-			root = r.RootEmail
-		}
-		if r.RootEmail != root {
-			return restock.Task{}, false, nil
+		nextID, nextEmail := "", ""
+		if missing {
+			// Account deletion must not erase a persisted replacement relation.
+			// For legacy tasks, the exact original payment embeds its flow ID;
+			// still require the child task and account's explicit backlink below.
+			var raw string
+			err = tx.QueryRow(`SELECT profile FROM gptpay_orders WHERE id=? AND email=?`, current.OrderID, current.Email).Scan(&raw)
+			if errors.Is(err, sql.ErrNoRows) {
+				return restock.Task{}, false, nil
+			}
+			if err != nil {
+				return restock.Task{}, false, err
+			}
+			var order gptpay.Order
+			if err = json.Unmarshal([]byte(raw), &order); err != nil {
+				return restock.Task{}, false, err
+			}
+			if order.Email != current.Email || order.ID != current.OrderID || !strings.HasPrefix(order.ID, "pro-auto-") || len(order.ID) <= len("pro-auto-") {
+				return restock.Task{}, false, nil
+			}
+			nextID = "recharge:" + strings.TrimPrefix(order.ID, "pro-auto-")
+		} else {
+			r := p.ProAuto.Replacement
+			if p.ProRestockTaskID != current.ID || p.ProAuto.ID == "" || r == nil || r.NextEmail == "" || r.RootEmail == "" {
+				return restock.Task{}, false, nil
+			}
+			if root == "" {
+				root = r.RootEmail
+			}
+			if r.RootEmail != root {
+				return restock.Task{}, false, nil
+			}
+			nextID, nextEmail = "recharge:"+p.ProAuto.ID, r.NextEmail
 		}
 		var raw string
-		err = tx.QueryRow(`SELECT payload FROM pro_restock_tasks WHERE id=? AND email=?`, "recharge:"+p.ProAuto.ID, r.NextEmail).Scan(&raw)
+		err = tx.QueryRow(`SELECT payload FROM pro_restock_tasks WHERE id=?`, nextID).Scan(&raw)
 		if errors.Is(err, sql.ErrNoRows) {
 			return restock.Task{}, false, nil
 		}
@@ -113,7 +136,7 @@ func replacementDelivery(tx *sql.Tx, source restock.Task) (restock.Task, bool, e
 		if err = json.Unmarshal([]byte(raw), &next); err != nil {
 			return restock.Task{}, false, err
 		}
-		if next.DecisionID != source.DecisionID || next.CreatedAt.Before(current.CreatedAt) || next.StoppedAt != nil || next.Status == "cancelled" {
+		if next.ID != nextID || (nextEmail != "" && next.Email != nextEmail) || next.DecisionID != source.DecisionID || next.CreatedAt.Before(current.CreatedAt) || next.StoppedAt != nil || next.Status == "cancelled" {
 			return restock.Task{}, false, nil
 		}
 		np, err := replacementProfile(tx, next.Email)
@@ -124,7 +147,10 @@ func replacementDelivery(tx *sql.Tx, source restock.Task) (restock.Task, bool, e
 			return restock.Task{}, false, err
 		}
 		nr := np.ProAuto.Replacement
-		if np.ProRestockTaskID != next.ID || nr == nil || nr.PreviousEmail != p.Email || nr.RootEmail != root {
+		if nr != nil && root == "" {
+			root = nr.RootEmail
+		}
+		if np.ProRestockTaskID != next.ID || nr == nil || nr.PreviousEmail != current.Email || nr.RootEmail == "" || nr.RootEmail != root {
 			return restock.Task{}, false, nil
 		}
 		if next.Status == "ready" && next.ReadyAt != nil && !next.ReadyAt.Before(next.CreatedAt) && next.AccountID > 0 && next.OrderID != "" && next.OrderID == np.ProAuto.OrderID {
