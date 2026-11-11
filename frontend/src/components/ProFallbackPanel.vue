@@ -75,7 +75,7 @@ function selectVisible(row){row.account_ids=[...new Set([...row.account_ids,...f
 function remove(row,id){row.account_ids=row.account_ids.filter(v=>Number(v)!==Number(id));dirty.value=true}
 async function save(){await action(async()=>{
  const c=await api('/api/pro-restock/fallback',{method:'PUT',body:input()});if(disposed)return
- setDraft(c,state.value?.monitor);password.value='';dirty.value=false;await refresh();notice.value='兜底规则已保存：每条按自己的监控组空组开启、有号关闭；共享账号只要一条规则需要就保持开启。'
+ setDraft(c,state.value?.monitor);password.value='';dirty.value=false;await refresh();notice.value='兜底规则已保存：每条按自己的监控组没有 OAuth 账号时开启、有 OAuth 账号时关闭；共享账号只要一条规则需要就保持开启。'
 })}
 async function retry(){await action(async()=>{try{const data=await api('/api/pro-restock/fallback/retry',{method:'POST'});if(!disposed){state.value=data;notice.value='核验完成。'}}finally{await refresh()}})}
 async function reload(){await action(async()=>{await refresh(true)});if(!disposed&&props.settings)await loadOptions(true)}
@@ -88,11 +88,11 @@ onUnmounted(()=>{disposed=true;revision++;for(const r of form.rules)cancelAccoun
 <component :is="compact?'dialog':'div'" ref="detailDialog" :class="{'fallback-dialog':compact}" :aria-label="compact?'兜底调度详情':undefined" @click="compact&&$event.target===detailDialog&&detailDialog.close()">
 <article class="fallback-panel" aria-label="兜底调度">
  <button v-if="compact" type="button" class="close-detail" aria-label="关闭兜底详情" @click="detailDialog.close()">✕</button>
- <header><div><h2>兜底调度</h2><p>每条规则独立监控：空组开启对应兜底，有号后关闭</p></div><span class="badge">{{state?phases[state.plan.phase]:'读取状态中…'}}</span></header>
+ <header><div><h2>兜底调度</h2><p>每条规则独立监控：组内没有 OAuth 账号时开启兜底，有 OAuth 账号时关闭；API Key 不计入，查询失败保持原状态</p></div><span class="badge">{{state?phases[state.plan.phase]:'读取状态中…'}}</span></header>
  <p v-if="error||fetchError" class="alert error" role="alert">{{error||fetchError}}</p><p v-if="notice" class="alert" role="status">{{notice}}</p>
  <template v-if="state">
   <p>{{state.plan.reason}}</p>
-  <div class="rule-statuses"><div v-for="(row,index) in state.rules" :key="index" class="rule-status" :class="{warn:row.plan.hold}"><b>规则 {{index+1}} · {{row.monitor.group_name||'监控分组'}} #{{row.rule.monitor_group_id||'未选择'}}</b><span>{{phases[row.plan.phase]}}</span><p>监控组账号：{{row.monitor.count??'未知'}} · 兜底分组 {{row.rule.group_ids.length}} 个 · 所选账号 {{row.rule.account_ids.length}} 个</p><small>{{row.monitor.error||row.plan.reason}} · {{fmt(row.monitor.at)}}</small></div></div>
+  <div class="rule-statuses"><div v-for="(row,index) in state.rules" :key="index" class="rule-status" :class="{warn:row.plan.hold}"><b>规则 {{index+1}} · {{row.monitor.group_name||'监控分组'}} #{{row.rule.monitor_group_id||'未选择'}}</b><span>{{phases[row.plan.phase]}}</span><p>监控组 OAuth 账号：{{row.monitor.count??'未知'}} · 兜底分组 {{row.rule.group_ids.length}} 个 · 所选账号 {{row.rule.account_ids.length}} 个</p><small>{{row.monitor.error||row.plan.reason}} · {{fmt(row.monitor.at)}}</small></div></div>
   <p v-if="state.error" class="alert error" role="alert">{{state.error}}</p>
   <p v-if="stale&&state.config.enabled" class="alert warn">尚未完成近期核验，上方计划不能视为账号已完成切换。</p>
   <p v-if="pending" class="alert warn">{{pending}} 个所选账号等待首次核验。</p>

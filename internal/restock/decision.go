@@ -183,7 +183,15 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	d.ReserveNeed = max(0, c.Reserve-d.Usable-timely)
 	// An empty group has no consumption samples or pressure to confirm. All
 	// matching active intents count for deduplication, even without an ETA.
-	if len(s.Accounts) == 0 && c.EmptyGroupCount > 0 {
+	emptyGroup := len(s.Accounts) == 0
+	if s.MonitorOAuthCount != nil {
+		emptyGroup = *s.MonitorOAuthCount == 0
+	}
+	if s.MonitorOAuthError != "" {
+		emptyGroup = false
+		d.Warnings = append(d.Warnings, s.MonitorOAuthError)
+	}
+	if emptyGroup && c.EmptyGroupCount > 0 {
 		d.EmptyGroupNeed = max(0, c.EmptyGroupCount-groupInflight)
 	}
 	need := max(d.TimeNeed, d.ConcurrencyNeed, d.ReserveNeed, d.EmptyGroupNeed, d.ForceMergeNeed, d.ExitNeed)
@@ -193,7 +201,7 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	}
 	d.Trace.NetNeed = need
 	if need == 0 {
-		if len(s.Accounts) == 0 && c.EmptyGroupCount > 0 && groupInflight > 0 {
+		if emptyGroup && c.EmptyGroupCount > 0 && groupInflight > 0 {
 			return block("空分组启动数量已由同组在途覆盖，等待原任务入组；结果未知仍保留占用")
 		}
 		return block("没有已确认的净缺口；继续采样并跟踪在途")

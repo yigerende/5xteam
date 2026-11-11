@@ -33,6 +33,9 @@ func (s *Server) saveProCostSnapshot(profile model.MailAccountProfile, settings 
 		if p.PushProvider != "sub2" || p.Sub2AccountID != profile.Sub2AccountID || p.VM2 != nil {
 			return
 		}
+		if p.ProRestockTargetID != profile.ProRestockTargetID || p.ProPushDownstream != nil && !p.ProPushDownstream.Matches(model.ProDownstream(settings)) {
+			return
+		}
 		if p.ProSIWC != nil && p.ProSIWC.AccountID > 0 && (settings.Sub2.AuthMode != "siwc" || p.ProPushDownstream == nil || !p.ProPushDownstream.Matches(model.ProDownstream(settings))) {
 			return
 		}

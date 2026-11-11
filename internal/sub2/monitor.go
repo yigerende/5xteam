@@ -32,6 +32,39 @@ type MonitorAccount struct {
 	} `json:"credentials"`
 }
 
+// Empty-group startup counts membership, not schedulability or local Pro state.
+// Disabled OAuth members still exist; API-key accounts are not OAuth supply.
+func CountGroupOAuth(accounts []MonitorAccount, group int64) (int, error) {
+	count := 0
+	for _, a := range accounts {
+		member := false
+		for _, id := range a.GroupIDs {
+			if id == group {
+				member = true
+			}
+		}
+		for _, g := range a.Groups {
+			if g.ID == group {
+				member = true
+			}
+		}
+		if !member {
+			continue
+		}
+		if a.Platform != "openai" {
+			return 0, errors.New("监控分组账号平台不明确，不能判定 OAuth 空组")
+		}
+		switch a.Type {
+		case "oauth":
+			count++
+		case "apikey":
+		default:
+			return 0, errors.New("监控分组账号类型不明确，不能判定 OAuth 空组")
+		}
+	}
+	return count, nil
+}
+
 func (a MonitorAccount) Ready(now time.Time, models []string) bool {
 	if a.Platform != "openai" || a.Status != "active" || !a.Schedulable || a.Concurrency < 1 || (a.ExpiresAt != nil && *a.ExpiresAt <= now.Unix()) {
 		return false

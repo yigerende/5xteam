@@ -137,6 +137,11 @@ func (s *Server) collectProRestock(ctx context.Context, c restock.Config, p mode
 	if e != nil {
 		return snap, e
 	}
+	if count, err := sub2.CountGroupOAuth(accounts, c.GroupID); err == nil {
+		snap.MonitorOAuthCount = &count
+	} else {
+		snap.MonitorOAuthError = err.Error()
+	}
 	own := map[int64]model.MailAccountProfile{}
 	scoped := ts.Active() && (tc.Role == "receiver" || ts.Taking())
 	if scoped {

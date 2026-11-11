@@ -176,7 +176,7 @@ func (f FallbackConfig) Plan(now time.Time, o FallbackObservation) FallbackPlan 
 		return FallbackPlan{Hold: true, Phase: "unknown", Reason: "主监控组数据待确认，保持当前调度并按检查周期重试"}
 	}
 	if *o.Count == 0 {
-		return FallbackPlan{Active: true, Phase: "active", Reason: "主监控分组为空：开启所选兜底账号调度"}
+		return FallbackPlan{Active: true, Phase: "active", Reason: "主监控分组没有 OAuth 账号：开启所选兜底账号调度"}
 	}
-	return FallbackPlan{Phase: "off", Reason: fmt.Sprintf("主监控分组有 %d 个账号：关闭所选兜底账号调度", *o.Count)}
+	return FallbackPlan{Phase: "off", Reason: fmt.Sprintf("主监控分组有 %d 个 OAuth 账号：关闭所选兜底账号调度", *o.Count)}
 }

@@ -105,3 +105,30 @@ func TestEmptyGroupConfigCompatibility(t *testing.T) {
 		}
 	}
 }
+
+func TestEmptyGroupUsesPrimaryOAuthCount(t *testing.T) {
+	c, s, now := fixture()
+	c.EmptyGroupCount = 1
+	c.Reserve = 0
+	c.TimeEnabled = false
+	c.ConcurrencyEnabled = false
+	zero, one := 0, 1
+	s.Accounts = []Account{{ID: 1, Ready: true, Capacity: 100}} // API key or other takeover group.
+	s.MonitorOAuthCount = &zero
+	d := Evaluate(c, s, nil, Limits{}, 0, 20, 5, now)
+	if d.EmptyGroupNeed != 1 || d.Suggested != 1 {
+		t.Fatal("API key blocked OAuth startup", d)
+	}
+	s.MonitorOAuthCount = &one
+	s.Accounts[0].Ready = false
+	d = Evaluate(c, s, nil, Limits{}, 0, 20, 5, now)
+	if d.EmptyGroupNeed != 0 {
+		t.Fatal("disabled OAuth treated as absent", d)
+	}
+	s.MonitorOAuthCount = nil
+	s.MonitorOAuthError = "unknown type"
+	s.Accounts = nil
+	if d = Evaluate(c, s, nil, Limits{}, 0, 20, 5, now); d.EmptyGroupNeed != 0 || d.Suggested != 0 {
+		t.Fatal("unknown was treated as empty", d)
+	}
+}

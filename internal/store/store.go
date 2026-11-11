@@ -673,6 +673,7 @@ func preserveProProfile(profile *model.MailAccountProfile, old model.MailAccount
 	profile.ProOAIConfirmations = old.ProOAIConfirmations
 	profile.ProDailyMerge, profile.ProMergeTrigger = old.ProDailyMerge, old.ProMergeTrigger
 	profile.ProRestockTaskID, profile.ProRestockTargetID = old.ProRestockTaskID, old.ProRestockTargetID
+	profile.ProPendingPushTargetID = old.ProPendingPushTargetID
 	profile.ProPushStartedAt = old.ProPushStartedAt
 	profile.ProPushTimeoutEnabled, profile.ProPushTimeoutMinutes = old.ProPushTimeoutEnabled, old.ProPushTimeoutMinutes
 	profile.ProPushDownstream = old.ProPushDownstream

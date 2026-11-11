@@ -124,7 +124,7 @@ func (s *Server) performDirectSIWCPush(ctx context.Context, p model.MailAccountP
 	if len(v.Sub2.GroupIDs) == 0 {
 		return p, errors.New("请选择 SIWC 推送分组")
 	}
-	if p.PushStatus == "completed" && p.ProPushDownstream != nil && p.ProPushDownstream.Matches(model.ProDownstream(v)) && p.Sub2AccountID > 0 {
+	if p.ProPendingPushTargetID == "" && p.PushStatus == "completed" && p.ProPushDownstream != nil && p.ProPushDownstream.Matches(model.ProDownstream(v)) && p.Sub2AccountID > 0 {
 		_, e = s.sub2.ApplyOAuthCredentials(ctx, v.Sub2, password, p.Sub2AccountID, siwcCredentials(tokens))
 		return p, e
 	}
@@ -139,11 +139,12 @@ func (s *Server) performDirectSIWCPush(ctx context.Context, p model.MailAccountP
 	}
 	target := p.ProRestockTargetID
 	updated, e := s.store.UpdateProAccount(p.Email, func(p *model.MailAccountProfile) {
+		p.ProRestockTargetID = target
+		completeProPushTarget(p, v)
 		p.PushProvider, p.PushStatus = "sub2", "completed"
 		p.Sub2AccountID, p.Sub2AccountName = created.ID, created.Name
 		ref := model.ProDownstream(v)
 		p.ProPushDownstream = &ref
-		p.ProRestockTargetID = target
 		now := time.Now()
 		p.ProQualitySince = &now
 		p.QuotaCheckedAt = nil

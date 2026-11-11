@@ -399,7 +399,11 @@ func (s *Server) collectFallbackSource(ctx context.Context, c restock.Config) (r
 		o.Error = fallbackError("读取主监控组账号", err)
 		return o, key
 	}
-	count := len(accounts)
+	count, err := sub2.CountGroupOAuth(accounts, c.GroupID)
+	if err != nil {
+		o.Error = err.Error()
+		return o, key
+	}
 	o.Count, o.At = &count, s.fallbackNow()
 	return o, key
 }

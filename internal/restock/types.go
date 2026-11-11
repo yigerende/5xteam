@@ -184,6 +184,8 @@ type Account struct {
 	Windows             []Window      `json:"windows"`
 }
 type Snapshot struct {
+	MonitorOAuthCount   *int        `json:"monitor_oauth_count,omitempty"`
+	MonitorOAuthError   string      `json:"monitor_oauth_error,omitempty"`
 	DemandGate          *DemandGate `json:"no_restock_demand,omitempty"`
 	TakeoverToken       string      `json:"takeover_token,omitempty"`
 	MonitorGroups       []int64     `json:"monitor_groups,omitempty"`

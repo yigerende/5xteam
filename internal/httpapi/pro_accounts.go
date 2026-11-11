@@ -891,12 +891,47 @@ func buildProCredentials(profile model.MailAccountProfile, credentials model.Mai
 }
 
 func (s *Server) performProPush(ctx context.Context, email string) (out model.MailAccountProfile, retErr error) {
+	return s.performProPushMode(ctx, email, false)
+}
+
+func (s *Server) performProPushMode(ctx context.Context, email string, manual bool) (out model.MailAccountProfile, retErr error) {
 	finishStage := s.beginProManualStage(email, "push")
 	defer func() { finishStage(retErr) }()
 	profile, credentials, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return profile, err
 	}
+	if manual {
+		profile, err = s.prepareProManualPush(profile)
+		if err != nil {
+			return profile, err
+		}
+	}
+	previous := profile
+	defer func() {
+		if retErr == nil || previous.ProPendingPushTargetID == "" {
+			return
+		}
+		pending, _, _, e := s.proPendingPushSettings(previous)
+		if e != nil {
+			return
+		}
+		attempt, e := s.proHasPushAttempt(previous, pending)
+		if e != nil {
+			return
+		}
+		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+			if p.ProPendingPushTargetID != previous.ProPendingPushTargetID {
+				return
+			}
+			if !attempt {
+				p.ProPendingPushTargetID = ""
+			}
+			if previous.Sub2AccountID > 0 && previous.PushStatus == "completed" {
+				p.PushStatus = previous.PushStatus
+			}
+		})
+	}()
 	v, subPassword, cpaKey, err := s.proNewPushSettings(profile)
 	if err != nil {
 		return profile, err
@@ -991,6 +1026,7 @@ func (s *Server) performProPush(ctx context.Context, email string) (out model.Ma
 		return profile, err
 	}
 	out, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+		completeProPushTarget(p, v)
 		p.PushProvider, p.PushStatus = "sub2", "completed"
 		ref := model.ProDownstream(v)
 		p.ProPushDownstream = &ref
@@ -1018,7 +1054,7 @@ func (s *Server) pushProAccount(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
 	unlock := s.lockProAccount(email)
 	defer unlock()
-	p, err := s.performProPush(r.Context(), email)
+	p, err := s.performProPushMode(r.Context(), email, true)
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
@@ -1097,7 +1133,10 @@ func (s *Server) pushProAccounts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result := s.runProBatch(r.Context(), emails, func(ctx context.Context, email string) error { _, err := s.performProPush(ctx, email); return err })
+	result := s.runProBatch(r.Context(), emails, func(ctx context.Context, email string) error {
+		_, err := s.performProPushMode(ctx, email, true)
+		return err
+	})
 	writeAPI(w, 200, result, "")
 }
 

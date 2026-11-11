@@ -103,6 +103,7 @@ type MailAccountProfile struct {
 	ProAuto                    ProAutoState                   `json:"pro_auto"`
 	ProRestockTaskID           string                         `json:"pro_restock_task_id,omitempty"`
 	ProRestockTargetID         string                         `json:"pro_restock_target_id,omitempty"`
+	ProPendingPushTargetID     string                         `json:"pro_pending_push_target_id,omitempty"`
 	ProMigration               *ProMigrationState             `json:"pro_migration,omitempty"`
 	ProManualStages            map[string]ProStageProgress    `json:"pro_manual_stages,omitempty"`
 	ProStageOverrides          map[string]ProStageOverride    `json:"pro_stage_overrides,omitempty"`

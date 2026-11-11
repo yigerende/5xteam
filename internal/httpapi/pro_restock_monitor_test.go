@@ -29,7 +29,13 @@ func TestProRestockMonitorQuality(t *testing.T) {
 			if r.URL.Query().Get("group") != "1" {
 				t.Error("must query only monitored group")
 			}
-			account := map[string]any{"id": 1, "platform": "openai", "status": "active", "schedulable": true, "concurrency": 10, "group_ids": []int{1}}
+			account := map[string]any{"id": 1, "platform": "openai", "type": "oauth", "status": "active", "schedulable": true, "concurrency": 10, "group_ids": []int{1}}
+			if mode == "native_apikey" {
+				account["type"] = "apikey"
+			}
+			if mode == "native_unknown_type" {
+				delete(account, "type")
+			}
 			if mode == "native_shared" {
 				account["group_ids"] = []int{1, 2}
 			}
@@ -101,7 +107,7 @@ func TestProRestockMonitorQuality(t *testing.T) {
 	c.Reserve = 1
 	p := model.ProSettings{Provider: "sub2", Sub2: model.Sub2Settings{URL: server.URL, Email: "admin@test.com", GroupIDs: []int64{1, 2}, AccountConcurrency: 10}}
 	s.proRestock.quotaBinding = restockBinding(p)
-	for _, name := range []string{"zero", "no_quality", "no_known", "native_zero", "native_shared", "native_empty", "native_pressure", "unknown", "incomplete_quality", "http_error", "missing_load", "foreign_member", "duplicate", "stale", "capacity_changed", "upstream_fault"} {
+	for _, name := range []string{"zero", "no_quality", "no_known", "native_zero", "native_shared", "native_empty", "native_pressure", "native_apikey", "native_unknown_type", "unknown", "incomplete_quality", "http_error", "missing_load", "foreign_member", "duplicate", "stale", "capacity_changed", "upstream_fault"} {
 		t.Run(name, func(t *testing.T) {
 			mode = name
 			snap, err := s.collectProRestock(context.Background(), c, p, "test-secret")
@@ -109,6 +115,24 @@ func TestProRestockMonitorQuality(t *testing.T) {
 				snap.Valid = false
 			}
 			d := restock.Evaluate(c, snap, nil, restock.Limits{}, 2, 10, 5, time.Now())
+			if name == "native_apikey" || name == "native_unknown_type" || name == "native_zero" {
+				policy := c
+				policy.EmptyGroupCount = 1
+				policy.Reserve = 0
+				policy.ConcurrencyEnabled = false
+				policy.TimeEnabled = false
+				empty := restock.Evaluate(policy, snap, nil, restock.Limits{}, 2, 10, 5, time.Now())
+				want := 0
+				if name == "native_apikey" {
+					want = 1
+				}
+				if empty.EmptyGroupNeed != want || empty.Suggested != want {
+					t.Fatalf("OAuth empty-group: %s %+v", name, empty)
+				}
+				if name == "native_unknown_type" && (snap.MonitorOAuthCount != nil || snap.MonitorOAuthError == "") {
+					t.Fatal("unknown OAuth count considered complete")
+				}
+			}
 			if name == "zero" || name == "no_quality" || name == "no_known" || strings.HasPrefix(name, "native_") {
 				if err != nil || !snap.Valid || !snap.LoadValid || !d.DemandKnown {
 					t.Fatalf("valid monitoring data rejected: %+v %v", snap, err)

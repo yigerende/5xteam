@@ -29,6 +29,7 @@ type fallbackMock struct {
 	logins           int
 	reads            int
 	sourceCount      int
+	sourceType       string
 	sourceFailure    bool
 	sourceMissing    bool
 	sourceIncomplete bool
@@ -90,7 +91,11 @@ func newFallbackMock(t *testing.T) *fallbackMock {
 				items := []any{}
 				if !m.sourceIncomplete {
 					for i := 0; i < sourceCount; i++ {
-						items = append(items, map[string]any{"id": 100 + i, "platform": "openai", "group_ids": []int64{sourceID}})
+						kind := m.sourceType
+						if kind == "" {
+							kind = "oauth"
+						}
+						items = append(items, map[string]any{"id": 100 + i, "platform": "openai", "type": kind, "group_ids": []int64{sourceID}})
 					}
 				}
 				write(map[string]any{"items": items, "total": sourceCount})
@@ -157,6 +162,30 @@ func newFallbackMock(t *testing.T) *fallbackMock {
 	}))
 	t.Cleanup(m.server.Close)
 	return m
+}
+
+func TestFallbackCountsOAuthInsteadOfAPIKeysOrLocalTasks(t *testing.T) {
+	s, _, m, _ := fallbackFixture(t)
+	m.sourceCount = 2
+	m.sourceType = "apikey"
+	if err := s.tickProFallback(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if !m.on[1] || !m.on[2] || s.proFallback.observation.Count == nil || *s.proFallback.observation.Count != 0 {
+		t.Fatal("API key prevented fallback")
+	}
+	m.sourceType = "unrecognized"
+	_ = s.tickProFallback(context.Background(), true)
+	if !m.on[1] || !m.on[2] || s.proFallback.observation.Error == "" {
+		t.Fatal("unknown account type changed scheduling")
+	}
+	m.sourceType = "oauth"
+	if err := s.tickProFallback(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if m.on[1] || m.on[2] || *s.proFallback.observation.Count != 2 {
+		t.Fatal("unmanaged downstream OAuth did not stop fallback")
+	}
 }
 func fallbackFixture(t *testing.T) (*Server, *store.Store, *fallbackMock, *time.Time) {
 	t.Helper()
