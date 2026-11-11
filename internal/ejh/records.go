@@ -89,6 +89,8 @@ type Case struct {
 
 	// Read from the account's current user-cost snapshot; nil means unqueried.
 	ConsumptionTotal *float64 `json:"consumption_total,omitempty"`
+	// Read-only projection; not_pushed is distinct from a queried zero.
+	ConsumptionState string `json:"consumption_state,omitempty"`
 
 	AutomaticState  string             `json:"automatic_state"`
 	StateOverride   *CaseStateOverride `json:"state_override,omitempty"`

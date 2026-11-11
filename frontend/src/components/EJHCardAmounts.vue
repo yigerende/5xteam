@@ -33,6 +33,7 @@ const earnings=computed(()=>financeProfit({openingUSD:props.card.issuer_linked!=
   <div v-if="dead.rows.length" class="money-fee"><span>死号亏损</span><strong>{{earnings.deadR}} R<small>{{paymentMoney(dead.amount)}} USD</small></strong></div><div class="money-fee"><span>API 收费</span><strong>{{earnings.merchantR}} R<small>{{merchantFee}} USD</small></strong></div>
   <div class="money-fee card-profit"><span>卡片结余{{earnings.estimated?'（估算）':''}}</span><strong :class="{negative:earnings.profitR?.startsWith('-')}">{{earnings.profitR??'—'}} R</strong></div>
   <small>充值手续费在总账扣除</small><small v-if="card.payment_policy?.mode==='payment_only'">只付款本金 {{paymentOnly.missing?'待核实':paymentMoney(paymentOnly.amount)+' USD'}} · 单列支出</small>
+  <small v-if="consumption.notPushed">{{consumption.notPushed}} 个账号未推送，无消费数据</small>
   <small v-if="earnings.incomplete" class="warning">{{consumption.missing?'消费未查询完整':'部分费用待核实'}}，暂不计算结余</small>
   <details class="money-details"><summary>付款、回款与费用明细</summary>
    <div class="money-head"><span>付款</span><span>回款</span><span>差额</span></div>

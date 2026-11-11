@@ -63,6 +63,15 @@ func (s *Store) initializeEJHDisplayRevision() error {
 			}
 		}
 	}
+	// A separate trigger also upgrades databases with the original IF NOT EXISTS
+	// account trigger. Only a change in eligibility invalidates this projection.
+	old := strings.ReplaceAll(ejhConsumptionNotPushedProjection, "m.profile", "OLD.profile")
+	next := strings.ReplaceAll(ejhConsumptionNotPushedProjection, "m.profile", "NEW.profile")
+	if _, err = tx.Exec(`CREATE TRIGGER IF NOT EXISTS ejh_display_mail_consumption_update AFTER UPDATE ON mail_accounts
+	WHEN ` + old + ` IS NOT ` + next + ` BEGIN
+	UPDATE display_revisions SET revision=revision+1 WHERE scope='ejh'; END;`); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

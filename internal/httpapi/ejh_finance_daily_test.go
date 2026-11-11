@@ -22,6 +22,19 @@ func TestEJHFinancialConsumptionAgreesWithAccountAndCardTotals(t *testing.T) {
 	}
 }
 
+func TestEJHFinancialConsumptionHistoryOverridesNotPushed(t *testing.T) {
+	cases := []ejh.Case{{Email: "zero@example.com", ConsumptionState: "not_pushed"}, {Email: "paid@example.com", ConsumptionState: "not_pushed"}, {Email: "none@example.com", ConsumptionState: "not_pushed"}}
+	applyEJHFinancialConsumption(cases, []store.EJHConsumption{{ID: "zero", Email: "ZERO@example.com", Total: 0}, {ID: "paid", Email: "paid@example.com", Total: 15}})
+	for i, want := range []float64{0, 15} {
+		if cases[i].ConsumptionTotal == nil || *cases[i].ConsumptionTotal != want || cases[i].ConsumptionState != "" {
+			t.Fatalf("history was excluded: %+v", cases[i])
+		}
+	}
+	if cases[2].ConsumptionTotal != nil || cases[2].ConsumptionState != "not_pushed" {
+		t.Fatal("no history must remain not pushed, without fabricated amount")
+	}
+}
+
 func TestDailyConsumptionRefreshesFinalRequestsAndBacksOff(t *testing.T) {
 	zone := time.FixedZone("Asia/Shanghai", 8*3600)
 	at := time.Date(2026, 10, 16, 23, 0, 0, 0, zone)

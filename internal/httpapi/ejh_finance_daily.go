@@ -30,6 +30,9 @@ func applyEJHFinancialConsumption(cases []ejh.Case, history []store.EJHConsumpti
 	}
 	for i := range cases {
 		amount, ok := totals[strings.ToLower(strings.TrimSpace(cases[i].Email))]
+		if ok {
+			cases[i].ConsumptionState = ""
+		}
 		if ok && (cases[i].ConsumptionTotal == nil || amount > *cases[i].ConsumptionTotal) {
 			cases[i].ConsumptionTotal = &amount
 		}

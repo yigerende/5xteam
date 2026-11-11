@@ -10,7 +10,7 @@ const today=computed(()=>props.data._overview?.today || dailyFinanceCost(props.d
 <template>
  <div class="finance-totals" aria-label="收益与成本汇总">
   <div class="finance-main">
-   <div><span>消费收益</span><strong>{{display(earnings.consumptionR??'—')}} <em>R</em></strong><small>下游用户消费 · 扣费前收益</small><small v-if="!masked&&(totals.consumption.missing)" class="warning">{{display(totals.consumption.missing)}} 个账号未查询，仅含已知数据</small></div>
+   <div><span>消费收益</span><strong>{{display(earnings.consumptionR??'—')}} <em>R</em></strong><small>下游用户消费 · 扣费前收益</small><small v-if="!masked&&(totals.consumption.missing)" class="warning">{{display(totals.consumption.missing)}} 个账号未查询，仅含已知数据</small><small v-if="!masked&&totals.consumption.notPushed">{{display(totals.consumption.notPushed)}} 个账号未推送，无消费数据</small></div>
    <div><span>总成本 <small v-if="!masked&&(earnings.estimated)">估算</small></span><strong>{{display(earnings.costR??'—')}} <em>R</em></strong><small>{{display(earnings.costUSD??'—')}} USD</small><small>开卡费 + 充值手续费 + 撤销费 + 清算 + 退款费 + API 收费 + 死号亏损</small><small v-if="!masked&&(earnings.costIncomplete)" class="warning">已知 {{display(earnings.knownCostR??'—')}} R · {{display(earnings.knownCostUSD??'—')}} USD · 部分费用待核实</small>
     <div class="today-cost"><span>当日成本 <small>北京时间 {{today.date}}<template v-if="!masked&&today.earnings.estimated"> · 估算</template></small></span><b>{{display(today.earnings.costUSD??'—')}} USD · {{display(today.earnings.costR??'—')}} R</b><small v-if="!masked&&today.earnings.costIncomplete" class="warning">已知 {{today.earnings.knownCostUSD??'—'}} USD · {{today.earnings.knownCostR??'—'}} R，部分费用待核实</small><small v-if="!masked&&today.undated">按已记录日期统计；{{today.undated}} 笔历史费用日期未明确，未计入当日</small></div>
    </div>

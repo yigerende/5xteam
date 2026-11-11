@@ -8,6 +8,7 @@ import { authorizationDiscrepancies } from './ejh-reconciliation.js'
 import { summarizeClearingCosts } from './ejh-clearing.js'
 import { refundFeeSummary, refundFeeEntries } from './ejh-refund-fees.js'
 import { applyRefundFeeOverrides, summarizeRefundFees } from './ejh-refund-cost.js'
+import { summarizeConsumption } from './ejh-consumption.js'
 
 // Decimal cents for all USD/USDT arithmetic; R remains the downstream counter.
 export function cents(value) {
@@ -31,20 +32,7 @@ export function beijingDay(value=Date.now()) {
   return n===null?'':new Date(n+8*3600000).toISOString().slice(0,10)
 }
 export function consumptionSummary(cases=[],history=[]) {
-  const accounts=new Map(),seen=new Set()
-  for(const row of history){
-    if(seen.has(row.id)||!Number.isFinite(row.total)||row.total<0)continue
-    seen.add(row.id);const key=row.email?.toLowerCase()||row.id
-    accounts.set(key,(accounts.get(key)||0)+row.total)
-  }
-  for(const row of cases){
-    const key=row.email?.trim().toLowerCase()||row.id,n=row.consumption_total
-    if(!accounts.has(key))accounts.set(key,null)
-    if(typeof n==='number'&&Number.isFinite(n)&&n>=0)accounts.set(key,Math.max(accounts.get(key)||0,n))
-  }
-  let total=0,missing=0
-  for(const n of accounts.values()){if(n===null)missing++;else total+=n}
-  return {total:accounts.size&&missing===accounts.size?null:total,missing,count:accounts.size}
+  return summarizeConsumption(cases,history)
 }
 export function openingEntries(data) {
   const unique=new Map(),ops=data.operations||[]

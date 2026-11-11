@@ -574,6 +574,39 @@ type ejhCaseQuery interface {
 const ejhCaseAccountProjection = `json_object('management_scope',json_extract(m.profile,'$.management_scope'),'mail_pro_actions',json_extract(m.profile,'$.mail_pro_actions'),'pro_invite_status',json_extract(m.profile,'$.pro_invite_status'),'pro_accept_status',json_extract(m.profile,'$.pro_accept_status'),'pro_transfer_status',json_extract(m.profile,'$.pro_transfer_status'),'pro_remove_status',json_extract(m.profile,'$.pro_remove_status'),'vm2api',json_extract(m.profile,'$.vm2api'),'pro_post_merge_groups',json_extract(m.profile,'$.pro_post_merge_groups'),'pro_deactivation',json_extract(m.profile,'$.pro_deactivation'),'pro_merchant',json_extract(m.profile,'$.pro_merchant'),'pro_merge_v2',json_extract(m.profile,'$.pro_merge_v2'),'pro_auto',json_object('order_id',json_extract(m.profile,'$.pro_auto.order_id')))`
 const ejhCaseOrderProjection = `json_object('updated_at',json_extract(o.profile,'$.updated_at'),'remote',json_object('id',json_extract(o.profile,'$.remote.id'),'creditUnit',json_extract(o.profile,'$.remote.creditUnit'),'chargedCredits',json_extract(o.profile,'$.remote.chargedCredits'),'reservedCredits',json_extract(o.profile,'$.remote.reservedCredits'),'releasedCredits',json_extract(o.profile,'$.remote.releasedCredits'),'settlementStatus',json_extract(o.profile,'$.remote.settlementStatus')))`
 
+// Only a retained, completed flow with no evidence of downstream use qualifies.
+// Missing/deleted accounts, running flows and prior pushes remain unknown. This
+// scalar projection reads no credentials or event logs and adds no per-row query.
+const ejhConsumptionNotPushedProjection = `(
+ COALESCE(json_extract(m.profile,'$.pro_auto.status'),'')='completed'
+ AND COALESCE(json_extract(m.profile,'$.pro_workflow_running'),0)=0
+ AND COALESCE(json_extract(m.profile,'$.push_provider'),'')=''
+ AND COALESCE(json_extract(m.profile,'$.push_status'),'')=''
+ AND COALESCE(json_extract(m.profile,'$.sub2_account_id'),0)=0
+ AND COALESCE(json_extract(m.profile,'$.sub2_account_name'),'')=''
+ AND COALESCE(json_extract(m.profile,'$.cpa_auth_file_name'),'')=''
+ AND json_extract(m.profile,'$.vm2api') IS NULL
+ AND json_extract(m.profile,'$.pro_siwc') IS NULL
+ AND json_extract(m.profile,'$.pro_push_downstream') IS NULL
+ AND json_extract(m.profile,'$.pro_push_started_at') IS NULL
+ AND json_extract(m.profile,'$.pro_push_ended_at') IS NULL
+ AND COALESCE(json_extract(m.profile,'$.cost_provider'),'')=''
+ AND COALESCE(json_extract(m.profile,'$.cost_connection_identity'),'')=''
+ AND COALESCE(json_extract(m.profile,'$.cost_downstream_identity'),'')=''
+ AND COALESCE(json_extract(m.profile,'$.user_cost_downstream_identity'),'')=''
+ AND COALESCE(json_extract(m.profile,'$.cost_downstream_snapshot'),0)=0
+ AND COALESCE(json_extract(m.profile,'$.user_cost_downstream_snapshot'),0)=0
+ AND json_extract(m.profile,'$.cost_checked_at') IS NULL
+ AND COALESCE(json_extract(m.profile,'$.pro_auto.stage'),'')<>'push'
+ AND json_extract(m.profile,'$.pro_auto.steps.push') IS NULL
+ AND json_extract(m.profile,'$.pro_auto.stage_times.push') IS NULL
+ AND json_extract(m.profile,'$.pro_auto.stage_times."push:running"') IS NULL
+ AND json_extract(m.profile,'$.pro_auto.stage_times."push:completed"') IS NULL
+ AND json_extract(m.profile,'$.pro_auto.stage_times."push:failed"') IS NULL
+ AND json_extract(m.profile,'$.pro_manual_stages.push') IS NULL
+ AND json_extract(m.profile,'$.pro_stage_overrides.push') IS NULL
+)`
+
 func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, error) {
 	rates, err := ejhReversalFeeRates(q)
 	if err != nil {
@@ -630,7 +663,7 @@ func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, erro
 	}
 	rows, e := q.Query(`SELECT c.profile,m.email,CASE WHEN k.card_type='ejh' THEN COALESCE(l.card_id,i.card_id,c.card_id) ELSE '' END,COALESCE(k.card_type,'other'),charge.sealed,`+ejhCaseOrderProjection+`,
         CASE WHEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_identity'),'')<>''
-        THEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_snapshot'),0) END,COALESCE(oc.profile,'{}'),`+ejhCaseAccountProjection+`,COALESCE((SELECT profile FROM pro_dead_accounts WHERE email=c.email),'null') FROM ejh_cases c
+        THEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_snapshot'),0) END,COALESCE(oc.profile,'{}'),`+ejhCaseAccountProjection+`,COALESCE((SELECT profile FROM pro_dead_accounts WHERE email=c.email),'null'),`+ejhConsumptionNotPushedProjection+` FROM ejh_cases c
         LEFT JOIN ejh_records charge ON charge.kind='trade' AND charge.id=json_extract(c.profile,'$.original_trade_id')
         LEFT JOIN gptpay_orders o ON o.id=c.id
 		LEFT JOIN mail_accounts m ON m.email=c.email
@@ -651,8 +684,9 @@ func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, erro
 		var ejhCardID, cardType string
 		var chargeRaw, orderRaw sql.NullString
 		var consumption sql.NullFloat64
+		var notPushed bool
 		var oaiRaw, oaiAccountRaw, deadRaw string
-		if e = rows.Scan(&raw, &exists, &ejhCardID, &cardType, &chargeRaw, &orderRaw, &consumption, &oaiRaw, &oaiAccountRaw, &deadRaw); e != nil {
+		if e = rows.Scan(&raw, &exists, &ejhCardID, &cardType, &chargeRaw, &orderRaw, &consumption, &oaiRaw, &oaiAccountRaw, &deadRaw, &notPushed); e != nil {
 			return nil, e
 		}
 		var v ejh.Case
@@ -675,8 +709,11 @@ func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, erro
 		}
 		v.MerchantFeeUSD = merchantFees[v.ID]
 		v.ConsumptionTotal = nil
+		v.ConsumptionState = ""
 		if consumption.Valid {
 			v.ConsumptionTotal = &consumption.Float64
+		} else if exists.Valid && notPushed && oaiAccount.ProAuto.OrderID == v.ID {
+			v.ConsumptionState = "not_pushed"
 		}
 		v.EJHCardID = ejhCardID
 		v.CardType = cardType

@@ -104,3 +104,13 @@ for(const mode of ['day','week']){
 assert.equal(financeReport(monthData,{},'month','2026-10-17').summary.rechargeUSD,'30.00','legacy ledger without recharge events must use confirmed month too')
 assert.equal(monthAll.summary.earnings.costR,financeReport(data,baselineRecharge,'all').summary.earnings.costR)
 console.log('Passed: historical recharge month, no invented dates, unchanged total cost')
+
+const noPush={email:'never@example.com',id:'never',consumption_state:'not_pushed'}
+const withoutSource=financeOverview({...data,cases:[...data.cases,noPush]})
+assert.equal(withoutSource.consumption.missing,0)
+assert.equal(withoutSource.consumption.notPushed,1)
+assert.equal(withoutSource.earnings.profitR,total.earnings.profitR)
+assert.equal(withoutSource.earnings.costR,total.earnings.costR)
+assert.equal(financeReport({...data,cases:[...data.cases,noPush]},history,'all').summary.earnings.profitR,report.summary.earnings.profitR)
+assert.equal(financeOverview({...data,cases:[...data.cases,noPush,{email:'unknown@example.com'}]}).earnings.profitR,null)
+console.log('Passed: no-push explanation does not change saved revenue/costs or conceal real missing consumption')
