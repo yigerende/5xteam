@@ -118,6 +118,8 @@ type Server struct {
 	autoAdminLocks            sync.Map
 	sub2PushLocks             sync.Map
 	sub2ProxyReleaseMu        sync.Mutex
+	globalProxyRecoveryMu     sync.Mutex
+	globalProxyProbe          func(context.Context, string) bool
 	sub2ProxyReleaseClients   sync.Map
 	seatAssignmentMu          sync.Mutex
 	accountCycles             sync.Map
@@ -341,6 +343,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/mail/accounts/invalid-at-outside", s.listOutsideInvalidATMailEmails)
 	mux.HandleFunc("POST /api/mail/accounts/select", s.selectMailAccounts)
 	s.registerSub2ProxyRelease(mux)
+	s.registerGlobalProxy(mux)
 	mux.HandleFunc("GET /api/pro-accounts", s.listProAccounts)
 	mux.HandleFunc("GET /api/pro-accounts/options", func(w http.ResponseWriter, r *http.Request) {
 		items, err := s.store.ProAccountOptions(r.Context())
@@ -479,6 +482,7 @@ func (s *Server) Handler() http.Handler {
 // StartBackground runs periodic Free account quota checks until ctx is done.
 func (s *Server) StartBackground(ctx context.Context) {
 	go s.monitorSub2ProxyReleases(ctx)
+	go s.monitorGlobalProxyRecovery(ctx)
 	s.startGPTRegister(ctx)
 	s.startEJH(ctx)
 	s.startSeatRecoveryMonitor(ctx)
@@ -539,7 +543,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
-	var settings model.Settings
+	settings := s.store.Settings()
 	if err := decodeJSON(w, r, &settings, 1<<20); err != nil {
 		return
 	}
@@ -547,6 +551,28 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		settings.DefaultPageSize = s.store.Settings().DefaultPageSize
 	}
 	settings.OAuthProxyMode = normalizeOAuthProxyMode(settings.OAuthProxyMode)
+	settings.ProxyFailover = settings.ProxyFailover.Normalized()
+	if err := settings.ProxyFailover.Validate(); err != nil {
+		writeAPI(w, 400, nil, err.Error())
+		return
+	}
+	seenBackup := map[string]bool{}
+	profiles := s.store.Proxies()
+	for _, id := range settings.ProxyFailover.BackupIDs {
+		valid := false
+		for _, p := range profiles {
+			if p.ID == id && p.URL != settings.ProxyURL {
+				valid = true
+				break
+			}
+		}
+		if !valid || seenBackup[id] {
+			writeAPI(w, 400, nil, "备用代理必须选择已保存的其他线路，且不能重复")
+			return
+		}
+		seenBackup[id] = true
+	}
+
 	if err := validateSettings(settings); err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return

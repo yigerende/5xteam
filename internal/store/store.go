@@ -191,6 +191,8 @@ func (s *Store) initSchema() error {
 		CREATE INDEX IF NOT EXISTS sub2_proxy_binding_pending ON sub2_proxy_binding_events(endpoint,proxy_key,counted);
 		CREATE UNIQUE INDEX IF NOT EXISTS sub2_proxy_binding_remote ON sub2_proxy_binding_events(endpoint,remote_id) WHERE remote_id>0;
 		CREATE TABLE IF NOT EXISTS sub2_proxy_binding_edits (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL, proxy_key TEXT NOT NULL, previous_count INTEGER NOT NULL, new_count INTEGER NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS global_proxy_health (key TEXT PRIMARY KEY,profile TEXT NOT NULL,next_at INTEGER NOT NULL DEFAULT 0,claim_until INTEGER NOT NULL DEFAULT 0,generation INTEGER NOT NULL DEFAULT 0);
+		CREATE INDEX IF NOT EXISTS global_proxy_health_due ON global_proxy_health(next_at,claim_until) WHERE next_at>0;
 		CREATE TABLE IF NOT EXISTS proxies (
 			id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, url TEXT NOT NULL,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -1849,6 +1851,10 @@ func (s *Store) Settings() model.Settings {
 }
 
 func (s *Store) SaveSettings(settings model.Settings) error {
+	settings.ProxyFailover = settings.ProxyFailover.Normalized()
+	if err := settings.ProxyFailover.Validate(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	raw, err := json.Marshal(settings)
@@ -1976,10 +1982,17 @@ func (s *Store) DeleteProxy(id string) error {
 		_ = json.Unmarshal([]byte(raw), &settings)
 		if settings.ProxyURL == proxyURL {
 			settings.ProxyURL = ""
-			updated, _ := json.Marshal(settings)
-			if _, err = tx.Exec("UPDATE settings SET payload=? WHERE id=1", string(updated)); err != nil {
-				return err
+		}
+		kept := []string{}
+		for _, backupID := range settings.ProxyFailover.BackupIDs {
+			if backupID != id {
+				kept = append(kept, backupID)
 			}
+		}
+		settings.ProxyFailover.BackupIDs = kept
+		updated, _ := json.Marshal(settings)
+		if _, err = tx.Exec("UPDATE settings SET payload=? WHERE id=1", string(updated)); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()

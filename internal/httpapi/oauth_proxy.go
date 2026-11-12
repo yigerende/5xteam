@@ -18,12 +18,13 @@ import (
 )
 
 type oauthProxyLease struct {
-	url         string
-	key         string
-	label       string
-	activeCount int
-	releaseOnce sync.Once
-	releaseFn   func()
+	healthGeneration int64
+	url              string
+	key              string
+	label            string
+	activeCount      int
+	releaseOnce      sync.Once
+	releaseFn        func()
 }
 
 func (l *oauthProxyLease) Release() {
@@ -52,88 +53,10 @@ func (s *Server) acquireOAuthProxy() (*oauthProxyLease, error) {
 }
 
 // acquireOAuthProxyExcluding selects the least-used configured line while
-// avoiding lines that already failed in the current OAuth login round. If all
-// lines are excluded, the full pool is considered again so a single-line pool
-// can still retry with a new sticky session when its provider supports it.
+// avoiding lines that already failed in the current OAuth login round. Global
+// mode uses configured primary/backups; neither strategy may reuse cooling lines.
 func (s *Server) acquireOAuthProxyExcluding(excluded map[string]struct{}) (*oauthProxyLease, error) {
-	settings := s.store.Settings()
-	mode := normalizeOAuthProxyMode(settings.OAuthProxyMode)
-	if mode == "global" {
-		proxyURL := strings.TrimSpace(settings.ProxyURL)
-		if proxyURL == "" {
-			return nil, errors.New("请先配置全局代理；OpenAI OAuth 禁止直连")
-		}
-		return s.reserveOAuthProxy(proxyURL, "全局代理"), nil
-	}
-
-	type candidate struct {
-		url   string
-		label string
-	}
-	profiles := s.store.Proxies()
-	candidates := make([]candidate, 0, len(profiles))
-	seen := make(map[string]struct{}, len(profiles))
-	for _, profile := range profiles {
-		proxyURL := strings.TrimSpace(profile.URL)
-		if proxyURL == "" {
-			continue
-		}
-		if _, exists := seen[proxyURL]; exists {
-			continue
-		}
-		seen[proxyURL] = struct{}{}
-		label := strings.TrimSpace(profile.Name)
-		if label == "" {
-			label = "代理池线路"
-		}
-		candidates = append(candidates, candidate{url: proxyURL, label: label})
-	}
-	if len(candidates) == 0 {
-		proxyURL := strings.TrimSpace(settings.ProxyURL)
-		if proxyURL == "" {
-			return nil, errors.New("代理池为空且未配置全局代理；OpenAI OAuth 禁止直连")
-		}
-		return s.reserveOAuthProxy(proxyURL, "全局代理（代理池为空时回退）"), nil
-	}
-
-	s.oauthProxyMu.Lock()
-	if s.oauthProxyActive == nil {
-		s.oauthProxyActive = make(map[string]int)
-	}
-	available := make([]int, 0, len(candidates))
-	for index, item := range candidates {
-		if _, blocked := excluded[item.url]; !blocked {
-			available = append(available, index)
-		}
-	}
-	if len(available) == 0 {
-		available = make([]int, 0, len(candidates))
-		for index := range candidates {
-			available = append(available, index)
-		}
-	}
-	minimum := int(^uint(0) >> 1)
-	least := make([]int, 0, len(candidates))
-	for _, index := range available {
-		item := candidates[index]
-		count := s.oauthProxyActive[item.url]
-		if count < minimum {
-			minimum = count
-			least = least[:0]
-			least = append(least, index)
-		} else if count == minimum {
-			least = append(least, index)
-		}
-	}
-	selected := candidates[least[int(s.oauthProxyCursor%uint64(len(least)))]]
-	s.oauthProxyCursor++
-	s.oauthProxyActive[selected.url]++
-	activeCount := s.oauthProxyActive[selected.url]
-	s.oauthProxyMu.Unlock()
-
-	lease := &oauthProxyLease{url: selected.url, key: selected.url, label: selected.label, activeCount: activeCount}
-	lease.releaseFn = func() { s.releaseOAuthProxy(lease.key) }
-	return lease, nil
+	return s.acquireHealthyGlobalProxy(excluded)
 }
 
 func (s *Server) reserveOAuthProxy(proxyURL, label string) *oauthProxyLease {

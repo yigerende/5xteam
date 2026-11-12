@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, reactive, ref } from 'vue'
 import { CheckCircle2, Gauge, LoaderCircle, Pencil, Save, ShieldCheck, Trash2, X } from 'lucide-vue-next'
 import { api } from '../api'
+import {globalProxyHealthText} from '../globalProxyHealth'
 import { maskProxyURL } from '../utils'
 import IconButton from './IconButton.vue'
 import MessageBar from './MessageBar.vue'
@@ -23,6 +24,18 @@ const pageSize = ref(props.defaultPageSize)
 const rows = ref([])
 const total = ref(0)
 const pagedProxies = computed(() => rows.value)
+const health=ref({}),healthNow=ref(Date.now()),healthError=ref('')
+let healthRequest,healthTimer,lastHealthRead=0,healthOffset=0
+async function loadHealth(){
+ if(document.hidden||healthRequest)return
+ const request=new AbortController();healthRequest=request;lastHealthRead=Date.now()
+ try{const d=await api('/api/proxies/health',{signal:request.signal});if(!request.signal.aborted){health.value=d.items||{};healthError.value='';const at=Date.parse(d.server_time);if(Number.isFinite(at))healthOffset=at-Date.now()}}
+ catch(e){if(!request.signal.aborted)healthError.value='冷却状态读取失败'}
+ finally{if(healthRequest===request)healthRequest=null}
+}
+onMounted(()=>{loadHealth();healthTimer=setInterval(()=>{if(document.hidden)return;healthNow.value=Date.now()+healthOffset;if(Date.now()-lastHealthRead>=10000)loadHealth()},1000)})
+onBeforeUnmount(()=>{clearInterval(healthTimer);healthRequest?.abort()})
+
 async function loadPage() {
   const data = await api(`/api/proxies?page=${page.value}&page_size=${pageSize.value}`)
   rows.value = data.items || []; total.value = Number(data.total || 0)
@@ -257,7 +270,7 @@ onMounted(loadPage)
             <tbody>
               <tr v-if="!pagedProxies.length"><td colspan="7" class="empty-cell">暂无代理配置</td></tr>
               <tr v-for="proxy in pagedProxies" :key="proxy.id">
-                <td><strong>{{ proxy.name }}</strong></td>
+                <td><strong>{{ proxy.name }}</strong><small class="table-note" :title="health[proxy.id]?.message">{{healthError||globalProxyHealthText(health[proxy.id],healthNow)}}</small><small v-if="health[proxy.id]?.cooldown_until" class="table-note">恢复时间 {{new Date(health[proxy.id].cooldown_until).toLocaleString()}}</small></td>
                 <td class="mono" :title="maskProxyURL(proxy.url)">{{ maskProxyURL(proxy.url) }}</td>
                 <td>
                   <div v-if="proxyExit(proxy)?.exit_ip || proxyExit(proxy)?.ip_address" class="proxy-result">
@@ -282,7 +295,7 @@ onMounted(loadPage)
                   </template>
                   <StatusPill v-else tone="pending">未测试</StatusPill>
                 </td>
-                <td><button class="status-select" :class="{ active: selectedURL === proxy.url }" type="button" :disabled="Boolean(batch.mode)" @click="$emit('select', selectedURL === proxy.url ? '' : proxy.url)"><span></span>{{ selectedURL === proxy.url ? '使用中' : '设为全局' }}</button></td>
+                <td><button class="status-select" :class="{ active: selectedURL === proxy.url }" type="button" :disabled="Boolean(batch.mode)" @click="$emit('select', selectedURL === proxy.url ? '' : proxy.url)"><span></span>{{ selectedURL === proxy.url ? '主用代理' : '设为全局' }}</button></td>
                 <td><div class="row-actions">
                   <IconButton label="测试连接与出口 IP" :disabled="testingIDs.has(proxy.id) || Boolean(batch.mode)" @click="test(proxy)"><LoaderCircle v-if="testingIDs.has(proxy.id)" class="spin" :size="15" /><CheckCircle2 v-else :size="15" /></IconButton>
                   <IconButton label="测试 OpenAI 质量" :disabled="qualityTestingIDs.has(proxy.id) || Boolean(batch.mode)" @click="runQualityTest(proxy, true)"><LoaderCircle v-if="qualityTestingIDs.has(proxy.id)" class="spin" :size="15" /><ShieldCheck v-else :size="15" /></IconButton>

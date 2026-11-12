@@ -3,24 +3,25 @@ package model
 import "time"
 
 type Settings struct {
-	BaseURL                string `json:"base_url"`
-	AcceptedTOSVersion     string `json:"accepted_tos_version"`
-	Role                   string `json:"role"`
-	InviteDelaySeconds     int    `json:"invite_delay_seconds"`
-	AcceptDelaySeconds     int    `json:"accept_delay_seconds"`
-	TransferDelaySeconds   int    `json:"transfer_delay_seconds"`
-	AccountIntervalSeconds int    `json:"account_interval_seconds"`
-	RequestTimeoutSeconds  int    `json:"request_timeout_seconds"`
-	NetworkRetryCount      int    `json:"network_retry_count"`
-	NetworkRetryInterval   int    `json:"network_retry_interval_seconds"`
-	DefaultPageSize        int    `json:"default_page_size"`
-	Concurrency            int    `json:"concurrency"`
-	ProxyURL               string `json:"proxy_url"`
-	OAuthProxyMode         string `json:"oauth_proxy_mode"`
-	SMSProvider            string `json:"sms_provider"`
-	AllowSMS               bool   `json:"allow_sms"`
-	AutoCleanup            bool   `json:"auto_cleanup"`
-	StopOnFirstFailure     bool   `json:"stop_on_first_failure"`
+	ProxyFailover          GlobalProxyPolicy `json:"global_proxy_failover"`
+	BaseURL                string            `json:"base_url"`
+	AcceptedTOSVersion     string            `json:"accepted_tos_version"`
+	Role                   string            `json:"role"`
+	InviteDelaySeconds     int               `json:"invite_delay_seconds"`
+	AcceptDelaySeconds     int               `json:"accept_delay_seconds"`
+	TransferDelaySeconds   int               `json:"transfer_delay_seconds"`
+	AccountIntervalSeconds int               `json:"account_interval_seconds"`
+	RequestTimeoutSeconds  int               `json:"request_timeout_seconds"`
+	NetworkRetryCount      int               `json:"network_retry_count"`
+	NetworkRetryInterval   int               `json:"network_retry_interval_seconds"`
+	DefaultPageSize        int               `json:"default_page_size"`
+	Concurrency            int               `json:"concurrency"`
+	ProxyURL               string            `json:"proxy_url"`
+	OAuthProxyMode         string            `json:"oauth_proxy_mode"`
+	SMSProvider            string            `json:"sms_provider"`
+	AllowSMS               bool              `json:"allow_sms"`
+	AutoCleanup            bool              `json:"auto_cleanup"`
+	StopOnFirstFailure     bool              `json:"stop_on_first_failure"`
 }
 
 // MailAccountProfile is the local mailbox projection used by registration.
@@ -330,7 +331,8 @@ type OpenAIAccountCredentials struct {
 
 func DefaultSettings() Settings {
 	return Settings{
-		BaseURL: "https://chatgpt.com/backend-api", AcceptedTOSVersion: "2024-12-17",
+		ProxyFailover: DefaultGlobalProxyPolicy(),
+		BaseURL:       "https://chatgpt.com/backend-api", AcceptedTOSVersion: "2024-12-17",
 		Role: "standard-user", InviteDelaySeconds: 3,
 		AcceptDelaySeconds: 2, TransferDelaySeconds: 5, RequestTimeoutSeconds: 45,
 		NetworkRetryCount: 2, NetworkRetryInterval: 3, DefaultPageSize: 10,

@@ -25,6 +25,7 @@ func TestProRetryOriginalPayment(t *testing.T) {
 	}{
 		{"paid", "success", "original-remote", "success", true, 0},
 		{"paid login fails", "success", "original-remote", "success", true, 0},
+		{"paid proxy fails", "success", "original-remote", "success", true, 0},
 		{"review becomes paid", "manual_review", "original-remote", "success", true, 0},
 		{"still reviewing", "manual_review", "original-remote", "manual_review", false, 0},
 		{"still processing", "processing", "original-remote", "processing", false, 0},
@@ -48,6 +49,18 @@ func TestProRetryOriginalPayment(t *testing.T) {
 				fmt.Fprintf(w, `{"code":0,"data":{"id":"original-remote","status":%q}}`, tc.result)
 			})
 			configureProAutoFixture(t, s)
+			if tc.name == "paid proxy fails" {
+				primary, _ := st.SaveProxy(model.ProxyProfile{Name: "primary", URL: "http://primary.example:8080"})
+				backup, _ := st.SaveProxy(model.ProxyProfile{Name: "backup", URL: "http://backup.example:8080"})
+				settings := st.Settings()
+				settings.ProxyURL = primary.URL
+				settings.OAuthProxyMode = "global"
+				settings.ProxyFailover = model.DefaultGlobalProxyPolicy()
+				settings.ProxyFailover.BackupIDs = []string{backup.ID}
+				if err := st.SaveSettings(settings); err != nil {
+					t.Fatal(err)
+				}
+			}
 			captureProNotifications(s)
 			cfg, key, _ := st.GPTPaySettings()
 			p, c, _ := st.MailAccountCredential(email)
@@ -77,6 +90,22 @@ func TestProRetryOriginalPayment(t *testing.T) {
 					}
 				}
 				assertRecoveryStage()
+				if tc.name == "paid proxy fails" {
+					lease, err := s.acquireOAuthProxy()
+					if err != nil {
+						return err
+					}
+					defer lease.Release()
+					if logins.Load() == 1 {
+						if lease.label != "primary" {
+							t.Error("recovery did not start on primary")
+						}
+						return s.recordLoginProxyFailure(lease, fmt.Errorf("CONNECT tunnel failed, response 504"))
+					}
+					if logins.Load() != 2 || lease.label != "backup" {
+						t.Error("paid recovery did not use backup")
+					}
+				}
 				if tc.name == "paid login fails" {
 					return fmt.Errorf("fixture recovery login failed")
 				}
@@ -107,7 +136,11 @@ func TestProRetryOriginalPayment(t *testing.T) {
 					}
 					return
 				}
-				if p.ProAuto.Status != "completed" || p.ProAuto.OrderID != o.ID || p.ProAuto.ID != "existing-flow" || p.ProAuto.Steps["login"] != "completed" || logins.Load() != 1 || pushes.Load() != 1 || merges.Load() != 1 {
+				wantLogins := int32(1)
+				if tc.name == "paid proxy fails" {
+					wantLogins = 2
+				}
+				if p.ProAuto.Status != "completed" || p.ProAuto.OrderID != o.ID || p.ProAuto.ID != "existing-flow" || p.ProAuto.Steps["login"] != "completed" || logins.Load() != wantLogins || pushes.Load() != 1 || merges.Load() != 1 {
 					t.Fatalf("recovery failed: %+v", p.ProAuto)
 				}
 			} else {

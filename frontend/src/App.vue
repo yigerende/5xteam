@@ -124,7 +124,7 @@ async function ensureTabData(id) {
 async function selectProxy(url) {
   if (!settings.value) return
   try {
-    const saved = await api('/api/settings', { method: 'PUT', body: { ...settings.value, concurrency: 1, proxy_url: url } })
+    const saved = await api('/api/settings', { method: 'PUT', body: { ...settings.value, concurrency: 1, proxy_url: url, global_proxy_failover: {...settings.value.global_proxy_failover,backup_ids:(settings.value.global_proxy_failover?.backup_ids||[]).filter(id=>proxies.value.some(p=>p.id===id&&p.url!==url))} } })
     settings.value = saved
   } catch (error) { loadingError.value = error.message }
 }

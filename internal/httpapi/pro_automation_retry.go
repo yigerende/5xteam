@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 // and restock claim. Paid recovery deliberately remains payment-free.
 func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpay.Settings, key string, card gptpay.Card, secret gptpay.CardSecret) error {
 	var err error
+	paidProxyRetries := 0
 	for {
 		if err = ctx.Err(); err != nil {
 			return err
@@ -41,7 +43,35 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+
+		var unavailable *globalProxyWaiting
+		if errors.As(err, &unavailable) {
+			at := unavailable.Until
+			if at.After(time.Now().Add(30 * time.Second)) {
+				at = time.Now().Add(30 * time.Second)
+			}
+			_, saveErr := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+				p.ProAuto.RetryAt = &at
+				p.ProAuto.Error = unavailable.Error()
+				p.ProAuto.UpdatedAt = time.Now()
+			})
+			if saveErr != nil {
+				return saveErr
+			}
+			if e := waitProAuto(ctx, time.Until(at)); e != nil {
+				return e
+			}
+			continue
+		}
 		if isProPaidRecovery(ctx) {
+			var cooled *cooledLoginProxyError
+			if errors.As(err, &cooled) && paidProxyRetries < 3 {
+				paidProxyRetries++
+				if p, _, e := s.store.MailAccountCredential(email); e == nil {
+					s.auditProEvent(p, "oauth", "pending", "pro_auto", "原代理已冷却，立即切换备用代理重新登录恢复授权；原单已付款，不重新付款", map[string]any{"proxy_retry_attempt": paidProxyRetries})
+				}
+				continue
+			}
 			return err
 		}
 		p, _, readErr := s.store.MailAccountCredential(email)
@@ -75,13 +105,21 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 			return fmt.Errorf("%w；无法读取重试配置：%v", err, readErr)
 		}
 		delay := time.Duration(settings.RetryIntervalSeconds) * time.Second
-		if isProProxyTransportFailure(err) && p.ProAuto.Stage == "login" && p.ProAuto.OrderID == "" && p.ProAuto.Steps["recharge"] != "completed" {
+		if isLoginProxyNetworkFailure(err) && p.ProAuto.Stage == "login" && p.ProAuto.OrderID == "" && p.ProAuto.Steps["recharge"] != "completed" {
 			const limit = 3
 			if p.ProAuto.ProxyRetryAttempts >= limit {
 				return fmt.Errorf("代理隧道连续不可用，已更换会话重试 %d 次，尚未付款：%w", limit, err)
 			}
+
+			var cooled *cooledLoginProxyError
+			if errors.As(err, &cooled) {
+				delay = 0
+			}
 			at := time.Now().Add(delay)
 			message := fmt.Sprintf("代理隧道失败，%d 秒后更换代理会话重试 %d/%d；保留原账号和原卡，不占账号业务重试次数", int(delay.Seconds()), p.ProAuto.ProxyRetryAttempts+1, limit)
+			if cooled != nil {
+				message = fmt.Sprintf("原代理已冷却，立即选择可用备用代理从头登录 %d/%d；保留原账号和原卡", p.ProAuto.ProxyRetryAttempts+1, limit)
+			}
 			retried, e := s.store.PrepareProAutoProxyRetry(email, p.ProAuto, limit, at, message)
 			if e != nil {
 				return fmt.Errorf("%w；代理重试未执行：%v", err, e)

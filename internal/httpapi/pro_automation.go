@@ -925,12 +925,19 @@ func (s *Server) proAutoRPC(ctx context.Context, email string, cfg gptpay.Settin
 	return nil, fmt.Errorf("不支持的 Pro 连续会话消息：%s", method)
 }
 
-func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc func(string, map[string]any) (any, error)) error {
+func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc func(string, map[string]any) (any, error)) (runErr error) {
 	lease, err := s.acquireOAuthProxy()
 	if err != nil {
 		return err
 	}
 	defer lease.Release()
+	loginPhase := true
+	defer func() {
+		if loginPhase && ctx.Err() == nil {
+			runErr = s.recordLoginProxyFailure(lease, runErr)
+		}
+	}()
+
 	proxy, err := workflow.PrepareIPRoyalOAuthProxy(rotateOAuthProxySession(lease.url, 1, 1))
 	if err != nil {
 		return err
@@ -955,6 +962,7 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 	selection.apply(payload)
 	p, err := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 		p.ProAuto.ProxyName = lease.label
+		p.ProAuto.RetryAt = nil
 		// The live login client records the first available IP before/through login.
 		p.ProAuto.ExitIP = ""
 	})
@@ -980,6 +988,10 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 	defer localRPC.close()
 	result, err := runOAuthChild(ctx, cmd, payload, func(method string, args map[string]any) (any, error) {
 		if strings.HasPrefix(method, "pro_") {
+			if method == "pro_recharge" || method == "pro_tokens" {
+				loginPhase = false
+			}
+
 			return rpc(method, args)
 		}
 		return localRPC.call(method, args)
