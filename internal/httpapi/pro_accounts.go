@@ -1187,26 +1187,6 @@ func (s *Server) performProQuota(ctx context.Context, email string, auto bool) (
 	})
 	var five, seven *model.FreeQuotaWindow
 	queriedProfile := profile
-	if v.Provider == "sub2" && v.Sub2.AuthMode == "siwc" {
-		_, credentials, readErr := s.store.MailAccountCredential(email)
-		if readErr != nil {
-			return profile, readErr
-		}
-		needsCredentials := credentials.SIWC == nil
-		if credentials.SIWC != nil {
-			expiry, ok := workflow.AccessTokenExpiry(credentials.SIWC.WebAccessToken)
-			needsCredentials = !ok || !expiry.After(time.Now().Add(time.Minute))
-		}
-		if needsCredentials {
-			tokens, authErr := s.ensureProSIWC(ctx, profile, credentials)
-			if authErr != nil {
-				return profile, authErr
-			}
-			if _, authErr = s.sub2.ApplyOAuthCredentials(ctx, v.Sub2, subPassword, profile.Sub2AccountID, siwcCredentials(tokens)); authErr != nil {
-				return profile, authErr
-			}
-		}
-	}
 	if v.Provider == "vm2api" {
 		five, seven, err = s.proVMQuota(ctx, profile)
 	} else if v.Provider == "cpa" {
@@ -1232,7 +1212,11 @@ func (s *Server) performProQuota(ctx context.Context, email string, auto bool) (
 		queries.Add(2)
 		go func() {
 			defer queries.Done()
-			quota, err = s.sub2.QueryQuota(ctx, v.Sub2, subPassword, profile.Sub2AccountID)
+			if v.Sub2.AuthMode == "siwc" {
+				quota, err = s.queryProSIWCQuota(ctx, profile, v, subPassword)
+			} else {
+				quota, err = s.sub2.QueryQuota(ctx, v.Sub2, subPassword, profile.Sub2AccountID)
+			}
 		}()
 		go func() {
 			defer queries.Done()
@@ -1275,12 +1259,12 @@ func (s *Server) performProQuota(ctx context.Context, email string, auto bool) (
 		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.QuotaStatus, p.ProLastError = "failed", err.Error() })
 		return current, err
 	}
-	if seven == nil {
-		err = errors.New("下游未返回可识别的 7d 额度窗口")
+	if seven == nil && (v.Sub2.AuthMode != "siwc" || five == nil) {
+		err = errors.New("下游未返回可识别的额度窗口")
 		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.QuotaStatus, p.ProLastError = "failed", err.Error() })
 		return profile, err
 	}
-	if !validProQuotaWindow(seven) || (five != nil && !validProQuotaWindow(five)) {
+	if (seven != nil && !validProQuotaWindow(seven)) || (five != nil && !validProQuotaWindow(five)) {
 		err = errors.New("下游额度百分比无效，须为 0～100；保留原额度并停止本次自动合并")
 		_, _ = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.QuotaStatus, p.ProLastError = "failed", err.Error() })
 		return profile, err

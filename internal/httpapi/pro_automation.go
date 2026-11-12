@@ -22,6 +22,7 @@ import (
 )
 
 type proAutomationHooks struct {
+	QuotaWebLogin        func(context.Context, string) (map[string]any, error)
 	BeforePaymentReserve func()
 	PaymentReserved      func()
 	BeforePaymentSubmit  func()
@@ -1137,14 +1138,14 @@ func (s *Server) runProAutomationTail(ctx context.Context, email string) (runErr
 		p.ProAuto.Steps["quota"] = "skipped"
 	}
 	if p.ProAuto.Steps["quota"] != "completed" && p.ProAuto.Steps["quota"] != "skipped" {
-		if err = s.autoProUpdate(email, "quota", "running", "检测 7 天已用额度"); err != nil {
+		if err = s.autoProUpdate(email, "quota", "running", "检测已用额度"); err != nil {
 			return err
 		}
 		p, err = quota(ctx, email, false)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err == nil && validProQuotaWindow(p.Quota7D) {
+		if err == nil && (validProQuotaWindow(p.Quota7D) || validProQuotaWindow(p.Quota5H)) {
 			if _, e := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 				if p.ProAuto.ProvisionedAt == nil {
 					now := time.Now()
@@ -1162,8 +1163,8 @@ func (s *Server) runProAutomationTail(ctx context.Context, email string) (runErr
 			message := ""
 			if err != nil {
 				message = "额度检测暂未成功，等待下次重试：" + err.Error()
-			} else if !validProQuotaWindow(p.Quota7D) {
-				message = "额度检测未返回有效的 7 天额度，等待下次重试"
+			} else if !validProQuotaWindow(p.Quota7D) && !(quotaSettings.Sub2.AuthMode == "siwc" && validProQuotaWindow(p.Quota5H)) {
+				message = "额度检测未返回有效额度，等待下次重试"
 			}
 			_, saveErr := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 				interval := p.ProAuto.QuotaIntervalSeconds

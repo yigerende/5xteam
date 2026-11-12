@@ -176,20 +176,30 @@ type MailAccountCredentials struct {
 
 // SIWC credentials are separate from the Codex and Web login credentials.
 type SIWCCredentials struct {
-	WebAccessToken string    `json:"web_access_token,omitempty"`
-	WebAccountID   string    `json:"web_account_id,omitempty"`
-	AccessToken    string    `json:"access_token"`
-	RefreshToken   string    `json:"refresh_token"`
-	IDToken        string    `json:"id_token"`
-	ClientID       string    `json:"client_id"`
-	AuthMode       string    `json:"auth_mode"`
-	ExtAgentHostID string    `json:"ext_agent_host_id"`
-	Email          string    `json:"email"`
-	Subject        string    `json:"subject"`
-	ExpiresAt      int64     `json:"expires_at"`
-	GrantedScopes  []string  `json:"granted_scopes"`
-	PlanUseEnabled bool      `json:"plan_use_enabled"`
-	SavedAt        time.Time `json:"saved_at"`
+	WebQuota       *SIWCWebQuotaState `json:"web_quota,omitempty"`
+	WebAccessToken string             `json:"web_access_token,omitempty"`
+	WebAccountID   string             `json:"web_account_id,omitempty"`
+	AccessToken    string             `json:"access_token"`
+	RefreshToken   string             `json:"refresh_token"`
+	IDToken        string             `json:"id_token"`
+	ClientID       string             `json:"client_id"`
+	AuthMode       string             `json:"auth_mode"`
+	ExtAgentHostID string             `json:"ext_agent_host_id"`
+	Email          string             `json:"email"`
+	Subject        string             `json:"subject"`
+	ExpiresAt      int64              `json:"expires_at"`
+	GrantedScopes  []string           `json:"granted_scopes"`
+	PlanUseEnabled bool               `json:"plan_use_enabled"`
+	SavedAt        time.Time          `json:"saved_at"`
+}
+
+// Web quota refresh is independent of the SIWC OAuth credential lifecycle.
+type SIWCWebQuotaState struct {
+	LoginAt   time.Time `json:"login_at,omitempty"`
+	RetryAt   time.Time `json:"retry_at,omitempty"`
+	Endpoint  string    `json:"endpoint,omitempty"`
+	AccountID int64     `json:"account_id,omitempty"`
+	Synced    bool      `json:"synced"`
 }
 
 type MailMessage struct {

@@ -89,6 +89,7 @@ type apiEnvelope struct {
 
 // ErrAccountUnauthorized identifies an OpenAI account 401, not an admin API login failure.
 var ErrAccountUnauthorized = errors.New("Sub2 账号状态 HTTP 401")
+var ErrSIWCWebUnauthorized = errors.New("SIWC 网页额度凭证已失效")
 
 type Client struct {
 	http      *http.Client
@@ -391,10 +392,11 @@ func (c *Client) QueryQuota(ctx context.Context, settings model.Sub2Settings, pa
 	if err != nil {
 		return QuotaUsage{}, err
 	}
-	if findHTTPStatus(data) == 401 {
-		return QuotaUsage{}, ErrAccountUnauthorized
-	}
-	if settings.AuthMode == "siwc" {
+	return decodeQuota(data, settings.AuthMode == "siwc")
+}
+
+func decodeQuota(data []byte, siwc bool) (QuotaUsage, error) {
+	if siwc {
 		var check struct {
 			Error     string    `json:"error"`
 			CheckedAt time.Time `json:"checked_at"`
@@ -404,17 +406,46 @@ func (c *Client) QueryQuota(ctx context.Context, settings model.Sub2Settings, pa
 		}
 		// A first failed lookup has no CheckedAt. Keep its actual failure reason.
 		if check.Error != "" {
+			if strings.HasPrefix(check.Error, "SIWC 网页额度 HTTP 401") || strings.HasPrefix(check.Error, "缺少网页登录凭证") {
+				return QuotaUsage{}, fmt.Errorf("%w：%s", ErrSIWCWebUnauthorized, check.Error)
+			}
 			return QuotaUsage{}, errors.New(check.Error)
 		}
 		if check.CheckedAt.IsZero() || time.Since(check.CheckedAt) > 5*time.Minute || check.CheckedAt.After(time.Now().Add(5*time.Second)) {
 			return QuotaUsage{}, errors.New("SIWC 额度数据未更新或已过期")
 		}
 	}
+	if findHTTPStatus(data) == 401 {
+		return QuotaUsage{}, ErrAccountUnauthorized
+	}
 	var quota QuotaUsage
 	if err := json.Unmarshal(data, &quota); err != nil {
 		return quota, fmt.Errorf("解析 Sub2 额度响应失败: %w", err)
 	}
 	return quota, nil
+}
+
+// A credential-only merge keeps the existing SIWC RT/AT, client, groups and proxy.
+func (c *Client) UpdateSIWCWebCredentials(ctx context.Context, settings model.Sub2Settings, password string, id int64, token, accountID string) error {
+	if settings.AuthMode != "siwc" || token == "" || accountID == "" {
+		return errors.New("SIWC 网页凭证不完整")
+	}
+	account, err := c.ApplyOAuthCredentials(ctx, settings, password, id, map[string]any{"siwc_web_access_token": token, "siwc_web_account_id": accountID})
+	if err == nil && account.ID != id {
+		return errors.New("SIWC 网页凭证同步账号不匹配")
+	}
+	return err
+}
+
+func (c *Client) RefreshSIWCQuota(ctx context.Context, settings model.Sub2Settings, password string, id int64) (QuotaUsage, error) {
+	if settings.AuthMode != "siwc" || id < 1 {
+		return QuotaUsage{}, errors.New("SIWC 额度账号无效")
+	}
+	data, err := c.doJSON(ctx, settings, password, http.MethodPost, fmt.Sprintf("/api/v1/admin/siwc/accounts/%d/usage", id), map[string]any{}, nil)
+	if err != nil {
+		return QuotaUsage{}, err
+	}
+	return decodeQuota(data, true)
 }
 
 // AccountStatus reads the Sub2 account record when available. The returned

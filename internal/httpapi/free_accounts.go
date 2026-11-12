@@ -1086,6 +1086,12 @@ func (s *Server) executeOpenAILoginContext(parent context.Context, email, creden
 		return nil, err
 	}
 	login := selectOAuthLogin(s.store.AutoRotationSettings().OAuthLoginMode, credentials)
+	if quotaLogin, _ := parent.Value(proSIWCQuotaLoginKey{}).(bool); quotaLogin {
+		login = selectOAuthLogin("password_totp", credentials)
+		if login.selected != "password_totp" {
+			return nil, errors.New("额度查询重新登录需要账号密码和 2FA")
+		}
+	}
 	if _, ok := parent.Value(proOAILoginKey{}).(*proOAILoginOptions); ok {
 		login = selectOAuthLogin("password_totp", credentials)
 		if login.selected != "password_totp" {
