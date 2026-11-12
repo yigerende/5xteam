@@ -24,6 +24,9 @@ func DefaultProSIWCSettings() ProSIWCSettings {
 	return s
 }
 func (s ProSIWCSettings) Validate() error {
+	if err := s.Sub2.ValidateProxyRetention(); err != nil {
+		return err
+	}
 	if s.PollSeconds < 10 || s.PollSeconds > 86400 {
 		return errors.New("SIWC 检查间隔应为 10～86400 秒")
 	}

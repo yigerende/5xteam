@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"chatgpt-space-merge/internal/model"
 )
 
 const MaxProxyBindingCount int64 = 1000000000
@@ -148,7 +150,7 @@ func (s *Store) ReserveSub2ProxyBinding(id, payload, endpoint, key, attempt stri
 
 // Commit a successful binding once with its saved response. The remote account
 // uniqueness constraint also prevents counting the same create under two keys.
-func (s *Store) CompleteSub2ProxyBinding(id, payload, attempt string, remoteID int64) error {
+func (s *Store) CompleteSub2ProxyBinding(id, payload, attempt string, remoteID int64, bindings ...model.Sub2ProxyBinding) error {
 	if remoteID <= 0 {
 		return errors.New("Sub2 未返回有效账号 ID，保留原推送等待确认")
 	}
@@ -192,6 +194,12 @@ func (s *Store) CompleteSub2ProxyBinding(id, payload, attempt string, remoteID i
 	if _, err = tx.Exec("INSERT INTO sub2_push_attempts(id,encrypted_payload) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET encrypted_payload=excluded.encrypted_payload", id, encrypted); err != nil {
 		return err
 	}
+	for _, binding := range bindings {
+		if err = saveSub2ProxyBindingTx(tx, binding); err != nil {
+			return err
+		}
+	}
+
 	return tx.Commit()
 }
 

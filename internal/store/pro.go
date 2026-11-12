@@ -138,6 +138,9 @@ func (s *Store) ProSettings() (model.ProSettings, string, string, error) {
 }
 
 func (s *Store) SaveProSettings(v model.ProSettings, subPassword, cpaKey string, vmKeys ...string) (model.ProSettings, error) {
+	if err := v.Sub2.ValidateProxyRetention(); err != nil {
+		return v, err
+	}
 	if err := v.ValidateDisposition(); err != nil {
 		return v, err
 	}

@@ -70,6 +70,7 @@ type MailAccountProfile struct {
 	PushProvider               string                         `json:"push_provider,omitempty"`
 	PushStatus                 string                         `json:"push_status,omitempty"`
 	VM2                        *ProVM2Binding                 `json:"vm2api,omitempty"`
+	Sub2ProxyBindingID         string                         `json:"sub2_proxy_binding_id,omitempty"`
 	Sub2AccountID              int64                          `json:"sub2_account_id,omitempty"`
 	Sub2AccountName            string                         `json:"sub2_account_name,omitempty"`
 	CPAAuthFileName            string                         `json:"cpa_auth_file_name,omitempty"`

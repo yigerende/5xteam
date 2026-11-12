@@ -114,6 +114,9 @@ func SelectProxy(proxies []Proxy, ids []int64, now time.Time) (Proxy, int, error
 }
 
 func ValidateProxySettings(settings model.Sub2Settings) error {
+	if err := settings.ValidateProxyRetention(); err != nil {
+		return err
+	}
 	if settings.BindProxy && len(uniquePositiveIDs(settings.ProxyIDs)) == 0 {
 		return errors.New("已开启绑定代理，请至少选择一个 Sub2 代理")
 	}

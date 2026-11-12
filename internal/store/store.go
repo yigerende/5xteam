@@ -182,7 +182,9 @@ func (s *Store) initSchema() error {
 		CREATE TABLE IF NOT EXISTS pro_siwc_settings (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL, encrypted_password TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pro_sub2_variants (auth_mode TEXT PRIMARY KEY, payload TEXT NOT NULL, encrypted_password TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS vm2api_quality_settings (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL);
-		CREATE TABLE IF NOT EXISTS sub2_push_attempts (id TEXT PRIMARY KEY, encrypted_payload TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS sub2_proxy_release (id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, remote_id INTEGER NOT NULL, profile TEXT NOT NULL, next_at INTEGER NOT NULL, claim_until INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, UNIQUE(endpoint,remote_id));
+        CREATE INDEX IF NOT EXISTS sub2_proxy_release_due ON sub2_proxy_release(next_at,claim_until) WHERE next_at>0;
+        CREATE TABLE IF NOT EXISTS sub2_push_attempts (id TEXT PRIMARY KEY, encrypted_payload TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS sub2_proxy_binding_policy (endpoint TEXT PRIMARY KEY, max_bindings INTEGER NOT NULL DEFAULT 0 CHECK(max_bindings>=0));
 		CREATE TABLE IF NOT EXISTS sub2_proxy_binding_usage (endpoint TEXT NOT NULL, proxy_key TEXT NOT NULL, binding_count INTEGER NOT NULL CHECK(binding_count>=0), revision INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(endpoint,proxy_key));
 		CREATE TABLE IF NOT EXISTS sub2_proxy_binding_events (attempt_key TEXT PRIMARY KEY, endpoint TEXT NOT NULL, proxy_key TEXT NOT NULL, remote_id INTEGER NOT NULL DEFAULT 0, counted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
@@ -674,6 +676,7 @@ func preserveProProfile(profile *model.MailAccountProfile, old model.MailAccount
 	profile.ProDailyMerge, profile.ProMergeTrigger = old.ProDailyMerge, old.ProMergeTrigger
 	profile.ProRestockTaskID, profile.ProRestockTargetID = old.ProRestockTaskID, old.ProRestockTargetID
 	profile.ProPendingPushTargetID = old.ProPendingPushTargetID
+	profile.Sub2ProxyBindingID = old.Sub2ProxyBindingID
 	profile.ProPushStartedAt = old.ProPushStartedAt
 	profile.ProPushTimeoutEnabled, profile.ProPushTimeoutMinutes = old.ProPushTimeoutEnabled, old.ProPushTimeoutMinutes
 	profile.ProPushDownstream = old.ProPushDownstream

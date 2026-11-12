@@ -27,11 +27,12 @@ type Group struct {
 }
 
 type Account struct {
-	ID          int64          `json:"id"`
-	Name        string         `json:"name"`
-	Status      string         `json:"status"`
-	Schedulable bool           `json:"schedulable"`
-	Extra       map[string]any `json:"extra"`
+	ProxyBindingID string         `json:"space_proxy_binding_id,omitempty"`
+	ID             int64          `json:"id"`
+	Name           string         `json:"name"`
+	Status         string         `json:"status"`
+	Schedulable    bool           `json:"schedulable"`
+	Extra          map[string]any `json:"extra"`
 }
 
 type RateLimitWindow struct {

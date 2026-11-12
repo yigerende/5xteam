@@ -142,6 +142,7 @@ func (s *Server) performDirectSIWCPush(ctx context.Context, p model.MailAccountP
 		p.ProRestockTargetID = target
 		completeProPushTarget(p, v)
 		p.PushProvider, p.PushStatus = "sub2", "completed"
+		p.Sub2ProxyBindingID = created.ProxyBindingID
 		p.Sub2AccountID, p.Sub2AccountName = created.ID, created.Name
 		ref := model.ProDownstream(v)
 		p.ProPushDownstream = &ref
@@ -407,6 +408,7 @@ func (s *Server) runProSIWC(ctx context.Context, email string) error {
 			ready := now.Add(10 * time.Second)
 			p.ProSIWC.ReadyAt = &ready
 			p.ProSIWC.RetryAt = nil
+			p.Sub2ProxyBindingID = created.ProxyBindingID
 			p.Sub2AccountID, p.Sub2AccountName = created.ID, created.Name
 			p.ProPushDownstream = &model.ProDownstreamRef{Provider: "sub2", URL: target.Sub2.URL, LoginEmail: target.Sub2.Email}
 			p.CostProvider, p.CostConnectionIdentity, p.CostDownstreamIdentity = "sub2", proCostConnectionIdentity(target.Sub2), fmt.Sprint(created.ID)

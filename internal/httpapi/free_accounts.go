@@ -1624,6 +1624,7 @@ func (s *Server) pushFreeAccount(w http.ResponseWriter, r *http.Request) {
 		item.Status, item.PushStatus, item.LastError = "monitoring", "completed", ""
 		item.PushProvider = "sub2"
 		item.CPAAuthFileName = ""
+		item.Sub2ProxyBindingID = created.ProxyBindingID
 		item.Sub2AccountID, item.Sub2AccountName = created.ID, created.Name
 		if item.Quality.Degraded {
 			item.Quality = pushQuality
@@ -3081,7 +3082,7 @@ func (s *Server) savePushSettings(w http.ResponseWriter, r *http.Request) {
 		if v.CpaWS == nil {
 			v.CpaWS = &sub.CpaWS
 		}
-		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{BindProxy: boolValue(v.BindProxy), ProxyIDs: v.ProxyIDs, Provider: provider, PushPlanType: v.PushPlanType, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: *v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent, SchedulingPauseTimeoutSeconds: *v.SchedulingPauseTimeoutSeconds}, v.Password)
+		sub, err = s.store.SaveSub2Settings(model.Sub2Settings{BindProxy: boolValue(v.BindProxy), ProxyIDs: v.ProxyIDs, ProxyReleaseMinutes: *v.ProxyReleaseMinutes, Provider: provider, PushPlanType: v.PushPlanType, URL: strings.TrimRight(strings.TrimSpace(v.URL), "/"), Email: strings.TrimSpace(v.Email), GroupID: v.GroupID, GroupName: v.GroupName, GroupIDs: v.GroupIDs, GroupNames: v.GroupNames, Models: v.Models, AccountConcurrency: v.AccountConcurrency, Priority: v.Priority, CpaWS: boolValue(v.CpaWS), Enable401Check: boolValue(v.Enable401Check), StatusCheckIntervalSeconds: v.StatusCheckIntervalSeconds, ReloginFailureLimit: *v.ReloginFailureLimit, QuotaEnabled: boolValue(v.QuotaEnabled), QuotaCheckIntervalSeconds: v.QuotaCheckIntervalSeconds, QuotaRemainingThresholdPercent: *v.QuotaRemainingThresholdPercent, SchedulingPauseTimeoutSeconds: *v.SchedulingPauseTimeoutSeconds}, v.Password)
 		if err != nil {
 			writeAPI(w, 500, nil, err.Error())
 			return
@@ -3193,6 +3194,7 @@ func (s *Server) getCPAGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type sub2SettingsInput struct {
+	ProxyReleaseMinutes            *int     `json:"proxy_release_minutes"`
 	BindProxy                      *bool    `json:"bind_proxy"`
 	ProxyIDs                       []int64  `json:"proxy_ids"`
 	SchedulingPauseTimeoutSeconds  *int     `json:"scheduling_pause_timeout_seconds"`
@@ -3325,7 +3327,7 @@ func (s *Server) saveSub2Settings(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Models = uniqueNonEmptyStrings(input.Models)
 	settings, err := s.store.SaveSub2Settings(model.Sub2Settings{
-		BindProxy: boolValue(input.BindProxy), ProxyIDs: input.ProxyIDs,
+		BindProxy: boolValue(input.BindProxy), ProxyIDs: input.ProxyIDs, ProxyReleaseMinutes: *input.ProxyReleaseMinutes,
 		Provider: current.Provider, PushPlanType: input.PushPlanType, URL: input.URL, Email: input.Email, GroupID: input.GroupID, GroupName: strings.TrimSpace(input.GroupName),
 		SchedulingPauseTimeoutSeconds: pauseTimeout,
 		GroupIDs:                      input.GroupIDs, GroupNames: input.GroupNames, Models: input.Models, AccountConcurrency: input.AccountConcurrency, Priority: input.Priority,

@@ -4,11 +4,11 @@ import { RefreshCw } from 'lucide-vue-next'
 import { api } from '../api'
 
 const props = defineProps({
-  enabled: Boolean, ids: { type: Array, default: () => [] }, active: Boolean, disabled: Boolean,
+  releaseMinutes: {type:Number,default:0}, enabled: Boolean, ids: { type: Array, default: () => [] }, active: Boolean, disabled: Boolean,
   url: { type: String, default: '' }, email: { type: String, default: '' }, password: { type: String, default: '' },
   endpoint: { type: String, required: true }, authMode: { type: String, default: '' },
 })
-const emit = defineEmits(['update:enabled', 'update:ids'])
+const emit = defineEmits(['update:enabled', 'update:ids', 'update:releaseMinutes'])
 const rows = ref([])
 const query = ref('')
 const loading = ref(false)
@@ -88,6 +88,7 @@ onBeforeUnmount(cancel)
   <div class="proxy-picker">
     <label class="proxy-toggle"><input type="checkbox" :checked="enabled" :disabled="disabled" @change="emit('update:enabled', $event.target.checked)" /><strong>绑定代理</strong><span>已选 {{ selectedIDs.length }} 个</span></label>
     <template v-if="enabled">
+      <div class="proxy-retention"><label>代理保留方式 <select :value="releaseMinutes !== 0 ? 'timed' : 'permanent'" :disabled="disabled" @change="emit('update:releaseMinutes', $event.target.value === 'timed' ? 30 : 0)"><option value="permanent">一直绑定</option><option value="timed">定时解绑</option></select></label><label v-if="releaseMinutes !== 0">绑定后 <input :value="releaseMinutes" type="number" required min="1" max="43200" step="1" :disabled="disabled" aria-label="代理绑定分钟数" @input="emit('update:releaseMinutes', $event.target.value === '' ? null : Number($event.target.value))" /> 分钟解绑</label><small>随推送设置保存，仅用于之后的新绑定；重试和重启不重置计时，不影响原推送时长。解绑后沿用 Sub2 默认出站。</small></div>
       <p v-if="!active">启用 Sub2 后可读取代理列表。</p>
       <div class="proxy-limit"><label>每个代理累计绑定上限 <input v-model.number="limit" type="number" min="0" max="1000000000" step="1" :disabled="disabled||savingLimit||loading||!loaded" aria-label="每个代理累计绑定上限" /></label><button class="btn ghost compact" type="button" :disabled="disabled||savingLimit||loading||!active||!loaded" @click="saveLimit">{{savingLimit?'保存中…':'保存上限'}}</button><small>0 为不限制；达到上限后不再新绑定，已提交请求继续确认。</small></div>
       <div class="proxy-actions"><input v-model="query" aria-label="搜索 Sub2 代理" placeholder="搜索代理名称 / 地址 / ID" /><button class="btn ghost compact" type="button" :disabled="disabled || !active || loading" @click="refresh"><RefreshCw :size="14" :class="{ spin: loading }" />{{ loading ? '读取中…' : '刷新代理' }}</button></div>
@@ -118,6 +119,7 @@ onBeforeUnmount(cancel)
 </template>
 
 <style scoped>
+.proxy-retention{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0}.proxy-retention label{display:flex;align-items:center;gap:7px}.proxy-retention input{width:90px}.proxy-retention small{flex-basis:100%;font-size:12px;opacity:.8}.proxy-retention select,.proxy-retention input{padding:7px;background:transparent;color:inherit;border:1px solid var(--border,#d8e0eb);border-radius:6px}
 .proxy-picker{grid-column:1/-1;border-top:1px solid var(--border,#d8e0eb);padding:14px 0;margin:12px 0;min-width:0}
 .proxy-toggle,.proxy-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.proxy-toggle span{margin-left:auto;font-size:12px}
 .proxy-picker p{font-size:12px;line-height:1.65;opacity:.85;margin:8px 0}.proxy-actions{margin:8px 0}.proxy-actions>input{flex:1;min-width:130px;width:0;padding:8px;border:1px solid var(--border,#d8e0eb);border-radius:6px;background:transparent;color:inherit}

@@ -117,6 +117,8 @@ type Server struct {
 	autoMu                    sync.Mutex
 	autoAdminLocks            sync.Map
 	sub2PushLocks             sync.Map
+	sub2ProxyReleaseMu        sync.Mutex
+	sub2ProxyReleaseClients   sync.Map
 	seatAssignmentMu          sync.Mutex
 	accountCycles             sync.Map
 	autoRunning               bool
@@ -338,6 +340,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/mail/accounts", s.listMailAccounts)
 	mux.HandleFunc("GET /api/mail/accounts/invalid-at-outside", s.listOutsideInvalidATMailEmails)
 	mux.HandleFunc("POST /api/mail/accounts/select", s.selectMailAccounts)
+	s.registerSub2ProxyRelease(mux)
 	mux.HandleFunc("GET /api/pro-accounts", s.listProAccounts)
 	mux.HandleFunc("GET /api/pro-accounts/options", func(w http.ResponseWriter, r *http.Request) {
 		items, err := s.store.ProAccountOptions(r.Context())
@@ -475,6 +478,7 @@ func (s *Server) Handler() http.Handler {
 
 // StartBackground runs periodic Free account quota checks until ctx is done.
 func (s *Server) StartBackground(ctx context.Context) {
+	go s.monitorSub2ProxyReleases(ctx)
 	s.startGPTRegister(ctx)
 	s.startEJH(ctx)
 	s.startSeatRecoveryMonitor(ctx)

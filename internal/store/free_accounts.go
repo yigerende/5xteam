@@ -47,6 +47,9 @@ func (s *Store) Sub2Settings() (model.Sub2Settings, string, error) {
 }
 
 func (s *Store) SaveSub2Settings(settings model.Sub2Settings, password string) (model.Sub2Settings, error) {
+	if err := settings.ValidateProxyRetention(); err != nil {
+		return settings, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	settings.URL = strings.TrimRight(strings.TrimSpace(settings.URL), "/")
@@ -148,6 +151,7 @@ func (s *Store) saveImportedFreeAccount(profile model.FreeAccountProfile, access
 		profile.AdminAccountID, profile.AdminEmail, profile.TeamAccountID, profile.SeatType = existing.AdminAccountID, existing.AdminEmail, existing.TeamAccountID, existing.SeatType
 		profile.ImportMode = existing.ImportMode
 		profile.OAuthAccountID = existing.OAuthAccountID
+		profile.Sub2ProxyBindingID = existing.Sub2ProxyBindingID
 		profile.Sub2AccountID, profile.Sub2AccountName, profile.Sub2GroupID, profile.Sub2GroupName = existing.Sub2AccountID, existing.Sub2AccountName, existing.Sub2GroupID, existing.Sub2GroupName
 		profile.CPAAuthFileName, profile.PushProvider = existing.CPAAuthFileName, existing.PushProvider
 		profile.DownstreamConnectionID = existing.DownstreamConnectionID

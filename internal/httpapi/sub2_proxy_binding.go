@@ -16,12 +16,18 @@ import (
 )
 
 type sub2PushAttempt struct {
+	Retention *sub2ProxyRetention     `json:"retention,omitempty"`
 	Input     sub2.CreateAccountInput `json:"input"`
 	Key       string                  `json:"key"`
 	Proxy     sub2.Proxy              `json:"proxy"`
 	Ties      int                     `json:"ties"`
 	StartedAt time.Time               `json:"started_at"`
 	Created   *sub2.Account           `json:"created,omitempty"`
+}
+
+type sub2ProxyRetention struct {
+	TargetID string `json:"target_id"`
+	Minutes  int    `json:"minutes"`
 }
 
 func sub2PushAttemptID(endpoint, scope string) string {
@@ -110,6 +116,13 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 			input.ProxyID = &proxy.ID
 		}
 		attempt = sub2PushAttempt{Input: input, Key: "space-proxy-" + randomRegistrationID(), Proxy: proxy, Ties: ties, StartedAt: time.Now()}
+		if input.ProxyID != nil && *input.ProxyID > 0 {
+			target, err := s.store.SaveDownstreamTarget(model.DownstreamTarget{Scope: "sub2-proxy-release", Provider: "sub2", Sub2: settings, Secret: password})
+			if err != nil {
+				return sub2.Account{}, err
+			}
+			attempt.Retention = &sub2ProxyRetention{TargetID: target, Minutes: settings.ProxyReleaseMinutes}
+		}
 		encoded, err := json.Marshal(attempt)
 		if err != nil {
 			return sub2.Account{}, err
@@ -139,9 +152,21 @@ func (s *Server) createSub2WithProxy(ctx context.Context, settings model.Sub2Set
 		log("Sub2 推送失败", map[string]any{"proxy_id": attempt.Proxy.ID, "error": err.Error()})
 		return created, err
 	}
+	created.ProxyBindingID = "" // Only Space may assign its local binding reference.
+	var bindings []model.Sub2ProxyBinding
+	if attempt.Retention != nil && attempt.Input.ProxyID != nil && *attempt.Input.ProxyID > 0 {
+		now := time.Now().UTC()
+		b := model.Sub2ProxyBinding{ID: sub2PushAttemptID(endpoint, fmt.Sprintf("proxy-release:%d", created.ID)), Endpoint: endpoint, Scope: scope, TargetID: attempt.Retention.TargetID, AccountID: created.ID, ProxyID: *attempt.Input.ProxyID, ProxyName: attempt.Proxy.Name, Minutes: attempt.Retention.Minutes, BoundAt: now}
+		if b.Minutes > 0 {
+			due := now.Add(time.Duration(b.Minutes) * time.Minute)
+			b.DueAt = &due
+		}
+		created.ProxyBindingID = b.ID
+		bindings = append(bindings, b)
+	}
 	attempt.Created = &created
 	encoded, _ := json.Marshal(attempt)
-	if err := s.store.CompleteSub2ProxyBinding(id, string(encoded), attempt.Key, created.ID); err != nil {
+	if err := s.store.CompleteSub2ProxyBinding(id, string(encoded), attempt.Key, created.ID, bindings...); err != nil {
 		return created, err
 	}
 	message := "Sub2 账号已创建"
@@ -306,6 +331,9 @@ func resolveSub2ProxyInput(input *sub2SettingsInput, current model.Sub2Settings)
 	if input.ProxyIDs == nil {
 		input.ProxyIDs = append([]int64{}, current.ProxyIDs...)
 	}
+	if input.ProxyReleaseMinutes == nil {
+		input.ProxyReleaseMinutes = &current.ProxyReleaseMinutes
+	}
 	input.ProxyIDs = uniquePositiveInt64s(input.ProxyIDs)
-	return sub2.ValidateProxySettings(model.Sub2Settings{BindProxy: boolValue(input.BindProxy), ProxyIDs: input.ProxyIDs})
+	return sub2.ValidateProxySettings(model.Sub2Settings{BindProxy: boolValue(input.BindProxy), ProxyIDs: input.ProxyIDs, ProxyReleaseMinutes: *input.ProxyReleaseMinutes})
 }

@@ -5,13 +5,14 @@ import "time"
 // Sub2Settings contains the non-secret part of the Sub2API connection.
 // The password is encrypted separately by the store.
 type Sub2Settings struct {
-	AuthMode                       string   `json:"auth_mode,omitempty"`
+	AuthMode string `json:"auth_mode,omitempty"`
 	// Provider selects the active downstream: sub2 (default) or cpa.
 	Provider                       string   `json:"provider"`
 	PushPlanType                   string   `json:"push_plan_type"`
 	URL                            string   `json:"url"`
 	Email                          string   `json:"email"`
 	PasswordPresent                bool     `json:"password_present"`
+	ProxyReleaseMinutes            int      `json:"proxy_release_minutes"`
 	BindProxy                      bool     `json:"bind_proxy"`
 	ProxyIDs                       []int64  `json:"proxy_ids"`
 	GroupID                        int64    `json:"group_id,omitempty"`
@@ -88,6 +89,7 @@ type FreeAccountProfile struct {
 	OAuthAccessTokenPresent  bool               `json:"oauth_access_token_present"`
 	OAuthRefreshTokenPresent bool               `json:"oauth_refresh_token_present"`
 	OAuthAccountID           string             `json:"oauth_account_id,omitempty"`
+	Sub2ProxyBindingID       string             `json:"sub2_proxy_binding_id,omitempty"`
 	Sub2AccountID            int64              `json:"sub2_account_id,omitempty"`
 	Sub2AccountName          string             `json:"sub2_account_name,omitempty"`
 	CPAAuthFileName          string             `json:"cpa_auth_file_name,omitempty"`

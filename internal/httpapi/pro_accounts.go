@@ -1035,6 +1035,7 @@ func (s *Server) performProPushMode(ctx context.Context, email string, manual bo
 		if p.ProMigration != nil {
 			p.ProMigration.Downstream = model.ProDownstream(v)
 		}
+		p.Sub2ProxyBindingID = created.ProxyBindingID
 		p.Sub2AccountID, p.Sub2AccountName = created.ID, created.Name
 		p.CPAAuthFileName, p.ProLastError = "", ""
 		p.QuotaCheckedAt = nil
