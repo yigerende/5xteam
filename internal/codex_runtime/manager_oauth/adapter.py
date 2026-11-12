@@ -688,6 +688,7 @@ def _run_once(payload, rpc=None):
         local["excluded_team"] = payload["merge_v2_plan"]["team_id"]
         local["personal_id"] = payload["merge_v2_plan"].get("personal_id", "")
     if credential_mode == "siwc":
+        local["siwc_authorization_source"] = payload.get("siwc_authorization_source", "local")
         local["siwc_host_id"] = str(payload.get("siwc_host_id") or "").strip()
         if not local["siwc_host_id"]:
             return {"success": False, "error": "SIWC 缺少宿主标识", "retryable": False}
@@ -715,7 +716,7 @@ def _run_once(payload, rpc=None):
             return flow.submit_export(session)
         if credential_mode == "siwc":
             web = session
-            session = SIWCProtocolLogin.continue_authenticated(flow)
+            session = SIWCProtocolLogin.continue_authenticated(flow, web)
             web_at = web.get("access_token") or web.get("accessToken") or ""
             if not web_at:
                 raise RuntimeError("SIWC 授权成功，但原登录会话未取得额度查询凭证")

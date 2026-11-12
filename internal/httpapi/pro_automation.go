@@ -952,15 +952,27 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 	if e != nil {
 		return e
 	}
-	push, _, _, e := s.proAccountPushSettings(profile)
+	push, pushPassword, _, e := s.proNewPushSettings(profile)
 	if e != nil {
 		return e
 	}
-	if push.Sub2.AuthMode == "siwc" {
+	var broker *siwcBroker
+	oauthSource := ""
+	if push.Provider == "sub2" && push.Sub2.AuthMode == "siwc" {
 		payload["credential_mode"], payload["siwc_host_id"] = "siwc", s.store.MailSIWCHostID(email, c)
+		oauthSource = "siwc_local"
+		if push.Sub2.SIWCAuthorizationSource == "sub2api" {
+			if _, found, recoverErr := s.recoverSIWCImport(ctx, profile, push, pushPassword); found || recoverErr != nil {
+				return recoverErr
+			}
+			payload["siwc_authorization_source"] = "sub2api"
+			oauthSource = "siwc_sub2api"
+			broker = &siwcBroker{s: s, ctx: ctx, email: email, password: pushPassword, hostID: s.store.MailSIWCHostID(email, c), proxy: proxy, settings: push, paid: true}
+		}
 	}
 	selection.apply(payload)
 	p, err := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+		p.ProAuto.OAuthSource = oauthSource
 		p.ProAuto.ProxyName = lease.label
 		p.ProAuto.RetryAt = nil
 		// The live login client records the first available IP before/through login.
@@ -987,6 +999,9 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 	localRPC := &oauthProtocolRPC{server: s, ctx: ctx, email: email}
 	defer localRPC.close()
 	result, err := runOAuthChild(ctx, cmd, payload, func(method string, args map[string]any) (any, error) {
+		if broker != nil && strings.HasPrefix(method, "siwc_") {
+			return broker.call(method, args)
+		}
 		if strings.HasPrefix(method, "pro_") {
 			if method == "pro_recharge" || method == "pro_tokens" {
 				loginPhase = false

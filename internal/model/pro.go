@@ -6,6 +6,7 @@ import (
 )
 
 type ProAutoState struct {
+	OAuthSource           string                  `json:"oauth_source,omitempty"`
 	Replacement           *ProRechargeReplacement `json:"replacement,omitempty"`
 	PaymentReviewRequired bool                    `json:"payment_review_required,omitempty"`
 	// Base connection and effective groups are separate so extra memberships

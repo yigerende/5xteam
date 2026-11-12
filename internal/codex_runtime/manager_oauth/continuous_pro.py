@@ -202,7 +202,8 @@ def run(payload, rpc):
         flow.record_oauth_context("第三步开始")
         if payload.get("credential_mode") == "siwc":
             from .siwc import SIWCProtocolLogin
-            tokens = SIWCProtocolLogin.continue_authenticated(flow)
+            web_before = flow._chatgpt_web_session() if payload.get("siwc_authorization_source") == "sub2api" else None
+            tokens = SIWCProtocolLogin.continue_authenticated(flow, web_before)
         else:
             tokens = flow.continue_codex()
         bridge.protect_code(tokens.get("access_token"))

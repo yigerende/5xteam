@@ -1459,6 +1459,20 @@ func (s *Server) executeOpenAILoginWithProxy(parent context.Context, email, prox
 			return localRPC.call(method, args)
 		}
 	}
+	if cfg, ok := parent.Value(siwcBrokerContextKey{}).(*siwcBroker); ok && credentialMode == "siwc" {
+		broker := *cfg
+		broker.ctx = ctx
+		broker.proxy = proxyURL
+		broker.generated = nil
+		payload["siwc_authorization_source"] = "sub2api"
+		previous := call
+		call = func(method string, args map[string]any) (any, error) {
+			if strings.HasPrefix(method, "siwc_") {
+				return broker.call(method, args)
+			}
+			return previous(method, args)
+		}
+	}
 	result, err := runOAuthChild(ctx, cmd, payload, call, func(rawLine string) {
 		rawLine = strings.TrimSpace(rawLine)
 		if event, ok := parseProtocolOAuthDiagnostic(rawLine); ok {

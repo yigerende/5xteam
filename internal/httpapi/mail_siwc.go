@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"chatgpt-space-merge/internal/model"
+	"chatgpt-space-merge/internal/sub2"
 )
 
 func (s *Server) startMailAccountSIWC(w http.ResponseWriter, r *http.Request) {
@@ -86,8 +87,10 @@ func buildSIWCCredentialExport(c model.SIWCCredentials) map[string]any {
 		"expires_at": c.ExpiresAt, "granted_scopes": c.GrantedScopes, "plan_use_enabled": c.PlanUseEnabled,
 		"siwc_web_access_token": c.WebAccessToken, "siwc_web_account_id": c.WebAccountID, "siwc_app_id": c.ClientID,
 	}
+	extra := sub2.SIWCAccountExtra(credentials)
+	extra["email"], extra["source"], extra["last_refresh"] = c.Email, "space_siwc", c.SavedAt.UTC().Format(time.RFC3339)
 	return map[string]any{"exported_at": time.Now().UTC().Format(time.RFC3339), "proxies": []any{}, "accounts": []any{
 		map[string]any{"name": c.Email, "platform": "openai", "type": "oauth", "concurrency": 10, "priority": 1,
-			"credentials": credentials, "extra": map[string]any{"email": c.Email, "source": "space_siwc", "last_refresh": c.SavedAt.UTC().Format(time.RFC3339)}},
+			"credentials": credentials, "extra": extra},
 	}}
 }

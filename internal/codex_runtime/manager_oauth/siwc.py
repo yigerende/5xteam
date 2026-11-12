@@ -21,10 +21,11 @@ REDIRECT = "http://127.0.0.1:1456/auth/callback"
 
 class SIWCProtocolLogin(ProjectProtocolLogin):
     @classmethod
-    def continue_authenticated(cls, flow):
+    def continue_authenticated(cls, flow, web_session=None):
         # A protocol adapter over the existing live client, never a new login.
         adapter = object.__new__(cls)
         adapter.__dict__ = flow.__dict__
+        adapter.siwc_web_session = web_session or {}
         adapter.auth_url = adapter.prepare_oauth_authorize_url()
         callback, _ = adapter.capture_oauth_callback(adapter.auth_url)
         if not callback:
@@ -39,6 +40,27 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
 
     def prepare_oauth_authorize_url(self):
         self.oauth_authorize_source = "siwc"
+        if self.payload.get("siwc_authorization_source") == "sub2api":
+            result = bridge.call("siwc_generate")
+            url = str(result.get("auth_url") or "")
+            parsed = urlsplit(url)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            if (parsed.scheme, parsed.netloc, parsed.path) != ("https", "auth.openai.com", "/api/accounts/authorize") or parsed.fragment:
+                raise RuntimeError("s2接口返回的 SIWC 授权地址无效")
+            for key, expected in {"redirect_uri": REDIRECT, "client_id": "dynamic_agent_client", "response_type": "code", "resource": RESOURCE, "code_challenge_method": "S256", "ext_agent_host_id": self.payload["siwc_host_id"]}.items():
+                if query.get(key) != [expected]:
+                    raise RuntimeError("s2接口 SIWC 授权参数不匹配：" + key)
+            for key in ("state", "nonce", "code_challenge"):
+                if len(query.get(key, [])) != 1 or not query[key][0]:
+                    raise RuntimeError("s2接口 SIWC 授权参数缺失")
+                bridge.protect_code(query[key][0])
+            if set(query.get("scope", [""])[0].split()) != set(SCOPES.split()):
+                raise RuntimeError("s2接口 SIWC 授权范围不匹配")
+            self.oauth_state = query["state"][0]
+            self.siwc_nonce = query["nonce"][0]
+            self.siwc_host_id = self.payload["siwc_host_id"]
+            self.remember_oauth_params_from_authorize_url(url)
+            return url
         self.oauth_state = secrets.token_urlsafe(32)
         self.oauth_code_verifier = upstream.generate_openai_code_verifier()
         self.siwc_nonce = secrets.token_urlsafe(32)
@@ -133,6 +155,13 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
         if client_id == "dynamic_agent_client":
             raise RuntimeError("SIWC 回调没有签发有效 client_id")
         bridge.protect_code(query["code"][0])
+        if self.payload.get("siwc_authorization_source") == "sub2api":
+            bridge.protect_code(callback_url)
+            self.log("siwc_token", "已取得回调，交由 s2接口换取凭证并导入所选分组")
+            tokens = bridge.call("siwc_callback", callback_url=callback_url, web_session=self.siwc_web_session)
+            for key in ("access_token", "refresh_token", "id_token", "web_access_token"):
+                bridge.protect_code(tokens.get(key))
+            return tokens
         self.log("siwc_token", "已取得 SIWC 授权码，正在交换 RT / AT")
         for attempt in range(3):
             response = self.request(TOKEN, method="POST", form_data={

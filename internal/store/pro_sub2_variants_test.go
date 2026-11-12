@@ -25,6 +25,7 @@ func TestSIWCPushModesPreserveIndependentConnections(t *testing.T) {
 	siwc.URL = "https://siwc.example.test"
 	siwc.Email = "siwc@example.test"
 	siwc.GroupIDs = []int64{7}
+	siwc.SIWCAuthorizationSource = "sub2api"
 	v.Sub2 = siwc
 	if _, e = s.SaveProSettings(v, "siwc-secret", ""); e != nil {
 		t.Fatal(e)
@@ -42,7 +43,7 @@ func TestSIWCPushModesPreserveIndependentConnections(t *testing.T) {
 		t.Fatal("mode reused another secret")
 	}
 	siwc, secret, e = s.ProSub2Variant("siwc")
-	if e != nil || secret != "siwc-secret" || siwc.GroupIDs[0] != 7 {
+	if e != nil || secret != "siwc-secret" || siwc.GroupIDs[0] != 7 || siwc.SIWCAuthorizationSource != "sub2api" {
 		t.Fatal("SIWC settings not retained", e)
 	}
 }

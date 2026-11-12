@@ -136,6 +136,36 @@ class SIWCFlowTests(unittest.TestCase):
                 for secret in ["private-siwc-at", "private-siwc-rt", "private-auth-session", "private-password", "private-siwc-code"]:
                     self.assertNotIn(secret, s.logs.getvalue())
 
+    def test_remote_interface_reuses_login_session_and_never_exchanges_locally(self):
+        from manager_oauth import bridge
+        from urllib.parse import urlencode
+        calls = []
+        def rpc(method, **params):
+            calls.append(method)
+            if method == "siwc_generate":
+                return {"auth_url": "https://auth.openai.com/api/accounts/authorize?" + urlencode({
+                    "client_id": "dynamic_agent_client", "response_type": "code",
+                    "redirect_uri": "http://127.0.0.1:1456/auth/callback", "resource": "https://api.openai.com/v1",
+                    "scope": "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
+                    "state": "remote-state", "nonce": "remote-nonce", "code_challenge": "remote-pkce",
+                    "code_challenge_method": "S256", "ext_agent_host_id": "urn:uuid:fixture-host"})}
+            if method == "siwc_callback":
+                self.assertIn("private-siwc-code", params["callback_url"])
+                self.assertTrue(params["web_session"].get("access_token"))
+                return {"access_token": "remote-at", "refresh_token": "remote-rt", "id_token": "remote-id",
+                        "auth_mode": "siwc", "email": "fixture@example.com", "client_id": "oaiapp_fixture"}
+            raise AssertionError(method)
+        with patch.object(bridge, "call", rpc):
+            scenario = SIWCScenario(password=True, totp=True)
+            result = scenario.run(siwc_authorization_source="sub2api", login_mode="password_totp",
+                                  gpt_password="private-password", totp_secret="JBSWY3DPEHPK3PXP")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(calls, ["siwc_generate", "siwc_callback"])
+        self.assertEqual(scenario.tokens, 0)
+        self.assertEqual(len(scenario.clients), 1)
+        for secret in ("remote-at", "remote-rt", "remote-state", "private-siwc-code"):
+            self.assertNotIn(secret, scenario.logs.getvalue())
+
     def test_callback_validation_precedes_exchange(self):
         for opts in [{"callback": {"state": "wrong"}}, {"callback": {"code": ""}},
                      {"callback": {"client_id": "dynamic_agent_client"}}, {"callback": {"error": "access_denied"}}, {"duplicate_state": True}]:

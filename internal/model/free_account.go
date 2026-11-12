@@ -1,11 +1,15 @@
 package model
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // Sub2Settings contains the non-secret part of the Sub2API connection.
 // The password is encrypted separately by the store.
 type Sub2Settings struct {
-	AuthMode string `json:"auth_mode,omitempty"`
+	AuthMode                string `json:"auth_mode,omitempty"`
+	SIWCAuthorizationSource string `json:"siwc_authorization_source,omitempty"`
 	// Provider selects the active downstream: sub2 (default) or cpa.
 	Provider                       string   `json:"provider"`
 	PushPlanType                   string   `json:"push_plan_type"`
@@ -182,4 +186,12 @@ type StandardRemoval struct {
 	Checks        int       `json:"checks"`
 	NextAt        time.Time `json:"next_at"`
 	MutationAfter time.Time `json:"mutation_after"`
+}
+
+func (s Sub2Settings) ValidateSIWCAuthorization() error {
+	switch s.SIWCAuthorizationSource {
+	case "", "local", "sub2api":
+		return nil
+	}
+	return errors.New("SIWC 授权方式应为本地或 s2接口")
 }

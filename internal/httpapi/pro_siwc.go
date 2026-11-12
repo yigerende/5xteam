@@ -117,6 +117,25 @@ func (s *Server) ensureProSIWC(ctx context.Context, p model.MailAccountProfile, 
 	return tokens, e
 }
 func (s *Server) performDirectSIWCPush(ctx context.Context, p model.MailAccountProfile, c model.MailAccountCredentials, v model.ProSettings, password string) (model.MailAccountProfile, error) {
+	if v.Sub2.SIWCAuthorizationSource == "sub2api" {
+		if recovered, found, err := s.recoverSIWCImport(ctx, p, v, password); found || err != nil {
+			return recovered, err
+		}
+		// An existing confirmed target only needs credentials/marker updates. New
+		// imports use the selected s2 callback, never a second generic create.
+		if !(p.ProPendingPushTargetID == "" && p.PushStatus == "completed" && p.ProPushDownstream != nil && p.ProPushDownstream.Matches(model.ProDownstream(v)) && p.Sub2AccountID > 0) {
+			broker := &siwcBroker{s: s, email: p.Email, password: password, settings: v, hostID: s.store.MailSIWCHostID(p.Email, c)}
+			result, err := s.executeOpenAILoginContext(context.WithValue(ctx, siwcBrokerContextKey{}, broker), p.Email, "siwc", nil, nil)
+			if err != nil {
+				return p, err
+			}
+			if result["success"] != true {
+				return p, errors.New("SIWC s2接口授权未完成，请查看授权日志")
+			}
+			updated, _, err := s.store.MailAccountCredential(p.Email)
+			return updated, err
+		}
+	}
 	tokens, e := s.ensureProSIWC(ctx, p, c)
 	if e != nil {
 		return p, e

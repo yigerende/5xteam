@@ -27,12 +27,13 @@ type Group struct {
 }
 
 type Account struct {
-	ProxyBindingID string         `json:"space_proxy_binding_id,omitempty"`
-	ID             int64          `json:"id"`
-	Name           string         `json:"name"`
-	Status         string         `json:"status"`
-	Schedulable    bool           `json:"schedulable"`
-	Extra          map[string]any `json:"extra"`
+	SIWCTokens     *model.SIWCCredentials `json:"siwc_tokens,omitempty"`
+	ProxyBindingID string                 `json:"space_proxy_binding_id,omitempty"`
+	ID             int64                  `json:"id"`
+	Name           string                 `json:"name"`
+	Status         string                 `json:"status"`
+	Schedulable    bool                   `json:"schedulable"`
+	Extra          map[string]any         `json:"extra"`
 }
 
 type RateLimitWindow struct {
@@ -68,6 +69,7 @@ func (q QuotaUsage) Windows() (window5H, window7D *model.FreeQuotaWindow) {
 }
 
 type CreateAccountInput struct {
+	SIWCImport  *SIWCImportInput
 	ProxyID     *int64
 	Name        string
 	Credentials map[string]any
@@ -122,6 +124,9 @@ func (c *Client) Groups(ctx context.Context, settings model.Sub2Settings, passwo
 }
 
 func (c *Client) CreateAccount(ctx context.Context, settings model.Sub2Settings, password string, input CreateAccountInput, idempotencyKey string) (Account, error) {
+	if input.SIWCImport != nil {
+		return c.ImportSIWCCallback(ctx, settings, password, input, idempotencyKey)
+	}
 	groupIDs := uniquePositiveIDs(input.GroupIDs)
 	if len(groupIDs) == 0 {
 		return Account{}, errors.New("请选择 Sub2 OpenAI 分组")
@@ -154,6 +159,9 @@ func (c *Client) CreateAccount(ctx context.Context, settings model.Sub2Settings,
 	if input.CpaWS {
 		body["cpa_ws"] = 1
 	}
+	if extra := SIWCAccountExtra(credentials); extra != nil {
+		body["extra"] = extra
+	}
 	if input.ProxyID != nil {
 		body["proxy_id"] = *input.ProxyID
 	}
@@ -185,6 +193,9 @@ func (c *Client) ApplyOAuthCredentials(ctx context.Context, settings model.Sub2S
 		"type":        "oauth",
 		"credentials": credentials,
 	}
+	if extra := SIWCAccountExtra(credentials); extra != nil {
+		body["extra"] = extra
+	}
 	path := "/api/v1/admin/accounts/" + strconv.FormatInt(accountID, 10) + "/apply-oauth-credentials"
 	data, err := c.doJSON(ctx, settings, password, http.MethodPost, path, body, nil)
 	if err != nil {
@@ -198,6 +209,9 @@ func (c *Client) ApplyOAuthCredentials(ctx context.Context, settings model.Sub2S
 	}
 	if account.ID < 1 {
 		account.ID = accountID
+	}
+	if SIWCAccountExtra(credentials) != nil && account.Extra["auth_provider"] != "siwc" {
+		return account, errors.New("Sub2 未确认保存 SIWC 标记，请重试原账号推送")
 	}
 	return account, nil
 }
