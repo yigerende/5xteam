@@ -402,6 +402,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/pro-accounts/{email}/stage", s.updateProAccountStage)
 	mux.HandleFunc("PUT /api/pro-accounts/{email}/auto-stage", s.updateProAutoStage)
 	mux.HandleFunc("GET /api/pro-accounts/{email}/events", s.listProAccountEvents)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/siwc-marker/retry", s.retrySIWCMarker)
 	mux.HandleFunc("GET /api/pro-accounts/{email}/events/export", s.exportProAccountEvents)
 	mux.HandleFunc("GET /api/pro-settings", s.getProSettings)
 	mux.HandleFunc("PUT /api/pro-settings/auto-delete-control", s.setProAutoFinalStepControl)

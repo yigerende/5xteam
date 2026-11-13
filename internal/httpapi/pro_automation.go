@@ -1260,6 +1260,7 @@ func waitProAuto(ctx context.Context, d time.Duration) error {
 func (s *Server) startProAutomationMonitor() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.proAutoCancel = cancel
+	s.startSIWCMarkerWorker(ctx)
 	s.startProRestockMonitor(ctx)
 	s.startProSIWCWorker(ctx)
 	s.startProOAIWorker(ctx)

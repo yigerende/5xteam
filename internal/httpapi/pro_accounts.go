@@ -23,10 +23,11 @@ import (
 )
 
 type proAccountListItem struct {
-	FinancialCases     []proFinancialCase `json:"financial_cases"`
-	PushElapsedMinutes int64              `json:"push_elapsed_minutes"`
-	ForceMergeDeadline *time.Time         `json:"force_merge_deadline,omitempty"`
-	StateEnteredAt     *time.Time         `json:"state_entered_at,omitempty"`
+	SIWCMarker         *store.SIWCMarkerTask `json:"siwc_marker,omitempty"`
+	FinancialCases     []proFinancialCase    `json:"financial_cases"`
+	PushElapsedMinutes int64                 `json:"push_elapsed_minutes"`
+	ForceMergeDeadline *time.Time            `json:"force_merge_deadline,omitempty"`
+	StateEnteredAt     *time.Time            `json:"state_entered_at,omitempty"`
 	model.MailAccountProfile
 	ActivationCard       *store.ProActivationCard `json:"activation_card,omitempty"`
 	StageProgress        model.ProStageDisplay    `json:"pro_stage_progress"`
@@ -46,6 +47,10 @@ func (s *Server) proAccountListWithCardsContext(ctx context.Context, items []mod
 		emails = append(emails, item.Email)
 	}
 	cards, err := s.store.ProActivationCards(emails)
+	if err != nil {
+		return nil, err
+	}
+	markers, err := s.store.SIWCMarkerStates(emails)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +111,9 @@ func (s *Server) proAccountListWithCardsContext(ctx context.Context, items []mod
 			item.ClearProCostSnapshot()
 		}
 		row := proAccountListItem{MailAccountProfile: item, StageProgress: item.ProStages()}
+		if marker, ok := markers[strings.ToLower(item.Email)]; ok {
+			row.SIWCMarker = &marker
+		}
 		if order, ok := orders[strings.ToLower(item.Email)]; ok {
 			row.QuotaResumeAvailable = item.CanResumeProQuota() && order.ID == item.ProAuto.OrderID && order.Status == "success"
 		}
