@@ -49,3 +49,25 @@ export function cardConsumption(rows = []) {
   const { total, missing, notPushed } = summarizeConsumption(rows)
   return { text: consumptionText(total), total, missing, notPushed }
 }
+
+// Match summary precedence exactly: historical/known zero overrides missing,
+// and another unresolved order for an email overrides a no-push exclusion.
+export function consumptionExceptions(rows = [], history = []) {
+  const known = new Set(), grouped = new Map()
+  const keyOf = row => row.email?.trim().toLowerCase() || row.id
+  for (const row of history) if (typeof row.total === 'number' && Number.isFinite(row.total) && row.total >= 0) known.add(keyOf(row))
+  for (const row of rows) {
+    const key = keyOf(row)
+    if (accountConsumption(row) !== null) known.add(key)
+    if (!grouped.has(key)) grouped.set(key, [])
+    if (!grouped.get(key).some(item => item.id === row.id)) grouped.get(key).push(row)
+  }
+  const missing = [], notPushed = []
+  for (const [email, orders] of grouped) {
+    if (known.has(email)) continue
+    const unresolved = orders.filter(row => !consumptionNotPushed(row))
+    const item = { email, orders: unresolved.length ? unresolved : orders }
+    ;(unresolved.length ? missing : notPushed).push(item)
+  }
+  return { missing, notPushed }
+}

@@ -72,6 +72,15 @@ func (s *Store) initializeEJHDisplayRevision() error {
 	UPDATE display_revisions SET revision=revision+1 WHERE scope='ejh'; END;`); err != nil {
 		return err
 	}
+	old = strings.ReplaceAll(ejhConsumptionReviewProjection, "m.profile", "OLD.profile")
+	next = strings.ReplaceAll(ejhConsumptionReviewProjection, "m.profile", "NEW.profile")
+	oldEligible := strings.ReplaceAll(ejhConsumptionNoSourceProjection, "m.profile", "OLD.profile")
+	newEligible := strings.ReplaceAll(ejhConsumptionNoSourceProjection, "m.profile", "NEW.profile")
+	if _, err = tx.Exec(`CREATE TRIGGER IF NOT EXISTS ejh_display_mail_consumption_review_update AFTER UPDATE ON mail_accounts
+	WHEN ` + old + ` IS NOT ` + next + ` OR ` + oldEligible + ` IS NOT ` + newEligible + ` BEGIN
+	UPDATE display_revisions SET revision=revision+1 WHERE scope='ejh'; END;`); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

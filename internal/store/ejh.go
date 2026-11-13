@@ -577,7 +577,7 @@ const ejhCaseOrderProjection = `json_object('updated_at',json_extract(o.profile,
 // Only a retained, completed flow with no evidence of downstream use qualifies.
 // Missing/deleted accounts, running flows and prior pushes remain unknown. This
 // scalar projection reads no credentials or event logs and adds no per-row query.
-const ejhConsumptionNotPushedProjection = `(
+const ejhConsumptionNoSourceProjection = `(
  COALESCE(json_extract(m.profile,'$.pro_auto.status'),'')='completed'
  AND COALESCE(json_extract(m.profile,'$.pro_workflow_running'),0)=0
  AND COALESCE(json_extract(m.profile,'$.push_provider'),'')=''
@@ -597,6 +597,12 @@ const ejhConsumptionNotPushedProjection = `(
  AND COALESCE(json_extract(m.profile,'$.cost_downstream_snapshot'),0)=0
  AND COALESCE(json_extract(m.profile,'$.user_cost_downstream_snapshot'),0)=0
  AND json_extract(m.profile,'$.cost_checked_at') IS NULL
+ AND COALESCE(json_extract(m.profile,'$.pro_pending_push_target_id'),'')=''
+)`
+
+// A started step alone cannot establish whether the downstream create succeeded.
+// Only an explicit audited review can classify interrupted steps without erasing them.
+const ejhConsumptionNotPushedProjection = `(` + ejhConsumptionNoSourceProjection + `
  AND COALESCE(json_extract(m.profile,'$.pro_auto.stage'),'')<>'push'
  AND json_extract(m.profile,'$.pro_auto.steps.push') IS NULL
  AND json_extract(m.profile,'$.pro_auto.stage_times.push') IS NULL
@@ -606,6 +612,8 @@ const ejhConsumptionNotPushedProjection = `(
  AND json_extract(m.profile,'$.pro_manual_stages.push') IS NULL
  AND json_extract(m.profile,'$.pro_stage_overrides.push') IS NULL
 )`
+
+const ejhConsumptionReviewProjection = `json_object('account_id',json_extract(m.profile,'$.id'),'flow_id',json_extract(m.profile,'$.pro_auto.id'),'order_id',json_extract(m.profile,'$.pro_auto.order_id'),'push_status',json_extract(m.profile,'$.push_status'),'push_step',json_extract(m.profile,'$.pro_auto.steps.push'),'push_times',json_extract(m.profile,'$.pro_auto.stage_times'),'manual_push',json_extract(m.profile,'$.pro_manual_stages.push'),'override_push',json_extract(m.profile,'$.pro_stage_overrides.push'))`
 
 func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, error) {
 	rates, err := ejhReversalFeeRates(q)
@@ -663,7 +671,7 @@ func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, erro
 	}
 	rows, e := q.Query(`SELECT c.profile,m.email,CASE WHEN k.card_type='ejh' THEN COALESCE(l.card_id,i.card_id,c.card_id) ELSE '' END,COALESCE(k.card_type,'other'),charge.sealed,`+ejhCaseOrderProjection+`,
         CASE WHEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_identity'),'')<>''
-        THEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_snapshot'),0) END,COALESCE(oc.profile,'{}'),`+ejhCaseAccountProjection+`,COALESCE((SELECT profile FROM pro_dead_accounts WHERE email=c.email),'null'),`+ejhConsumptionNotPushedProjection+` FROM ejh_cases c
+        THEN COALESCE(json_extract(m.profile,'$.user_cost_downstream_snapshot'),0) END,COALESCE(oc.profile,'{}'),`+ejhCaseAccountProjection+`,COALESCE((SELECT profile FROM pro_dead_accounts WHERE email=c.email),'null'),`+ejhConsumptionNotPushedProjection+`,`+ejhConsumptionNoSourceProjection+`,`+ejhConsumptionReviewProjection+` FROM ejh_cases c
         LEFT JOIN ejh_records charge ON charge.kind='trade' AND charge.id=json_extract(c.profile,'$.original_trade_id')
         LEFT JOIN gptpay_orders o ON o.id=c.id
 		LEFT JOIN mail_accounts m ON m.email=c.email
@@ -684,9 +692,10 @@ func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, erro
 		var ejhCardID, cardType string
 		var chargeRaw, orderRaw sql.NullString
 		var consumption sql.NullFloat64
-		var notPushed bool
+		var notPushed, noSource bool
+		var reviewContext string
 		var oaiRaw, oaiAccountRaw, deadRaw string
-		if e = rows.Scan(&raw, &exists, &ejhCardID, &cardType, &chargeRaw, &orderRaw, &consumption, &oaiRaw, &oaiAccountRaw, &deadRaw, &notPushed); e != nil {
+		if e = rows.Scan(&raw, &exists, &ejhCardID, &cardType, &chargeRaw, &orderRaw, &consumption, &oaiRaw, &oaiAccountRaw, &deadRaw, &notPushed, &noSource, &reviewContext); e != nil {
 			return nil, e
 		}
 		var v ejh.Case
@@ -710,9 +719,15 @@ func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, erro
 		v.MerchantFeeUSD = merchantFees[v.ID]
 		v.ConsumptionTotal = nil
 		v.ConsumptionState = ""
+		v.ConsumptionReviewKey = ejhConsumptionReviewKey(reviewContext)
+		v.ConsumptionCanReview = exists.Valid && noSource && oaiAccount.ProAuto.OrderID == v.ID && cardType == "ejh"
 		if consumption.Valid {
 			v.ConsumptionTotal = &consumption.Float64
 		} else if exists.Valid && notPushed && oaiAccount.ProAuto.OrderID == v.ID {
+			v.ConsumptionState = "not_pushed"
+		}
+		if v.ConsumptionTotal == nil && v.ConsumptionReview != nil && v.ConsumptionReview.State == "not_pushed" &&
+			(!exists.Valid || v.ConsumptionCanReview && v.ConsumptionReview.Context == v.ConsumptionReviewKey) {
 			v.ConsumptionState = "not_pushed"
 		}
 		v.EJHCardID = ejhCardID

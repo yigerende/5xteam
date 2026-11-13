@@ -1,7 +1,11 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
+import EJHConsumptionDetails from './EJHConsumptionDetails.vue'
 import { financeOverview, dailyFinanceCost } from '../ejh-finance'
 const props=defineProps({data:{type:Object,required:true},masked:Boolean,collapsible:Boolean})
+const emit=defineEmits(['updated'])
+const consumptionDetail=ref('')
+watch(()=>props.masked,masked=>{if(masked)consumptionDetail.value=''})
 const display=value=>props.masked?'---':value
 const totals=computed(()=>props.data._overview?.finance || financeOverview(props.data))
 const earnings=computed(()=>totals.value.earnings)
@@ -10,7 +14,7 @@ const today=computed(()=>props.data._overview?.today || dailyFinanceCost(props.d
 <template>
  <div class="finance-totals" aria-label="收益与成本汇总">
   <div class="finance-main">
-   <div><span>消费收益</span><strong>{{display(earnings.consumptionR??'—')}} <em>R</em></strong><small>下游用户消费 · 扣费前收益</small><small v-if="!masked&&(totals.consumption.missing)" class="warning">{{display(totals.consumption.missing)}} 个账号未查询，仅含已知数据</small><small v-if="!masked&&totals.consumption.notPushed">{{display(totals.consumption.notPushed)}} 个账号未推送，无消费数据</small></div>
+   <div><span>消费收益</span><strong>{{display(earnings.consumptionR??'—')}} <em>R</em></strong><small>下游用户消费 · 扣费前收益</small><button v-if="!masked&&totals.consumption.missing" type="button" class="consumption-link warning" @click="consumptionDetail='missing'">{{display(totals.consumption.missing)}} 个账号未查询，仅含已知数据 · 查看处理</button><button v-if="!masked&&totals.consumption.notPushed" type="button" class="consumption-link" @click="consumptionDetail='notPushed'">{{display(totals.consumption.notPushed)}} 个账号未推送，无消费数据 · 查看</button></div>
    <div><span>总成本 <small v-if="!masked&&(earnings.estimated)">估算</small></span><strong>{{display(earnings.costR??'—')}} <em>R</em></strong><small>{{display(earnings.costUSD??'—')}} USD</small><small>开卡费 + 充值手续费 + 撤销费 + 清算 + 退款费 + API 收费 + 死号亏损</small><small v-if="!masked&&(earnings.costIncomplete)" class="warning">已知 {{display(earnings.knownCostR??'—')}} R · {{display(earnings.knownCostUSD??'—')}} USD · 部分费用待核实</small>
     <div class="today-cost"><span>当日成本 <small>北京时间 {{today.date}}<template v-if="!masked&&today.earnings.estimated"> · 估算</template></small></span><b>{{display(today.earnings.costUSD??'—')}} USD · {{display(today.earnings.costR??'—')}} R</b><small v-if="!masked&&today.earnings.costIncomplete" class="warning">已知 {{today.earnings.knownCostUSD??'—'}} USD · {{today.earnings.knownCostR??'—'}} R，部分费用待核实</small><small v-if="!masked&&today.undated">按已记录日期统计；{{today.undated}} 笔历史费用日期未明确，未计入当日</small></div>
    </div>
@@ -31,8 +35,10 @@ const today=computed(()=>props.data._overview?.today || dailyFinanceCost(props.d
   <details v-if="!masked&&(totals.gap!==null)" class="finance-reconcile"><summary>成本之外的资金差额：{{display(totals.gap)}} USD（待核对）</summary><p>差额＝实际损耗 − 开卡费 − 授权撤销费 − 清算成本 − 清算退款手续费。含未销卡补回差额与汇率估算差异，不作为确定费用再次扣减利润。</p></details>
   </details>
  </div>
+ <Teleport to="body"><div v-if="consumptionDetail&&!masked" class="consumption-backdrop"><EJHConsumptionDetails :data="data" :kind="consumptionDetail" @close="consumptionDetail=''" @updated="emit('updated')"/></div></Teleport>
 </template>
 <style scoped>
+.consumption-link{display:block;border:0;background:none;padding:2px 0;font-size:11px;line-height:1.7;text-align:left;color:var(--muted);text-decoration:underline;cursor:pointer}.consumption-link:focus-visible{outline:2px solid var(--green);outline-offset:3px}.consumption-backdrop{position:fixed;inset:0;z-index:1200;background:#0006;display:flex;align-items:center;justify-content:center;padding:16px}
 .today-cost{margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}.today-cost>span{flex-wrap:wrap}.today-cost>b{display:block;margin-top:4px;font-size:14px;overflow-wrap:anywhere}
 .finance-totals{border-top:1px solid var(--line);font-variant-numeric:tabular-nums}.finance-main,.finance-fees{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.finance-main>div,.finance-fees>div{padding:18px 20px;min-width:0}.finance-main>div+div,.finance-fees>div+div{border-left:1px solid var(--line)}.finance-totals span{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:12px}.finance-totals strong{display:block;font-size:28px;font-weight:600;margin:10px 0 6px;overflow-wrap:anywhere}.finance-totals em{font-size:11px;font-style:normal;color:var(--muted);font-weight:400}.finance-totals small{display:block;color:var(--muted);font-size:10px;line-height:1.7}.finance-main .profit{background:var(--green-bg)}.profit strong{color:var(--green-strong)}.profit .negative{color:var(--red)}.finance-fees{border-top:1px solid var(--line)}.finance-fees strong{font-size:20px}.finance-cash{display:flex;flex-wrap:wrap;gap:10px 24px;padding:12px 20px;border-top:1px solid var(--line);background:var(--bg)}.finance-cash span{flex-wrap:wrap;font-size:11px;gap:4px}.finance-cash b{color:var(--text)}.finance-totals .warning{color:var(--red)}@media(max-width:640px){.finance-main,.finance-fees{grid-template-columns:1fr}.finance-main>div+div,.finance-fees>div+div{border-left:0;border-top:1px solid var(--line)}}
 .finance-extra{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid var(--line)}.finance-extra>div{padding:16px 20px}.finance-extra>div+div{border-left:1px solid var(--line)}.finance-extra strong{font-size:20px}@media(max-width:640px){.finance-extra{grid-template-columns:1fr}.finance-extra>div+div{border-left:0;border-top:1px solid var(--line)}}.finance-reconcile{border-top:1px solid var(--line);padding:12px 20px;font-size:11px;color:var(--muted);line-height:1.7}.finance-reconcile summary{cursor:pointer}.finance-reconcile p{margin:6px 0}

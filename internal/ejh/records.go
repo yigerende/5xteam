@@ -72,6 +72,14 @@ type CaseStateOverride struct {
 	Revision  int64     `json:"revision"`
 }
 
+type ConsumptionReview struct {
+	State     string    `json:"state"`
+	Reason    string    `json:"reason"`
+	Context   string    `json:"context"`
+	Revision  int64     `json:"revision"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 func ValidCaseState(state string) bool {
 	return state == "unopened" || state == "opened" || state == "waiting" || state == "returned"
 }
@@ -90,7 +98,10 @@ type Case struct {
 	// Read from the account's current user-cost snapshot; nil means unqueried.
 	ConsumptionTotal *float64 `json:"consumption_total,omitempty"`
 	// Read-only projection; not_pushed is distinct from a queried zero.
-	ConsumptionState string `json:"consumption_state,omitempty"`
+	ConsumptionState     string             `json:"consumption_state,omitempty"`
+	ConsumptionReview    *ConsumptionReview `json:"consumption_review,omitempty"`
+	ConsumptionReviewKey string             `json:"consumption_review_key,omitempty"`
+	ConsumptionCanReview bool               `json:"consumption_can_review"`
 
 	AutomaticState  string             `json:"automatic_state"`
 	StateOverride   *CaseStateOverride `json:"state_override,omitempty"`

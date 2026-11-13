@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { accountConsumption, consumptionText, cardConsumption, accountConsumptionText, accountConsumptionForProfit, summarizeConsumption } from '../src/ejh-consumption.js'
+import { accountConsumption, consumptionText, cardConsumption, accountConsumptionText, accountConsumptionForProfit, summarizeConsumption, consumptionExceptions } from '../src/ejh-consumption.js'
 
 const account = { email: 'One@example.com', consumption_total: 67.0766, cost_downstream_snapshot: 335.3832 }
 assert.equal(consumptionText(accountConsumption(account)), '67.0766 R')
@@ -35,3 +35,13 @@ for(const total of [0,12]) {
  assert.deepEqual(summarizeConsumption([notPushed], [...history,...history]),{total,missing:0,count:1,notPushed:0})
 }
 console.log('Passed: no push source distinguished from unknown and queried zero; history and applicable orders take precedence')
+
+const exceptionRows=[{id:'a',email:'lost@example.com'},{id:'b',email:' LOST@example.com ',consumption_state:'not_pushed'},{id:'c',email:'never@example.com',consumption_state:'not_pushed'},{id:'z',email:'zero@example.com'}]
+const exceptionHistory=[{id:'known-zero',email:'zero@example.com',total:0}]
+const exceptions=consumptionExceptions(exceptionRows,exceptionHistory), summary=summarizeConsumption(exceptionRows,exceptionHistory)
+assert.equal(exceptions.missing.length,summary.missing)
+assert.equal(exceptions.notPushed.length,summary.notPushed)
+assert.equal(exceptions.missing[0].email,'lost@example.com')
+assert.deepEqual(exceptions.missing[0].orders.map(row=>row.id),['a'])
+assert.equal(consumptionExceptions([...exceptionRows,{id:'d',email:'lost@example.com',consumption_total:0}],exceptionHistory).missing.length,0)
+console.log('Passed: drilldown matches deduplicated overview counts, order details and real-zero precedence')

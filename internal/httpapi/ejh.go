@@ -68,6 +68,7 @@ func (s *Server) ejhRoutes(m *http.ServeMux) {
 	m.HandleFunc("DELETE /api/ejh/cases/unopened", s.deleteEJHUnopenedCases)
 	m.HandleFunc("DELETE /api/ejh/cases/{id}", s.deleteEJHUnopenedCases)
 	m.HandleFunc("PUT /api/ejh/cases/{id}/state", s.setEJHCaseState)
+	m.HandleFunc("PUT /api/ejh/cases/{id}/consumption-review", s.setEJHConsumptionReview)
 	m.HandleFunc("POST /api/ejh/cards/{id}/trades", s.queryEJHCardTrades)
 	m.HandleFunc("GET /api/ejh/occupancy/{id}", s.getEJHOccupancyOrder)
 	m.HandleFunc("POST /api/ejh/occupancy/{id}/resolve", s.resolveEJHOccupancy)
