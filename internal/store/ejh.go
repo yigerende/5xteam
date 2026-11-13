@@ -613,7 +613,7 @@ const ejhConsumptionNotPushedProjection = `(` + ejhConsumptionNoSourceProjection
  AND json_extract(m.profile,'$.pro_stage_overrides.push') IS NULL
 )`
 
-const ejhConsumptionReviewProjection = `json_object('account_id',json_extract(m.profile,'$.id'),'flow_id',json_extract(m.profile,'$.pro_auto.id'),'order_id',json_extract(m.profile,'$.pro_auto.order_id'),'push_status',json_extract(m.profile,'$.push_status'),'push_step',json_extract(m.profile,'$.pro_auto.steps.push'),'push_times',json_extract(m.profile,'$.pro_auto.stage_times'),'manual_push',json_extract(m.profile,'$.pro_manual_stages.push'),'override_push',json_extract(m.profile,'$.pro_stage_overrides.push'))`
+const ejhConsumptionReviewProjection = `json_object('account_id',json_extract(m.profile,'$.id'),'flow_id',json_extract(m.profile,'$.pro_auto.id'),'order_id',json_extract(m.profile,'$.pro_auto.order_id'),'push_status',json_extract(m.profile,'$.push_status'),'push_step',json_extract(m.profile,'$.pro_auto.steps.push'),'push_times',json_extract(m.profile,'$.pro_auto.stage_times.push','$.pro_auto.stage_times."push:running"','$.pro_auto.stage_times."push:completed"','$.pro_auto.stage_times."push:failed"','$.pro_auto.stage_times."push:interrupted"'),'manual_push',json_extract(m.profile,'$.pro_manual_stages.push'),'override_push',json_extract(m.profile,'$.pro_stage_overrides.push'))`
 
 func (s *Store) ejhCasesQuery(q ejhCaseQuery, emails []string) ([]ejh.Case, error) {
 	rates, err := ejhReversalFeeRates(q)

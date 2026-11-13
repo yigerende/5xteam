@@ -91,6 +91,13 @@ func TestEJHConsumptionReviewPreservesHistoryAndConcurrentUpdates(t *testing.T) 
 	if next == version {
 		t.Fatal("review did not invalidate view")
 	}
+	if _, err = s.db.Exec(`UPDATE mail_accounts SET profile=json_set(profile,'$.pro_auto.stage_times."quota:waiting"','2026-11-13T12:00:00Z') WHERE email=?`, email); err != nil {
+		t.Fatal(err)
+	}
+	afterQuota, _ := s.EJHDisplayRevision(context.Background())
+	if afterQuota != next {
+		t.Fatal("unrelated quota timing invalidated financial view")
+	}
 	if _, err = s.SetEJHConsumptionReview(row.ID, reviewInput(row, "auto")); err != nil {
 		t.Fatal(err)
 	}
