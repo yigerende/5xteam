@@ -10,6 +10,7 @@ import (
 type Sub2Settings struct {
 	AuthMode                string `json:"auth_mode,omitempty"`
 	SIWCAuthorizationSource string `json:"siwc_authorization_source,omitempty"`
+	SIWCConsentDeniedFinal  bool   `json:"siwc_consent_denied_final"`
 	// Provider selects the active downstream: sub2 (default) or cpa.
 	Provider                       string   `json:"provider"`
 	PushPlanType                   string   `json:"push_plan_type"`

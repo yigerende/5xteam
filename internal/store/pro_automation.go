@@ -67,6 +67,15 @@ func (s *Store) RecoverProAutomations() error {
 		if p.ProAuto.Status != "running" {
 			continue
 		}
+		// Durable exhausted evidence was saved before starting a final action.
+		// Resume only that safe gap; actions already started keep their own recovery.
+		if p.ProAuto.Stage == "oauth" && p.ProAuto.SIWCConsentFinal() && !p.DispositionStarted() {
+			now := time.Now()
+			p.ProAuto.Status, p.ProAuto.NextCheckAt = "waiting_quota", &now
+			p.ProAuto.UpdatedAt = now
+			updates[email] = p
+			continue
+		}
 		p.ProAuto.Status = "interrupted"
 		p.ProAuto.Error = "服务重启，原登录会话已释放；请查询原订单，禁止重复开通"
 		if p.ProAuto.Steps["oauth"] == "completed" {

@@ -38,10 +38,27 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 		}
 		stop()
 		if err == nil {
+			_, clearErr := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.ProAuto.SIWCConsentFailure = nil })
+			if clearErr != nil {
+				return clearErr
+			}
 			return nil
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if handled, recoveryErr := s.prepareSIWCConsentRetry(ctx, email, err); handled {
+			if recoveryErr != nil {
+				return recoveryErr
+			}
+			p, _, readErr := s.store.MailAccountCredential(email)
+			if readErr != nil {
+				return readErr
+			}
+			ctx = context.WithValue(ctx, proPaidRecoveryKey{}, p.ProAuto.OrderID)
+			continue
+		} else if recoveryErr != nil {
+			err = recoveryErr
 		}
 
 		var unavailable *globalProxyWaiting

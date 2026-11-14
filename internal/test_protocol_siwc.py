@@ -118,6 +118,28 @@ class SIWCScenario(Scenario):
 
 
 class SIWCFlowTests(unittest.TestCase):
+    def test_consent_denial_requires_exact_endpoint_status_and_code(self):
+        from types import SimpleNamespace
+        from manager_oauth.siwc import SIWCProtocolLogin
+        from manager_oauth.upstream import LoginFlowError
+        for status, body, expected in [(401, {"error": {"code": "not_authorized"}}, True),
+                                       (401, {"error": {"code": "invalid_token"}}, False),
+                                       (429, {"error": {"code": "not_authorized"}}, False),
+                                       (503, {"error": {"code": "not_authorized"}}, False),
+                                       (401, "not_authorized", False)]:
+            calls = []
+            def request(url, **kwargs):
+                calls.append(url)
+                if url.endswith("client_auth_session_dump"):
+                    return SimpleNamespace(status=200, json=lambda: {"session_id": "fixture-session"})
+                return SimpleNamespace(status=status, json=lambda: body)
+            flow = SimpleNamespace(log=lambda *args: None, request=request, headers=lambda url, h: h)
+            with self.subTest(status=status, body=body), self.assertRaises(LoginFlowError) as caught:
+                SIWCProtocolLogin.grant_siwc_consent(flow, "https://auth.openai.com/sign-in-with-chatgpt/consent")
+            self.assertEqual(caught.exception.code == "siwc_consent_not_authorized", expected)
+            self.assertEqual(caught.exception.status, status)
+            self.assertTrue(calls[-1].endswith("dynamic-agent-clients/consent/grant"))
+
     def test_full_login_paths_use_same_engine_and_proxy(self):
         for options, payload in [({}, {}), ({"choose": True}, {}),
                                  ({"password": True, "totp": True}, {"login_mode": "password_totp", "gpt_password": "private-password", "totp_secret": "JBSWY3DPEHPK3PXP"}),

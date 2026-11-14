@@ -232,7 +232,7 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 409, nil, "全自动流程已经完成，不会重复开通")
 		return
 	}
-	resume := p.ProAuto.Steps["oauth"] == "completed"
+	resume := p.ProAuto.Steps["oauth"] == "completed" || p.ProAuto.SIWCConsentFinal()
 	paidRecovery := input.RetryCurrent && p.ProAuto.OrderID != "" && !resume
 	restartFailed := false
 	recoveryOrderID := p.ProAuto.OrderID
@@ -670,11 +670,14 @@ func (s *Server) runProAutomation(ctx context.Context, email string, unlock, can
 	}
 	if err == nil && !resume {
 		err = s.runProProvisioning(ctx, email, cfg, key, card, secret)
+		if errors.Is(err, errSIWCConsentExhausted) {
+			err = nil
+		}
 	}
 	if err == nil {
 		p, _, e := s.store.MailAccountCredential(email)
 		err = e
-		if err == nil && p.ProAuto.Steps["oauth"] != "completed" {
+		if err == nil && p.ProAuto.Steps["oauth"] != "completed" && !p.ProAuto.SIWCConsentFinal() {
 			err = errors.New("连续会话没有保存开通后的新 RT/AT，停止后续步骤")
 		}
 	}
@@ -1034,6 +1037,9 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 		return err
 	}
 	if result["success"] != true {
+		if oauthSource != "" && result["error_code"] == "siwc_consent_not_authorized" && fmt.Sprint(result["http_status"]) == "401" {
+			return &siwcConsentDeniedError{Source: oauthSource, Downstream: model.ProDownstream(push)}
+		}
 		if isDeadOAuthResult(result, fmt.Sprint(result["error"])) {
 			if p, e := s.markProDead(email, "login", fmt.Sprint(result["error"])); e != nil {
 				return e
@@ -1071,6 +1077,16 @@ func (s *Server) runProAutomationTail(ctx context.Context, email string) (runErr
 		_, err = s.performProDisposition(ctx, email)
 		return err
 	}
+	if p.ProAuto.SIWCConsentFinal() {
+		if err = s.validateSIWCConsentFinal(p); err != nil {
+			return err
+		}
+		finalSettings, _, _, readErr := s.store.ProSettings()
+		if readErr != nil {
+			return readErr
+		}
+		return s.runProFinalAction(ctx, email, finalSettings)
+	}
 	settings, _, _, err := s.proAccountPushSettings(p)
 	if err != nil {
 		return err
@@ -1078,16 +1094,13 @@ func (s *Server) runProAutomationTail(ctx context.Context, email string) (runErr
 	if settings.Provider != "sub2" && settings.Provider != "vm2api" {
 		return errors.New("Pro 全自动需使用 Sub2 或 vm2api 推送设置")
 	}
-	push, quota, merge := s.performProPush, s.performProQuota, s.performProDisposition
+	push, quota := s.performProPush, s.performProQuota
 	if h := s.proAutoHooks; h != nil {
 		if h.Push != nil {
 			push = h.Push
 		}
 		if h.Quota != nil {
 			quota = h.Quota
-		}
-		if h.Merge != nil && settings.Disposition() == "merge" {
-			merge = h.Merge
 		}
 	}
 	if p.ProAuto.Steps["push"] != "completed" {
@@ -1191,8 +1204,13 @@ func (s *Server) runProAutomationTail(ctx context.Context, email string) (runErr
 			return err
 		}
 	}
+	return s.runProFinalAction(ctx, email, forceSettings)
+}
+
+func (s *Server) runProFinalAction(ctx context.Context, email string, forceSettings model.ProSettings) error {
+	var err error
 	action := forceSettings.Disposition()
-	merge = s.performProMerge
+	merge := s.performProMerge
 	if action == "merge_v2" {
 		merge = s.performProMergeV2
 	} else if action == "merchant" {

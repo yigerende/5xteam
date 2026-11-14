@@ -221,6 +221,8 @@ def run(payload, rpc):
         bridge.emit("pro_auto", "failed", "Pro 连续会话流程停止",
                     details={"error": bridge.redact(exc)}, level="error")
         return {"success": False, "retryable": False, "error": bridge.redact(exc),
+                "error_code": exc.code if isinstance(exc, upstream.LoginFlowError) else "",
+                "http_status": exc.status if isinstance(exc, upstream.LoginFlowError) else None,
                 "session_lost": True, "dead": isinstance(exc, bridge.DeadAccountError)}
     finally:
         if flow is not None:

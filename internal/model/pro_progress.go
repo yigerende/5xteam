@@ -185,6 +185,9 @@ func (p MailAccountProfile) ProStages() ProStageDisplay {
 	for step, status := range p.ProAuto.Steps {
 		v.Steps[step] = status
 	}
+	if f := p.ProAuto.SIWCConsentFailure; f != nil && f.Exhausted && f.OrderID == p.ProAuto.OrderID && v.Steps["oauth"] == "failed" {
+		v.Errors["oauth"] = "SIWC 确认授权 401 / not_authorized，重试耗尽；已按配置跳过推送与额度，执行最后一步"
+	}
 	if message := p.ProAuto.DisplayError(); message != "" {
 		v.Errors[p.ProAuto.Stage] = message
 	}

@@ -135,8 +135,17 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
             "auth_session_id": session_id, "agent_name": "sub2api",
         }, headers=self.headers(url, headers), timeout=45)
         if response.status not in {200, 301, 302, 303, 307, 308}:
+            code = "siwc_consent_failed"
+            if response.status == 401:
+                try:
+                    body = response.json()
+                    error = body.get("error") if isinstance(body, dict) else None
+                    if isinstance(error, dict) and error.get("code") == "not_authorized":
+                        code = "siwc_consent_not_authorized"
+                except (ValueError, TypeError):
+                    pass
             raise upstream.LoginFlowError(f"SIWC 确认授权失败：HTTP {response.status}",
-                                         status=response.status, retryable=response.status >= 500)
+                                         code=code, status=response.status, retryable=response.status >= 500)
         return response.location() or self.extract_continue_url(response.json())
 
     def exchange_oauth_callback(self, callback_url):

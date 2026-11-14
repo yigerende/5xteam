@@ -26,12 +26,13 @@ func TestSIWCPushModesPreserveIndependentConnections(t *testing.T) {
 	siwc.Email = "siwc@example.test"
 	siwc.GroupIDs = []int64{7}
 	siwc.SIWCAuthorizationSource = "sub2api"
+	siwc.SIWCConsentDeniedFinal = true
 	v.Sub2 = siwc
 	if _, e = s.SaveProSettings(v, "siwc-secret", ""); e != nil {
 		t.Fatal(e)
 	}
 	ordinary, secret, e := s.ProSub2Variant("")
-	if e != nil || secret != "ordinary-secret" || ordinary.URL != "https://ordinary.example.test" || ordinary.GroupIDs[0] != 1 {
+	if e != nil || secret != "ordinary-secret" || ordinary.URL != "https://ordinary.example.test" || ordinary.GroupIDs[0] != 1 || ordinary.SIWCConsentDeniedFinal {
 		t.Fatal("ordinary settings not retained", e)
 	}
 	v.Sub2 = ordinary
@@ -43,7 +44,7 @@ func TestSIWCPushModesPreserveIndependentConnections(t *testing.T) {
 		t.Fatal("mode reused another secret")
 	}
 	siwc, secret, e = s.ProSub2Variant("siwc")
-	if e != nil || secret != "siwc-secret" || siwc.GroupIDs[0] != 7 || siwc.SIWCAuthorizationSource != "sub2api" {
+	if e != nil || secret != "siwc-secret" || siwc.GroupIDs[0] != 7 || siwc.SIWCAuthorizationSource != "sub2api" || !siwc.SIWCConsentDeniedFinal {
 		t.Fatal("SIWC settings not retained", e)
 	}
 }

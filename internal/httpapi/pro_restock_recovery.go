@@ -43,6 +43,10 @@ func (s *Server) confirmProPaidSession(p model.MailAccountProfile, args map[stri
 	return map[string]any{"status": "success"}, nil
 }
 func (s *Server) queueRestockPaidRecovery(p model.MailAccountProfile, settings model.ProSettings) {
+	// The consent-specific policy owns this recovery budget and final disposition.
+	if v := p.ProAuto.SIWCConsentFailure; v != nil && (v.Exhausted || v.Retries >= settings.RetryCount) {
+		return
+	}
 	if p.ProAuto.StopRequested || p.ProRestockTaskID == "" || p.ProAuto.RestockRecoveries >= settings.RetryCount+1 || (p.ProAuto.RestockRecoveryAt != nil && time.Since(*p.ProAuto.RestockRecoveryAt) < time.Duration(max(30, settings.RetryIntervalSeconds))*time.Second) {
 		return
 	}

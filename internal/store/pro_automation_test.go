@@ -6,6 +6,33 @@ import (
 	"time"
 )
 
+func TestSIWCConsentFinalRecoversOnlyBeforeAction(t *testing.T) {
+	s := transferStore(t)
+	for _, stage := range []string{"oauth", "merge"} {
+		email := stage + "@example.com"
+		transferSource(t, s, email)
+		_, err := s.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+			p.ProAuto = model.ProAutoState{ID: "flow", OrderID: "paid", Status: "running", Stage: stage,
+				Steps:              map[string]string{"oauth": "failed", "push": "skipped", "quota": "skipped"},
+				SIWCConsentFailure: &model.ProSIWCConsentFailure{OrderID: "paid", Exhausted: true, Retries: 2}}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.RecoverProAutomations(); err != nil {
+		t.Fatal(err)
+	}
+	p, _, _ := s.MailAccountCredential("oauth@example.com")
+	if p.ProAuto.Status != "waiting_quota" || p.ProAuto.NextCheckAt == nil || p.ProAuto.Steps["quota"] != "skipped" {
+		t.Fatal("safe final-action gap not recovered")
+	}
+	p, _, _ = s.MailAccountCredential("merge@example.com")
+	if p.ProAuto.Status != "interrupted" {
+		t.Fatal("replayed an already-started action")
+	}
+}
+
 func TestProAutomationRecoveryAndDueSelection(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {

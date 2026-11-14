@@ -6,6 +6,7 @@ import (
 )
 
 type ProAutoState struct {
+	SIWCConsentFailure    *ProSIWCConsentFailure  `json:"siwc_consent_failure,omitempty"`
 	OAuthSource           string                  `json:"oauth_source,omitempty"`
 	Replacement           *ProRechargeReplacement `json:"replacement,omitempty"`
 	PaymentReviewRequired bool                    `json:"payment_review_required,omitempty"`
@@ -38,6 +39,21 @@ type ProAutoState struct {
 	StartedAt            time.Time            `json:"started_at,omitempty"`
 	UpdatedAt            time.Time            `json:"updated_at,omitempty"`
 	NextCheckAt          *time.Time           `json:"next_check_at,omitempty"`
+}
+
+// Evidence is scoped to one paid workflow and stop generation, never an email alone.
+type ProSIWCConsentFailure struct {
+	OrderID     string           `json:"order_id"`
+	Source      string           `json:"source"`
+	Downstream  ProDownstreamRef `json:"downstream"`
+	StopVersion uint64           `json:"stop_version"`
+	Retries     int              `json:"retries"`
+	Exhausted   bool             `json:"exhausted"`
+}
+
+func (s ProAutoState) SIWCConsentFinal() bool {
+	v := s.SIWCConsentFailure
+	return v != nil && v.Exhausted && v.OrderID != "" && v.OrderID == s.OrderID && v.StopVersion == s.StopVersion && !s.StopRequested
 }
 
 // Each confirmed unpaid retry gets a new payment key; the workflow and

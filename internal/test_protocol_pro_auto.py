@@ -22,6 +22,15 @@ class CookieStore:
 
 
 class ContinuousSessionTest(unittest.TestCase):
+    def test_consent_denial_structured_evidence_survives_process_boundary(self):
+        failure = upstream.LoginFlowError("SIWC 确认授权失败：HTTP 401", code="siwc_consent_not_authorized", status=401)
+        with patch.object(pro.ContinuousProLogin, "continue_codex", side_effect=failure):
+            result, events, calls = self.scenario()
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "siwc_consent_not_authorized")
+        self.assertEqual(result["http_status"], 401)
+        self.assertNotIn("tokens", events)
+
     def scenario(self, drift_at=0, relogin=False, payment_error=False, bad_trace_at=0,
                  expected_ip='198.51.100.8', real_login=False, login_mode='email_otp', trace_error_at=0,
                  all_unavailable=False, request_error_path='', request_error='CONNECT tunnel failed, response 504'):

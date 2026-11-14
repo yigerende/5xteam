@@ -134,6 +134,11 @@ func (s *Server) waitProAutoFinalStepResume(email string) error {
 			p.ProAuto.Steps = map[string]string{}
 		}
 		p.ProAuto.Steps["quota"] = "waiting"
+		if p.ProAuto.SIWCConsentFinal() {
+			p.ProAuto.Stage = "oauth"
+			p.ProAuto.Steps["quota"] = "skipped"
+			p.ProAuto.Error = "SIWC 确认授权重试耗尽，等待恢复全自动最后一步"
+		}
 		for _, stage := range []string{"merge", "deactivate", "merchant", "merge_v2"} {
 			if p.ProAuto.Steps[stage] == "running" {
 				p.ProAuto.Steps[stage] = "interrupted"
