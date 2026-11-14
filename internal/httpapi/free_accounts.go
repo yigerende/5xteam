@@ -1184,11 +1184,7 @@ func (s *Server) executeOpenAILoginContext(parent context.Context, email, creden
 				return nil, err
 			}
 			baseURL := lease.url
-			proxyURL := baseURL
-			if quality > 1 || round > 1 {
-				proxyURL = rotateOAuthProxySession(baseURL, round, quality)
-			}
-			proxyURL, err = workflow.PrepareIPRoyalOAuthProxy(proxyURL)
+			proxyURL, err := lease.sessionURL(round, quality)
 			if err != nil {
 				lease.Release()
 				return nil, err

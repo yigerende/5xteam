@@ -555,7 +555,7 @@ func (s *Store) ProxiesPage(limit, offset int) ([]model.ProxyProfile, int, error
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM proxies").Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.Query("SELECT id,name,url,created_at,updated_at FROM proxies ORDER BY name COLLATE NOCASE LIMIT ? OFFSET ?", limit, offset)
+	rows, err := s.db.Query("SELECT p.id,p.name,p.url,p.created_at,p.updated_at,coalesce(c.vendor,''),coalesce(c.country,'PH'),coalesce(c.session_minutes,60) FROM proxies p LEFT JOIN proxy_sessions c ON c.proxy_id=p.id ORDER BY p.name COLLATE NOCASE LIMIT ? OFFSET ?", limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -564,7 +564,7 @@ func (s *Store) ProxiesPage(limit, offset int) ([]model.ProxyProfile, int, error
 	for rows.Next() {
 		var item model.ProxyProfile
 		var createdAt, updatedAt string
-		if err := rows.Scan(&item.ID, &item.Name, &item.URL, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.URL, &createdAt, &updatedAt, &item.Vendor, &item.Country, &item.SessionMinutes); err != nil {
 			return nil, 0, err
 		}
 		item.CreatedAt, _ = parseTime(createdAt)

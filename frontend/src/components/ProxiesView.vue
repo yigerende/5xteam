@@ -11,7 +11,10 @@ import StatusPill from './StatusPill.vue'
 
 const props = defineProps({ proxies: { type: Array, default: () => [] }, selectedURL: { type: String, default: '' }, defaultPageSize: { type: Number, default: 10 } })
 const emit = defineEmits(['reload', 'select'])
-const form = reactive({ id: '', name: '', url: '' })
+const sessionDefaults = () => ({vendor: '', country: 'PH', session_minutes: 60})
+const vendors = {'':'原地址 / 静态',iproyal:'皇冠（IPRoyal）',cliproxy:'CLI（Cliproxy）','1024proxy':'1024','711proxy':'711',other:'自定义厂商'}
+const sessionMax = computed(() => ({cliproxy:120,'1024proxy':120,'711proxy':180}[form.vendor] || 10080))
+const form = reactive({ id: '', name: '', url: '', ...sessionDefaults() })
 const tests = ref(new Map())
 const qualityTests = ref(new Map())
 const testingIDs = ref(new Set())
@@ -72,12 +75,12 @@ function parseURL(showMessage = true) {
 }
 
 function reset() {
-  Object.assign(form, { id: '', name: '', url: '' })
+  Object.assign(form, { id: '', name: '', url: '', ...sessionDefaults() })
   setMessage()
 }
 
 function edit(proxy) {
-  Object.assign(form, { id: proxy.id, name: proxy.name, url: proxy.url })
+  Object.assign(form, { id: proxy.id, name: proxy.name, url: proxy.url, vendor:proxy.vendor||'',country:proxy.country||'PH',session_minutes:proxy.session_minutes||60 })
   setMessage('正在编辑代理配置')
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
@@ -90,7 +93,7 @@ async function save() {
   try {
     const profile = await api(form.id ? `/api/proxies/${encodeURIComponent(form.id)}` : '/api/proxies', {
       method: form.id ? 'PUT' : 'POST',
-      body: { name: form.name.trim(), url },
+      body: { name: form.name.trim(), url, vendor:form.vendor,country:form.country.toUpperCase(),session_minutes:form.session_minutes },
     })
     reset()
     emit('reload')
@@ -119,7 +122,7 @@ function saveMapResult(source, id, result) {
 async function runConnectivityTest(proxy, notify = false) {
   updateSet(testingIDs, proxy.id, true)
   try {
-    const result = await api('/api/proxies/test', { method: 'POST', body: { url: proxy.url } })
+    const result = await api('/api/proxies/test', { method: 'POST', body: { url: proxy.url, vendor:proxy.vendor,country:proxy.country,session_minutes:proxy.session_minutes } })
     saveMapResult(tests, proxy.id, result)
     if (notify) setMessage(`${proxy.name}：${result.message}，耗时 ${result.latency_ms}ms`, result.reachable ? 'success' : 'error')
     return result
@@ -140,7 +143,7 @@ async function test(proxy = null) {
   busy.value = true
   setMessage('正在测试代理出口...')
   try {
-    const result = await api('/api/proxies/test', { method: 'POST', body: { url } })
+    const result = await api('/api/proxies/test', { method: 'POST', body: { url, vendor:form.vendor,country:form.country,session_minutes:form.session_minutes } })
     const exit = result.ip_address ? `，出口 ${result.ip_address}` : ''
     setMessage(`${result.message}${exit}，耗时 ${result.latency_ms}ms`, result.reachable ? 'success' : 'error')
   } catch (error) {
@@ -153,7 +156,7 @@ async function test(proxy = null) {
 async function runQualityTest(proxy, notify = false) {
   updateSet(qualityTestingIDs, proxy.id, true)
   try {
-    const result = await api('/api/proxies/openai-quality', { method: 'POST', body: { url: proxy.url } })
+    const result = await api('/api/proxies/openai-quality', { method: 'POST', body: { url: proxy.url, vendor:proxy.vendor,country:proxy.country,session_minutes:proxy.session_minutes } })
     saveMapResult(qualityTests, proxy.id, result)
     if (notify) setMessage(`${proxy.name}：${result.summary}，${result.message}`, result.status === 'pass' ? 'success' : 'error')
     return result
@@ -240,6 +243,8 @@ onMounted(loadPage)
           <button v-if="form.id" class="btn ghost" type="button" @click="reset"><X :size="15" />取消</button>
         </div>
         <label class="field"><span>线路名称</span><input v-model="form.name" maxlength="40" placeholder="例如：新加坡线路" required /></label>
+        <label class="field"><span>代理厂商</span><select v-model="form.vendor"><option v-for="(label,key) in vendors" :key="key" :value="key">{{label}}</option></select></label>
+        <template v-if="form.vendor"><label class="field"><span>国家代码（默认菲律宾）</span><input v-model="form.country" maxlength="2" placeholder="PH" required /></label><label class="field"><span>会话有效期（分钟）</span><input v-model.number="form.session_minutes" type="number" :min="form.vendor==='711proxy'?5:1" :max="sessionMax" required /><small>默认 60 分钟。同一次登录及授权复用会话；切备用后重新登录。</small></label><p v-if="form.vendor==='other'" class="table-note" v-pre>在账号或密码中使用 {country}、{session}、{minutes} 占位符。</p></template>
         <label class="field"><span>代理地址</span><input v-model="form.url" spellcheck="false" placeholder="http://user:pass@host:port" required /><small>也支持 host:port:username:password</small></label>
         <div class="compact-actions">
           <button class="btn ghost" type="button" @click="parseURL()">解析线路</button>
@@ -270,7 +275,7 @@ onMounted(loadPage)
             <tbody>
               <tr v-if="!pagedProxies.length"><td colspan="7" class="empty-cell">暂无代理配置</td></tr>
               <tr v-for="proxy in pagedProxies" :key="proxy.id">
-                <td><strong>{{ proxy.name }}</strong><small class="table-note" :title="health[proxy.id]?.message">{{healthError||globalProxyHealthText(health[proxy.id],healthNow)}}</small><small v-if="health[proxy.id]?.cooldown_until" class="table-note">恢复时间 {{new Date(health[proxy.id].cooldown_until).toLocaleString()}}</small></td>
+                <td><strong>{{ proxy.name }}</strong><small v-if="proxy.vendor" class="table-note">{{ vendors[proxy.vendor] }} · {{proxy.country}} · 会话 {{proxy.session_minutes}} 分钟</small><small class="table-note" :title="health[proxy.id]?.message">{{healthError||globalProxyHealthText(health[proxy.id],healthNow)}}</small><small v-if="health[proxy.id]?.cooldown_until" class="table-note">恢复时间 {{new Date(health[proxy.id].cooldown_until).toLocaleString()}}</small></td>
                 <td class="mono" :title="maskProxyURL(proxy.url)">{{ maskProxyURL(proxy.url) }}</td>
                 <td>
                   <div v-if="proxyExit(proxy)?.exit_ip || proxyExit(proxy)?.ip_address" class="proxy-result">

@@ -201,6 +201,7 @@ func (s *Store) initSchema() error {
 			id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, url TEXT NOT NULL,
 			created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS proxy_sessions (proxy_id TEXT PRIMARY KEY REFERENCES proxies(id) ON DELETE CASCADE,vendor TEXT NOT NULL,country TEXT NOT NULL,session_minutes INTEGER NOT NULL);
 		CREATE TABLE IF NOT EXISTS admin_accounts (
 			id TEXT PRIMARY KEY, label TEXT NOT NULL COLLATE NOCASE UNIQUE, profile TEXT NOT NULL,
 			encrypted_access_token TEXT NOT NULL, encrypted_refresh_token TEXT NOT NULL DEFAULT ''
@@ -1872,7 +1873,7 @@ func (s *Store) SaveSettings(settings model.Settings) error {
 func (s *Store) Proxies() []model.ProxyProfile {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query("SELECT id, name, url, created_at, updated_at FROM proxies ORDER BY name COLLATE NOCASE")
+	rows, err := s.db.Query("SELECT p.id,p.name,p.url,p.created_at,p.updated_at,coalesce(c.vendor,''),coalesce(c.country,'PH'),coalesce(c.session_minutes,60) FROM proxies p LEFT JOIN proxy_sessions c ON c.proxy_id=p.id ORDER BY p.name COLLATE NOCASE")
 	if err != nil {
 		return nil
 	}
@@ -1881,7 +1882,7 @@ func (s *Store) Proxies() []model.ProxyProfile {
 	for rows.Next() {
 		var item model.ProxyProfile
 		var created, updated string
-		if rows.Scan(&item.ID, &item.Name, &item.URL, &created, &updated) == nil {
+		if rows.Scan(&item.ID, &item.Name, &item.URL, &created, &updated, &item.Vendor, &item.Country, &item.SessionMinutes) == nil {
 			item.CreatedAt, _ = parseTime(created)
 			item.UpdatedAt, _ = parseTime(updated)
 			result = append(result, item)
@@ -1902,6 +1903,10 @@ func (s *Store) HasProxyURL(proxyURL string) bool {
 }
 
 func (s *Store) SaveProxy(profile model.ProxyProfile) (model.ProxyProfile, error) {
+	profile.ProxySessionConfig = profile.ProxySessionConfig.Normalized()
+	if err := profile.ProxySessionConfig.Validate(profile.URL); err != nil {
+		return model.ProxyProfile{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	profile.Name, profile.URL = strings.TrimSpace(profile.Name), strings.TrimSpace(profile.URL)
@@ -1914,15 +1919,27 @@ func (s *Store) SaveProxy(profile model.ProxyProfile) (model.ProxyProfile, error
 		if count >= 50 {
 			return model.ProxyProfile{}, errors.New("最多保存 50 个代理")
 		}
-		profile.ID, profile.CreatedAt, profile.UpdatedAt = strconv.FormatInt(now.UnixNano(), 36), now, now
-		_, err := s.db.Exec("INSERT INTO proxies(id, name, url, created_at, updated_at) VALUES(?, ?, ?, ?, ?)", profile.ID, profile.Name, profile.URL, formatTime(profile.CreatedAt), formatTime(profile.UpdatedAt))
+		var random [12]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return model.ProxyProfile{}, err
+		}
+		profile.ID, profile.CreatedAt, profile.UpdatedAt = base64.RawURLEncoding.EncodeToString(random[:]), now, now
+		tx, err := s.db.Begin()
+		if err != nil {
+			return model.ProxyProfile{}, err
+		}
+		defer tx.Rollback()
+		_, err = tx.Exec("INSERT INTO proxies(id, name, url, created_at, updated_at) VALUES(?, ?, ?, ?, ?)", profile.ID, profile.Name, profile.URL, formatTime(profile.CreatedAt), formatTime(profile.UpdatedAt))
 		if err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "unique") {
 				return model.ProxyProfile{}, errors.New("代理名称已存在")
 			}
 			return model.ProxyProfile{}, err
 		}
-		return profile, nil
+		if err = saveProxySession(tx, profile); err != nil {
+			return model.ProxyProfile{}, err
+		}
+		return profile, tx.Commit()
 	}
 	var oldURL, created string
 	if err := s.db.QueryRow("SELECT url, created_at FROM proxies WHERE id = ?", profile.ID).Scan(&oldURL, &created); err != nil {
@@ -1955,6 +1972,9 @@ func (s *Store) SaveProxy(profile model.ProxyProfile) (model.ProxyProfile, error
 				return model.ProxyProfile{}, err
 			}
 		}
+	}
+	if err := saveProxySession(tx, profile); err != nil {
+		return model.ProxyProfile{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.ProxyProfile{}, err

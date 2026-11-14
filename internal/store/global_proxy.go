@@ -126,9 +126,10 @@ func (s *Store) ReadyGlobalProxy(url string, now time.Time) (model.GlobalProxyHe
 }
 
 type GlobalProxyProbe struct {
-	Health model.GlobalProxyHealth
-	URL    string
-	Name   string
+	SessionConfig model.ProxySessionConfig
+	Health        model.GlobalProxyHealth
+	URL           string
+	Name          string
 }
 
 // Indexed due queue; at most two bounded network probes per batch. No network
@@ -193,7 +194,7 @@ func (s *Store) ClaimGlobalProxyProbes(now time.Time) ([]GlobalProxyProbe, error
 		if e = writeGlobalProxyHealth(tx, h, now.Add(60*time.Second).UnixMilli()); e != nil {
 			return nil, e
 		}
-		result = append(result, GlobalProxyProbe{Health: h, URL: profile.URL, Name: profile.Name})
+		result = append(result, GlobalProxyProbe{Health: h, URL: profile.URL, Name: profile.Name, SessionConfig: profile.ProxySessionConfig})
 	}
 	return result, tx.Commit()
 }

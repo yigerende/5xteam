@@ -69,6 +69,7 @@ func validateRestockTarget(c restock.Config, p model.ProSettings) error {
 	return errors.New("监控分组必须包含在 Pro 推送目标分组中")
 }
 func (s *Server) startProRestockMonitor(ctx context.Context) {
+	s.startProRestockWatchdog(ctx)
 	s.startProFallbackMonitor(ctx)
 	s.startProTakeoverMonitor(ctx)
 	if saved, err := s.store.ProRestockSnapshot(); err == nil && saved.Valid && saved.LoadValid {

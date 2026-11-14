@@ -122,7 +122,7 @@ func (s *Server) tickGlobalProxyRecovery(ctx context.Context) {
 			defer wg.Done()
 			check, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
-			proxy, err := workflow.PrepareIPRoyalOAuthProxy(rotateOAuthProxySession(p.URL, 1, 1))
+			proxy, err := workflow.PrepareVendorProxy(rotateOAuthProxySession(p.URL, 1, 1), p.SessionConfig)
 			ok := err == nil
 			if ok {
 				if s.globalProxyProbe != nil {
@@ -253,6 +253,12 @@ func (s *Server) acquireHealthyGlobalProxy(excluded map[string]struct{}) (*oauth
 	selected := ready[0]
 	s.oauthProxyActive[selected.url]++
 	lease := &oauthProxyLease{url: selected.url, key: selected.url, label: selected.label, activeCount: s.oauthProxyActive[selected.url], healthGeneration: selected.generation}
+	for _, p := range profiles {
+		if p.URL == selected.url {
+			lease.sessionConfig = p.ProxySessionConfig
+			break
+		}
+	}
 	lease.releaseFn = func() { s.releaseOAuthProxy(lease.key) }
 	return lease, nil
 }

@@ -939,7 +939,7 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 		}
 	}()
 
-	proxy, err := workflow.PrepareIPRoyalOAuthProxy(rotateOAuthProxySession(lease.url, 1, 1))
+	proxy, err := lease.sessionURL(1, 1)
 	if err != nil {
 		return err
 	}

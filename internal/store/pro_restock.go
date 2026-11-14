@@ -16,6 +16,8 @@ func (s *Store) initializeProRestock() error {
  DELETE FROM pro_restock_demand_gate;
  CREATE TABLE IF NOT EXISTS pro_restock_tasks(id TEXT PRIMARY KEY,email TEXT NOT NULL COLLATE NOCASE,status TEXT NOT NULL,created_at TEXT NOT NULL,cost INTEGER NOT NULL,payload TEXT NOT NULL);
  CREATE UNIQUE INDEX IF NOT EXISTS pro_restock_account ON pro_restock_tasks(email) WHERE status NOT IN ('ready','failed','cancelled');
+ CREATE TABLE IF NOT EXISTS pro_restock_progress(task_id TEXT PRIMARY KEY REFERENCES pro_restock_tasks(id) ON DELETE CASCADE,payload TEXT NOT NULL,checked_at INTEGER NOT NULL);
+ CREATE TRIGGER IF NOT EXISTS pro_restock_progress_finished AFTER UPDATE OF status ON pro_restock_tasks WHEN NEW.status IN ('ready','failed','cancelled') BEGIN DELETE FROM pro_restock_progress WHERE task_id=NEW.id; END;
  CREATE TABLE IF NOT EXISTS pro_restock_replacements(source TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE);
  CREATE TABLE IF NOT EXISTS pro_restock_payment_risk(task_id TEXT PRIMARY KEY,replacement_id TEXT UNIQUE,paused INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS pro_restock_decisions(id TEXT PRIMARY KEY,created_at TEXT NOT NULL,payload TEXT NOT NULL);

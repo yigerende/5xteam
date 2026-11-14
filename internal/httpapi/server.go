@@ -609,13 +609,14 @@ func (s *Server) listProxies(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createProxy(w http.ResponseWriter, r *http.Request) {
 	var input struct {
+		model.ProxySessionConfig
 		Name string `json:"name"`
 		URL  string `json:"url"`
 	}
 	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
 		return
 	}
-	profile, err := saveProxyInput(s.store, model.ProxyProfile{Name: input.Name, URL: input.URL})
+	profile, err := saveProxyInput(s.store, model.ProxyProfile{ProxySessionConfig: input.ProxySessionConfig, Name: input.Name, URL: input.URL})
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
@@ -625,13 +626,22 @@ func (s *Server) createProxy(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateProxy(w http.ResponseWriter, r *http.Request) {
 	var input struct {
+		model.ProxySessionConfig
 		Name string `json:"name"`
 		URL  string `json:"url"`
 	}
 	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
 		return
 	}
-	profile, err := saveProxyInput(s.store, model.ProxyProfile{ID: r.PathValue("id"), Name: input.Name, URL: input.URL})
+	if input.Vendor == "" && input.Country == "" && input.SessionMinutes == 0 {
+		for _, saved := range s.store.Proxies() {
+			if saved.ID == r.PathValue("id") {
+				input.ProxySessionConfig = saved.ProxySessionConfig
+				break
+			}
+		}
+	}
+	profile, err := saveProxyInput(s.store, model.ProxyProfile{ID: r.PathValue("id"), ProxySessionConfig: input.ProxySessionConfig, Name: input.Name, URL: input.URL})
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
@@ -665,6 +675,7 @@ func (s *Server) deleteProxy(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
 	var input struct {
+		model.ProxySessionConfig
 		URL string `json:"url"`
 	}
 	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
@@ -678,6 +689,13 @@ func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
+	}
+	if input.Vendor != "" {
+		normalized, err = workflow.PrepareVendorProxy(normalized, input.ProxySessionConfig)
+		if err != nil {
+			writeAPI(w, 400, nil, err.Error())
+			return
+		}
 	}
 	result := workflow.TestProxyExit(r.Context(), normalized, 15*time.Second)
 	writeAPI(w, 200, result, "")
@@ -685,6 +703,7 @@ func (s *Server) testProxy(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) testProxyOpenAIQuality(w http.ResponseWriter, r *http.Request) {
 	var input struct {
+		model.ProxySessionConfig
 		URL string `json:"url"`
 	}
 	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
@@ -698,6 +717,13 @@ func (s *Server) testProxyOpenAIQuality(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeAPI(w, 400, nil, err.Error())
 		return
+	}
+	if input.Vendor != "" {
+		normalized, err = workflow.PrepareVendorProxy(normalized, input.ProxySessionConfig)
+		if err != nil {
+			writeAPI(w, 400, nil, err.Error())
+			return
+		}
 	}
 	result := workflow.TestProxyOpenAIQuality(r.Context(), normalized, 15*time.Second)
 	writeAPI(w, 200, result, "")

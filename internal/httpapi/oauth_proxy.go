@@ -14,10 +14,15 @@ import (
 	"sync"
 	"time"
 
+	"chatgpt-space-merge/internal/model"
 	"chatgpt-space-merge/internal/workflow"
 )
 
 type oauthProxyLease struct {
+	sessionOnce      sync.Once
+	sessionValue     string
+	sessionErr       error
+	sessionConfig    model.ProxySessionConfig
 	healthGeneration int64
 	url              string
 	key              string
@@ -161,4 +166,18 @@ func (s *Server) probeOAuthProxy(ctx context.Context, proxyURL string) (oauthPro
 		return oauthProxyProbeResult{}, fmt.Errorf("解析代理质检结果失败: %w", err)
 	}
 	return result, nil
+}
+
+// Generate once at the start of an attempt. All requests in that client reuse
+// this result, including the post-payment OAuth continuation.
+func (l *oauthProxyLease) sessionURL(round, quality int) (string, error) {
+	l.sessionOnce.Do(func() {
+		if l.sessionConfig.Vendor != "" {
+			l.sessionValue, l.sessionErr = workflow.PrepareVendorProxy(l.url, l.sessionConfig)
+			return
+		}
+		raw := rotateOAuthProxySession(l.url, round, quality)
+		l.sessionValue, l.sessionErr = workflow.PrepareIPRoyalOAuthProxy(raw)
+	})
+	return l.sessionValue, l.sessionErr
 }
