@@ -986,6 +986,12 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 		return err
 	}
 	stage, message := "login", "建立连续登录客户端与代理会话；从首次登录前记录出口，IP 不一致不阻断任务"
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if err = s.store.SaveProAutoProxy(p, proxy, lease.label); err != nil {
+		return err
+	}
 	if isProPaidRecovery(ctx) {
 		stage, message = "oauth", "为原账号建立恢复授权会话；原订单已成功，不重新开通或付款"
 	}

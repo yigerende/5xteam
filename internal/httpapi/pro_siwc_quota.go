@@ -14,6 +14,11 @@ import (
 
 type proSIWCQuotaLoginKey struct{}
 
+type proSIWCQuotaLoginOptions struct {
+	FlowID      string
+	StopVersion uint64
+}
+
 // Called inside the existing per-Pro-account lock. Only the quota step relogs;
 // it cannot call payment, SIWC authorization or downstream account creation.
 func (s *Server) queryProSIWCQuota(ctx context.Context, p model.MailAccountProfile, v model.ProSettings, password string) (sub2.QuotaUsage, error) {
@@ -84,7 +89,7 @@ func (s *Server) queryProSIWCQuota(ctx context.Context, p model.MailAccountProfi
 		if s.proAutoHooks != nil && s.proAutoHooks.QuotaWebLogin != nil {
 			result, err = s.proAutoHooks.QuotaWebLogin(ctx, p.Email)
 		} else {
-			loginCtx, cancel := context.WithTimeout(context.WithValue(ctx, proSIWCQuotaLoginKey{}, true), 4*time.Minute)
+			loginCtx, cancel := context.WithTimeout(context.WithValue(ctx, proSIWCQuotaLoginKey{}, &proSIWCQuotaLoginOptions{FlowID: p.ProAuto.ID, StopVersion: p.ProAuto.StopVersion}), 4*time.Minute)
 			result, err = s.executeOpenAILoginContext(loginCtx, p.Email, "chatgpt_at", nil, nil)
 			cancel()
 		}

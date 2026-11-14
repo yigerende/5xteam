@@ -260,6 +260,7 @@ func (s *Store) initSchema() error {
  CREATE TABLE IF NOT EXISTS pro_oai_confirmation_accounts (email TEXT PRIMARY KEY COLLATE NOCASE,profile TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pro_oai_sessions (email TEXT COLLATE NOCASE,mode TEXT,encrypted_session TEXT NOT NULL,PRIMARY KEY(email,mode));
         CREATE TABLE IF NOT EXISTS pro_merge_v2_proxies (email TEXT PRIMARY KEY COLLATE NOCASE, started_at TEXT NOT NULL, encrypted_proxy TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS pro_auto_proxies (email TEXT PRIMARY KEY COLLATE NOCASE REFERENCES mail_accounts(email) ON DELETE CASCADE, flow_id TEXT NOT NULL, name TEXT NOT NULL, encrypted_proxy TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pro_settings (
 			id INTEGER PRIMARY KEY CHECK (id = 1), profile TEXT NOT NULL,
 			encrypted_sub2_password TEXT NOT NULL DEFAULT '', encrypted_cpa_key TEXT NOT NULL DEFAULT ''

@@ -1081,16 +1081,30 @@ func (s *Server) executeOpenAILoginContext(parent context.Context, email, creden
 	if err := parent.Err(); err != nil {
 		return nil, err
 	}
-	_, credentials, err := s.store.MailAccountCredential(email)
+	profile, credentials, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return nil, err
 	}
 	login := selectOAuthLogin(s.store.AutoRotationSettings().OAuthLoginMode, credentials)
-	if quotaLogin, _ := parent.Value(proSIWCQuotaLoginKey{}).(bool); quotaLogin {
+	if quotaLogin, ok := parent.Value(proSIWCQuotaLoginKey{}).(*proSIWCQuotaLoginOptions); ok {
 		login = selectOAuthLogin("password_totp", credentials)
 		if login.selected != "password_totp" {
 			return nil, errors.New("额度查询重新登录需要账号密码和 2FA")
 		}
+		if profile.ProAuto.ID != quotaLogin.FlowID || profile.ProAuto.StopVersion != quotaLogin.StopVersion {
+			return nil, errors.New("账号流程已变化，停止额度登录")
+		}
+		proxy, name, e := s.store.ProAutoProxy(email, quotaLogin.FlowID)
+		if e != nil {
+			return nil, e
+		}
+		if proxy != "" {
+			s.auditProEvent(profile, "quota", "running", "sub2", "额度登录沿用本轮首次登录的代理会话", map[string]any{"automation_id": quotaLogin.FlowID, "proxy_name": name, "proxy_session_reused": true})
+			// Reauthenticate for a fresh Web AT, but never regenerate the sticky
+			// session or consult changed global proxy settings in this flow.
+			return s.executeOpenAILoginWithProxy(parent, email, proxy, name, 1, credentialMode, login, progress, diagnostic)
+		}
+		s.auditProEvent(profile, "quota", "running", "sub2", "历史流程未保存原代理会话，额度登录沿用兼容方式", nil)
 	}
 	if _, ok := parent.Value(proOAILoginKey{}).(*proOAILoginOptions); ok {
 		login = selectOAuthLogin("password_totp", credentials)
