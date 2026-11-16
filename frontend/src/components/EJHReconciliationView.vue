@@ -22,7 +22,7 @@ const rows = computed(() => reconciliationCards(data.value || {}))
 const visible = computed(() => rows.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
 const blocks = computed(() => [
   { label: '充值总额', amount: value.value.gross, note: '累计手动充值总账' },
-  { label: '余额及在途', amount: value.value.assets, note: '账户 + 卡片 + 待退本金', sign: '−' },
+  { label: '余额及在途', amount: value.value.assets, note: '账户 + 卡片 + 待退本金 + 待销卡退款', sign: '−' },
   { label: '总成本', amount: value.value.earnings.costUSD, note: '开卡 / 充值 / 撤销 / 清算 / 退款费', sign: '−' },
   ...(value.value.externalTransfer !== '0.00' ? [{ label: '平台外转出', amount: value.value.externalTransfer, note: '外部消费，不计平台成本', sign: '−' }] : []),
   { label: '待核对差额', amount: value.value.gap, note: '保留差额，不计作成本', sign: '=' },
@@ -30,6 +30,7 @@ const blocks = computed(() => [
 const assets = computed(() => [
   { label: 'EJH 账户余额', amount: value.value.lossReasons.some(r => r.startsWith('EJH')) ? null : value.value.accountUSD, note: formatTime(data.value?.balance?.at) },
   { label: '卡片余额', amount: value.value.cardUSD.missing ? null : value.value.cardUSD.amount ?? '0.00', note: `${rows.value.length} 张 · 含销卡处理中` },
+  { label: '退款待销卡结算', amount: value.value.refundSettlement.amount, note: '已有入账退款流水，销卡后转主余额' },
   { label: '已付款在途', amount: value.value.inFlight.paymentUSD.missing ? null : value.value.inFlight.paymentUSD.amount ?? '0.00', note: '尚未退回的卡内付款本金' },
 ])
 const costs = computed(() => [
@@ -112,9 +113,9 @@ onBeforeUnmount(() => { disposed = true; clearInterval(timer) })
         <section class="panel"><header><h2>钱在哪里</h2><span>余额及在途</span></header><div v-for="item in assets" :key="item.label" class="amount-row"><div><b>{{item.label}}</b><small>{{item.note}}</small></div><div class="amount"><strong>{{item.amount??'—'}} <em>USD</em></strong><small>{{usdToR(item.amount)??'—'}} R</small></div></div><footer>实际到账 {{value.net??'—'}} USD · 已扣充值手续费</footer></section>
         <section class="panel"><header><h2>成本构成</h2><span>{{value.earnings.costIncomplete?'部分待核实':'含估算'}}</span></header><div v-for="item in costs" :key="item.label" class="amount-row"><div><b>{{item.label}}</b><small>{{item.note}}</small></div><div class="amount"><strong>{{item.amount??'—'}} <em>USD</em></strong><small>{{usdToR(item.amount)??'—'}} R</small></div></div></section>
       </div>
-      <section class="supplement"><Scale :size="18"/><div><strong>实际损耗 {{value.loss??'—'}} USD <span> / {{value.lossR??'—'}} R</span></strong><p>实际到账 − 平台外转出 − 账户余额 − 卡片余额 − 在途本金。已含上述部分成本，不再重复扣减。</p></div><button class="text-link" @click="emit('navigate','ejh-finance')">查看成本与利润 <ChevronRight :size="14"/></button></section>
+      <section class="supplement"><Scale :size="18"/><div><strong>实际损耗 {{value.loss??'—'}} USD <span> / {{value.lossR??'—'}} R</span></strong><p>实际到账 − 平台外转出 − 账户余额 − 卡片余额 − 在途本金 − 退款待销卡结算。已含上述部分成本，不再重复扣减。</p></div><button class="text-link" @click="emit('navigate','ejh-finance')">查看成本与利润 <ChevronRight :size="14"/></button></section>
       <details class="panel explanation"><summary>撤销金额差异 <b>{{value.reconciliation.shortfallUSD.amount??'0.00'}} USD</b> · 不计成本</summary><p>原付款与撤销回款的差额，按销卡退回原金额的口径展示。</p><p>未销卡 {{value.reconciliation.pendingUSD.amount??'0.00'}} USD（{{usdToR(value.reconciliation.pendingUSD.amount??'0.00')}} R）；已销卡历史 {{value.reconciliation.completedUSD.amount??'0.00'}} USD（{{usdToR(value.reconciliation.completedUSD.amount??'0.00')}} R）。</p><p>其中 {{value.closurePending??'—'}} USD 尚未计入在途；扣除此项后，其余待核对 {{value.unexplained??'—'}} USD。已计在途的金额不会再扣一次。</p></details>
-      <details class="panel card-details"><summary>逐卡余额与在途 <span>{{rows.length}} 张</span></summary><div class="table-wrap"><table><thead><tr><th>卡片</th><th>卡内余额</th><th>余额 USD</th><th>在途 USD</th><th>合计 USD</th><th>余额查询时间</th></tr></thead><tbody><tr v-for="row in visible" :key="row.id"><td>{{row.name}}<small v-if="row.processing">销卡处理中</small></td><td>{{row.original??'—'}} {{row.currency}}</td><td>{{row.balance??'—'}}</td><td>{{row.pending??'—'}}</td><td><b>{{row.total??'—'}}</b></td><td>{{formatTime(row.at)}}<small v-if="row.error" class="error">查询失败，保留旧数据</small></td></tr><tr v-if="!visible.length"><td colspan="6" class="empty">暂无未销卡卡片</td></tr></tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="rows.length" @update:page="page=$event" @update:page-size="pageSize=$event"/></details>
+      <details class="panel card-details"><summary>逐卡余额与在途 <span>{{rows.length}} 张</span></summary><div class="table-wrap"><table><thead><tr><th>卡片</th><th>卡内余额</th><th>余额 USD</th><th>在途 USD</th><th>退款待结算 USD</th><th>合计 USD</th><th>余额查询时间</th></tr></thead><tbody><tr v-for="row in visible" :key="row.id"><td>{{row.name}}<small v-if="row.processing">销卡处理中</small></td><td>{{row.original??'—'}} {{row.currency}}</td><td>{{row.balance??'—'}}</td><td>{{row.pending??'—'}}</td><td>{{row.refund??'—'}}</td><td><b>{{row.total??'—'}}</b></td><td>{{formatTime(row.at)}}<small v-if="row.error" class="error">查询失败，保留旧数据</small></td></tr><tr v-if="!visible.length"><td colspan="7" class="empty">暂无未销卡卡片</td></tr></tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="rows.length" @update:page="page=$event" @update:page-size="pageSize=$event"/></details>
       <footer class="footnote">按累计数据核对 · 1 USD = 6.7 R · 卡币按开卡结算比例折算，撤销费按配置比例估算。<br>数据读取每 {{refreshSeconds}} 秒更新；“刷新并核对”会查询卡台最新余额及交易。消费收益不参与充值资金对账。</footer>
     </template>
   </div>

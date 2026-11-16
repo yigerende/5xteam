@@ -1,6 +1,7 @@
 import { cents, money, financeOverview, financeTime } from './ejh-finance.js'
 import { summarizeCardBalancesUSD } from './ejh-card-funding.js'
 import { summarizeInFlightPayments } from './ejh-account-amounts.js'
+import { pendingRefundSettlement } from './ejh-refund-settlement.js'
 import { isClosedCard } from './card-status.js'
 
 // A display tolerance only. Never write off the difference or deduct it as cost.
@@ -37,9 +38,10 @@ export function reconciliationCards(data) {
     const inFlight = summarizeInFlightPayments(linked, [card], operations, trades.filter(t => t.card_id === card.id))
     const balance = cardUSD.missing ? null : cardUSD.amount ?? '0.00'
     const pending = inFlight.paymentUSD.missing ? null : inFlight.paymentUSD.amount ?? '0.00'
-    const total = balance === null || pending === null ? null : money(cents(balance) + cents(pending))
+    const refund = pendingRefundSettlement([card], trades.filter(t => t.card_id === card.id)).amount
+    const total = balance === null || pending === null || refund === null ? null : money(cents(balance) + cents(pending) + cents(refund))
     return { id: card.id, name: card.local?.name || card.remote?.cardNo || card.remote?.orderNo || card.id,
-      balance, pending, total, original: card.balance_at ? card.balance : null, currency: card.remote?.cardCurrency,
+      balance, pending, refund, total, original: card.balance_at ? card.balance : null, currency: card.remote?.cardCurrency,
       at: card.balance_at, error: card.balance_error || card.error || '',
       processing: card.remote?.status === '8' || card.local?.issuer_cancel_status === 'processing' }
   }).sort((a, b) => Number(!!b.error) - Number(!!a.error) || a.name.localeCompare(b.name))

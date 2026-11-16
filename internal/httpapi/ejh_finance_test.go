@@ -51,3 +51,33 @@ func TestEJHFinanceReadOnlyAndAuthentication(t *testing.T) {
 		t.Fatal("recorder called supplier")
 	}
 }
+
+func TestEJHFinanceCompactSkipsHistoricalSnapshots(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// An unreadable old snapshot must not affect the dated ledger report.
+	if err = st.EJHPut("finance_snapshot", "2026-10-01:first", map[string]string{"at": "invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.EJHPut("finance_usage_day", "usage:2026-11-16", store.EJHConsumptionDay{ID: "usage:2026-11-16", Day: "2026-11-16", Amount: 123.45, Source: "sub2_daily"}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: st}
+	w := httptest.NewRecorder()
+	s.ejhFinance(w, httptest.NewRequest("GET", "/api/ejh/finance?snapshots=none", nil))
+	var result struct {
+		Data struct {
+			Snapshots []store.EJHFinancialSnapshot `json:"snapshots"`
+			Days      []store.EJHConsumptionDay    `json:"usage_days"`
+		} `json:"data"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Data.Snapshots) != 0 || len(result.Data.Days) != 1 || result.Data.Days[0].Amount != 123.45 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if s.ejh.client != nil {
+		t.Fatal("compact report must not query issuer")
+	}
+}

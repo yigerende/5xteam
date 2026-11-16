@@ -34,6 +34,16 @@ func (s *Server) captureEJHFinance() {
 }
 
 func (s *Server) ejhFinance(w http.ResponseWriter, r *http.Request) {
+	reader, err := s.store.ProListReader(r.Context())
+	if err != nil {
+		writeAPI(w, 500, nil, "读取成本历史失败")
+		return
+	}
+	defer reader.Close()
+	(&Server{store: reader}).ejhFinanceSnapshot(w, r)
+}
+
+func (s *Server) ejhFinanceSnapshot(w http.ResponseWriter, r *http.Request) {
 	transfers, err := store.EJHRecords[store.EJHExternalTransferEvent](s.store, "finance_external_transfer")
 	if err != nil {
 		writeAPI(w, 500, nil, err.Error())
@@ -54,10 +64,15 @@ func (s *Server) ejhFinance(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 500, nil, err.Error())
 		return
 	}
-	snapshots, err := store.EJHRecords[store.EJHFinancialSnapshot](s.store, "finance_snapshot")
-	if err != nil {
-		writeAPI(w, 500, nil, err.Error())
-		return
+	// The cost page needs dated ledger entries, not copies of every historical
+	// card/trade snapshot. Do not even decrypt those large records in compact mode.
+	snapshots := []store.EJHFinancialSnapshot{}
+	if r.URL.Query().Get("snapshots") != "none" {
+		snapshots, err = store.EJHRecords[store.EJHFinancialSnapshot](s.store, "finance_snapshot")
+		if err != nil {
+			writeAPI(w, 500, nil, err.Error())
+			return
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	var state ejhFinanceRecording
@@ -65,5 +80,5 @@ func (s *Server) ejhFinance(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, 500, nil, err.Error())
 		return
 	}
-	writeAPI(w, 200, map[string]any{"external_transfers": transfers, "recharges": recharges, "consumption": usage, "usage_days": days, "snapshots": snapshots, "recording": state, "server_time": time.Now()}, "")
+	writeProAccountList(w, r, map[string]any{"external_transfers": transfers, "recharges": recharges, "consumption": usage, "usage_days": days, "snapshots": snapshots, "recording": state, "server_time": time.Now()})
 }
