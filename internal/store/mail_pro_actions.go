@@ -26,6 +26,9 @@ func (s *Store) EnableMailProActions(email, mode string) (model.MailAccountProfi
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		return p, err
 	}
+	// Match mailbox listing/credential reads and persist the canonical scope
+	// when a legacy mailbox explicitly opts in to background actions.
+	p.ManagementScope = normalizeMailManagementScope(p.ManagementScope)
 	if p.ManagementScope != "mail" {
 		return p, errors.New("账号不在邮件管理中，请刷新列表")
 	}

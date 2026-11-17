@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -119,6 +120,57 @@ func TestMailFinalStepAllModesUseExistingWorkers(t *testing.T) {
 				t.Fatal("bad projection", w.Body.String())
 			}
 		})
+	}
+}
+
+func TestMailActionsImportedAliasUsesConfiguredFinalMode(t *testing.T) {
+	f := mailActionFixture(t, "merge_v2")
+	const email = "external+alias@example.com"
+	f.email = email // The simulated team roster must identify this new mailbox.
+	if _, _, err := f.s.store.ImportMailAccount(model.MailAccountProfile{Email: email}, model.MailAccountCredentials{
+		Email: email, GptPassword: "fixture-password", TotpSecret: "JBSWY3DPEHPK3PXP",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	// Use the actual authenticated router, including the browser's encoded +.
+	handler := f.s.Handler()
+	cookie := &http.Cookie{Name: authCookieName, Value: f.s.createSession()}
+	request := func(method, suffix, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "/api/mail/accounts/"+url.QueryEscape(email)+suffix, strings.NewReader(body))
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	w := request("GET", "/pro-actions", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"mode":"merge_v2"`) || !strings.Contains(w.Body.String(), email) {
+		t.Fatal("fresh mail import not found by action route", w.Code, w.Body.String())
+	}
+	w = request("POST", "/oai-confirmation", `{"mode":"merge_v2","action":"retry"}`)
+	if w.Code != 200 {
+		t.Fatal("standalone external OAI rejected", w.Code, w.Body.String())
+	}
+	p, _, err := f.s.store.MailAccountCredential(email)
+	if err != nil || p.DispositionStarted() || p.ProOAIConfirmations["merge_v2"] == nil || !p.ProOAIConfirmations["merge_v2"].Manual {
+		t.Fatal("independent OAI needs or fabricates a completed final step")
+	}
+	if w = request("POST", "/oai-confirmation", `{"mode":"merge_v2","action":"stop"}`); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	f.s.proMergeV2Login = func(ctx context.Context, gotEmail string) (map[string]any, error) {
+		if gotEmail != email {
+			t.Errorf("alias was altered: %q", gotEmail)
+		}
+		return mockMergeV2Submit(ctx)
+	}
+	w = request("POST", "/final-step", `{"mode":"merge_v2"}`)
+	if w.Code != 202 {
+		t.Fatal("configured final step rejected", w.Code, w.Body.String())
+	}
+	f.s.proMergeWG.Wait()
+	p, _, err = f.s.store.MailAccountCredential(email)
+	if err != nil || !p.MergeV2Completed() || p.ManagementScope != "mail" || p.ProManagedAt != nil || p.ProAuto.OrderID != "" || p.PushStatus != "" {
+		t.Fatalf("external final step did not finish in mail scope: %v %s", err, p.ProLastError)
 	}
 }
 

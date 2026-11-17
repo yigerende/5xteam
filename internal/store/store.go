@@ -463,6 +463,9 @@ func normalizeMailManagementScope(scope string) string {
 }
 
 func mailProfileWithCredentials(p model.MailAccountProfile, c model.MailAccountCredentials) model.MailAccountProfile {
+	// Imports predating explicit ownership belong to mail management, just as
+	// they do in the mailbox list. Action lookups must use the same rule.
+	p.ManagementScope = normalizeMailManagementScope(p.ManagementScope)
 	p.SIWCPresent = c.SIWC != nil && c.SIWC.AccessToken != "" && c.SIWC.RefreshToken != ""
 	c.MailPassword = cleanImportedCredential(c.MailPassword)
 	c.ClientID = cleanImportedCredential(c.ClientID)
@@ -594,6 +597,7 @@ func (s *Store) saveImportedMailAccount(profile model.MailAccountProfile, creden
 			profile.ProManagedAt = &now
 		}
 	}
+	profile.ManagementScope = normalizeMailManagementScope(profile.ManagementScope)
 	var deadRaw string
 	deadErr := s.db.QueryRow(`SELECT profile FROM pro_dead_accounts WHERE email=?`, profile.Email).Scan(&deadRaw)
 	if deadErr != nil && !errors.Is(deadErr, sql.ErrNoRows) {
