@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { financeOverview, financeReport, periodRange, financeTime, beijingDay, cents, money, consumptionSummary, eventAmountR } from '../src/ejh-finance.js'
+import { financeOverview, financeReport, prepareFinanceReport, periodRange, financeTime, beijingDay, cents, money, consumptionSummary, eventAmountR } from '../src/ejh-finance.js'
 
 const card={id:'card',issuer_linked:true,balance:'22595.26',balance_at:'2026-10-16T17:17:20+08:00',remote:{orderNo:'opened',status:'3',cardCurrency:'PHP'}}
 const closed={id:'closed',issuer_linked:true,balance:'999999',balance_at:card.balance_at,remote:{orderNo:'closed-order',status:'2',cardCurrency:'PHP'}}
@@ -114,3 +114,51 @@ assert.equal(withoutSource.earnings.costR,total.earnings.costR)
 assert.equal(financeReport({...data,cases:[...data.cases,noPush]},history,'all').summary.earnings.profitR,report.summary.earnings.profitR)
 assert.equal(financeOverview({...data,cases:[...data.cases,noPush,{email:'unknown@example.com'}]}).earnings.profitR,null)
 console.log('Passed: no-push explanation does not change saved revenue/costs or conceal real missing consumption')
+
+// Sanitized 2026-11-17 issuer evidence: four UTC-looking tradeTime values
+// belong to the previous date, while all six returns were posted today.
+const postedReversals=[
+ ['2026-11-17 01:53:48','2026-11-17 09:56:17','5779.61','110.62'],
+ ['2026-11-17 00:09:40','2026-11-17 08:21:06','5779.64','110.67'],
+ ['2026-11-16 22:24:18','2026-11-17 06:35:54','5779.62','110.67'],
+ ['2026-11-16 18:53:45','2026-11-17 03:05:52','5779.67','110.71'],
+ ['2026-11-16 17:42:26','2026-11-17 01:53:12','5779.62','110.72'],
+ ['2026-11-16 17:03:45','2026-11-17 01:12:49','5779.64','110.72'],
+]
+const datedCosts={recharge_ledger:{amount:'0'},reversal_fee_percent:5,cases:[],cards:[],operations:[],trades:[]}
+for(let i=0;i<12;i++){
+ const id='dated-card-'+i,day=i===4||i===5?'2026-11-16':'2026-11-17'
+ datedCosts.cards.push({id,issuer_linked:true,remote:{orderNo:id,cardCurrency:'PHP',status:'2'}})
+ datedCosts.operations.push({id:'open-'+i,method:'open',status:'completed',card_id:id,order_no:id,created_at:day+'T00:00:00+08:00',result:{cardAmount:'7000',cardCurrency:'PHP',billAmount:postedReversals[i]?.[3]||'110.62',billCurrency:'USD'}})
+ if(i<6){
+  const [tradeTime,createdAt,cardAmount]=postedReversals[i]
+  datedCosts.trades.push({id:'return-'+i,card_id:id,confirmed:true,reversal_fee:{percent:5},trade:{tradeNo:'return-'+i,tradeType:'2',tradeStatus:'1',cardAmount,cardCurrency:'PHP',tradeTime,createdAt}})
+ }
+}
+const postedToday=financeReport(datedCosts,{},'day','2026-11-17')
+assert.equal(postedToday.events.filter(e=>e.kind==='reversal').length,6,'all six posted returns belong to today, not only the two after UTC midnight')
+assert.equal(postedToday.summary.reversalUSD,'27.42')
+assert.equal(postedToday.summary.usdt,'5.00','only ten cards opened today')
+assert.equal(postedToday.summary.earnings.costUSD,'32.42')
+assert.equal(postedToday.summary.earnings.costR,'217.2140')
+assert.equal(financeReport(datedCosts,{},'day','2026-11-16').summary.reversalUSD,'0.00')
+const withoutPosting={...datedCosts,trades:datedCosts.trades.map(r=>({...r,trade:{...r.trade,createdAt:''}}))}
+assert.equal(financeReport(withoutPosting,{},'day','2026-11-17').summary.earnings.costUSD,'14.14','the old trade-date attribution reproduces the production undercount')
+assert.deepEqual(financeReport(datedCosts,{},'all').summary.earnings,financeReport(withoutPosting,{},'all').summary.earnings,'date attribution cannot change cumulative fees or profit')
+assert.deepEqual(financeReport(datedCosts,{},'day','2026-11-17',prepareFinanceReport(datedCosts,{})),postedToday,'the cached worker calculation uses the corrected dates too')
+
+const datedReturn=(tradeTime,createdAt)=>({recharge_ledger:{amount:'0'},reversal_fee_percent:5,trades:[{id:'dated',card_id:'card',synced_at:'2026-12-01T12:00:00+08:00',trade:{tradeNo:'dated',tradeType:'2',tradeStatus:'1',cardAmount:'100',cardCurrency:'USD',tradeTime,createdAt}}]})
+for(const [mode,previous,current] of [['week','2026-11-01','2026-11-02'],['month','2026-11-30','2026-12-01']]){
+ const sample=datedReturn(previous+' 16:01:00',current+' 00:11:00')
+ assert.equal(financeReport(sample,{},mode,previous).summary.reversalUSD,'0.00',mode+' must exclude returns posted in the next period')
+ assert.equal(financeReport(sample,{},mode,current).summary.reversalUSD,'5.00')
+}
+assert.equal(financeReport(datedReturn('2026-11-15 12:00:00','2026-11-16T17:12:49Z'),{},'day','2026-11-17').summary.reversalUSD,'5.00','explicit posting offsets are respected')
+for(const createdAt of ['', 'invalid']){
+ assert.equal(financeReport(datedReturn('2026-11-16T17:03:45Z',createdAt),{},'day','2026-11-17').summary.reversalUSD,'5.00','missing/invalid posting date falls back to the explicit transaction offset')
+ assert.equal(financeReport(datedReturn('2026-11-16 17:03:45',createdAt),{},'day','2026-11-16').summary.reversalUSD,'5.00','do not guess an eight-hour adjustment without posting evidence')
+}
+const undatedReturn=datedReturn('invalid','')
+assert.equal(financeReport(undatedReturn,{},'day','2026-12-01').summary.reversalUSD,'0.00','local synchronization date is not the fee date')
+assert.equal(financeReport(undatedReturn,{},'all').summary.reversalUSD,'5.00','undated fees remain in cumulative costs')
+console.log('Passed: issuer-posted reversal costs, six-return production regression, day/week/month boundaries, explicit offsets, missing dates, unchanged cumulative costs and cached calculations')

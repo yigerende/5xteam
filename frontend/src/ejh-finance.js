@@ -173,7 +173,9 @@ export function financeEvents(data,history={}) {
   }
   for(const [key,record] of seen){
     const fee=summarizeReversalFees([record],data.reversal_fee_percent??6,false,cards,operations,true),t=record.trade
-    events.push({id:'reversal:'+key,kind:'reversal',at:financeTime(t.tradeTime)||financeTime(t.createdAt),card:cards.find(c=>c.id===record.card_id)?.local?.name||t.orderNo,reference:t.tradeNo,
+    // Attribute fees to issuer posting, as with refunds and clearing. Some
+    // channels return an unzoned UTC tradeTime alongside a Beijing createdAt.
+    events.push({id:'reversal:'+key,kind:'reversal',at:financeTime(t.createdAt)||financeTime(t.tradeTime),card:cards.find(c=>c.id===record.card_id)?.local?.name||t.orderNo,reference:t.tradeNo,
       email:(data.cases||[]).find(c=>c.id===record.payment_order_id)?.email||'',amount:fee.rows[0]?.amount??null,currency:fee.rows[0]?.currency||t.cardCurrency||'',usd:money(cents(fee.usd.amount)),usd_precise:fee.usd.amount,
       incomplete:!!(fee.missing||fee.pending||fee.usd.missing),note:fee.pending?'待确认，未计入':`按 ${fee.percent}% 估算${record.reversal_fee?'（已回款锁定）':'（当前设置）'}`})
   }
