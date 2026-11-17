@@ -158,6 +158,62 @@ func TestEJHTradeCollectionAtomic(t *testing.T) {
 	}
 }
 
+func TestEJHDelayedAuthorizationIngestionRestoresPaymentAndReturn(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { s.Close() }()
+	card := ejhFixtureCard(t, s)
+	email := "delayed-issuer@example.com"
+	transferSource(t, s, email)
+	o := transferOrder(email, "delayed-issuer", "success")
+	o.Order.CardID = card.ID
+	at, _ := time.Parse(time.RFC3339, "2026-11-17T18:34:13+08:00")
+	o.Order.CreatedAt, o.Order.UpdatedAt = at.Add(-time.Minute), at
+	if err = s.CreateGPTPayOrder(o.Order, o.Snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.EJHMarkRequested(email, "remote", at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	pay := ejh.Trade{OrderNo: "fixture-card", TradeNo: "delayed-pay", Type: "1", Status: "1", AuthCode: "A", CardAmount: "5794.64", CardCurrency: "PHP", TradeTime: "2026-11-17 10:34:07", CreatedAt: "2026-11-17 21:54:06", Merchant: "OPENAI"}
+	ret := pay
+	ret.Type, ret.TradeNo, ret.CardAmount, ret.TradeTime = "2", "delayed-return", "5779.57", "2026-11-17 12:28:22"
+	// A return may be ingested first. It cannot release the card without its
+	// original payment, but the later complete batch must repair both links.
+	if err = s.EJHSaveTrades(card.ID, []ejh.Trade{ret}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.EJHReconcile(); err != nil {
+		t.Fatal(err)
+	}
+	cases, err := s.EJHCases()
+	if err != nil || len(cases) != 1 || cases[0].State != "waiting" || cases[0].Charge != nil {
+		t.Fatalf("premature return: %+v %v", cases, err)
+	}
+	if err = s.EJHSaveTrades(card.ID, []ejh.Trade{ret, pay}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.EJHReconcile(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, err = s.EJHCases()
+	if err != nil || len(cases) != 1 || cases[0].State != "returned" || cases[0].Charge == nil || cases[0].Charge.CardAmount != "5794.64" || cases[0].Amounts["PHP"] != "5779.57" {
+		t.Fatalf("delayed evidence not persisted: %+v %v", cases, err)
+	}
+	got, _, err := s.GPTPayCard(card.ID)
+	if err != nil || got.ActiveAccounts != 0 || got.OpenedAccounts != 1 {
+		t.Fatalf("returned occupancy incorrect: %+v %v", got, err)
+	}
+}
+
 func TestEJHReturnUpgradeBackfillAndConcurrentReuse(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)

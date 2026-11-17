@@ -36,6 +36,10 @@ func TradeAt(t Trade) time.Time {
 // corroborated by a unique same-card authorization whose UTC offset is known.
 // Raw issuer evidence is retained; these times are used only for reconciliation.
 func returnTradeTimes(trades []TradeRecord) map[string]time.Time {
+	return returnTradeTimesWithPayments(trades, nil)
+}
+
+func returnTradeTimesWithPayments(trades []TradeRecord, paymentTimes map[string]time.Time) map[string]time.Time {
 	authorizations := map[string][]TradeRecord{}
 	for _, t := range trades {
 		if t.Trade.Type == "1" && ChargeUsable(t.Trade) && t.Trade.AuthCode != "" {
@@ -57,6 +61,9 @@ func returnTradeTimes(trades []TradeRecord) map[string]time.Time {
 		}
 		p := candidates[0].Trade
 		original, originalRaw := TradeAt(p), parseTradeTime(p.TradeTime)
+		if resolved, ok := paymentTimes[candidates[0].ID]; ok {
+			original = resolved
+		}
 		if strings.Contains(p.TradeTime, "T") || originalRaw.IsZero() || !original.Equal(originalRaw.Add(8*time.Hour)) || p.CardCurrency != t.Trade.CardCurrency || p.OrderNo != t.Trade.OrderNo {
 			continue
 		}
@@ -196,6 +203,7 @@ func AutoReconcile(cases []Case, trades []TradeRecord, now time.Time) {
 		}
 	}
 	payments := PaymentTrades(trades)
+	paymentTimes := paymentTradeTimes(cases, trades)
 	// Use the original authorization time even when its clearing arrived later.
 	earliest := map[string]time.Time{}
 	for _, t := range trades {
@@ -203,7 +211,7 @@ func AutoReconcile(cases []Case, trades []TradeRecord, now time.Time) {
 			continue
 		}
 		k := chargeKey(t)
-		at := TradeAt(t.Trade)
+		at := paymentTimes[t.ID]
 		if !at.IsZero() && (earliest[k].IsZero() || at.Before(earliest[k])) {
 			earliest[k] = at
 		}
@@ -256,7 +264,7 @@ func AutoReconcile(cases []Case, trades []TradeRecord, now time.Time) {
 			returns = append(returns, t)
 		}
 	}
-	returnTimes := returnTradeTimes(trades)
+	returnTimes := returnTradeTimesWithPayments(trades, paymentTimes)
 	sort.Slice(returns, func(i, j int) bool {
 		a, b := returnTimes[returns[i].ID], returnTimes[returns[j].ID]
 		if a.Equal(b) {
