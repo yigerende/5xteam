@@ -287,7 +287,7 @@ onBeforeUnmount(() => { disposed = true; purchaseGroupsController?.abort(); edit
           <p class="table-note">四种流程共用此并发；同一账号串行。降低并发后，正在执行的任务先完成。</p>
           <label class="field"><span>提问内容</span><textarea v-model="automation.oai_inquiry.prompt" rows="6" maxlength="6000" required aria-label="OAI 提问内容"/><small v-pre>可用 {{email}} 自动填入邮箱，{{success_marker}}、{{failure_marker}}、{{review_marker}} 自动填入下方标识。修改后用于新一轮提问。</small></label>
           <div class="oai-markers"><label v-for="(label,key) in {success_marker:'成功标识',failure_marker:'失败标识',review_marker:'待核实标识'}" :key="key" class="field"><span>最后一行 · {{label}}</span><input v-model="automation.oai_inquiry[key]" maxlength="40" required :aria-label="'OAI '+label"/></label></div>
-          <p class="table-note">最后一行按标识识别；成功回答仍须明确已发起／处理退款，且正文没有冲突。</p>
+          <p class="table-note">仅按完整回答的最后一行匹配以上标识；未匹配到标识时显示待核实。</p>
           <div v-for="(label,mode) in dispositionLabels" :key="mode" class="oai-rule">
             <label class="oai-rule-toggle"><input v-model="automation.oai_confirmation[mode].enabled" type="checkbox" :aria-label="label+'完成后询问 OAI'"/><span>{{label}}完成后询问</span></label>
             <label class="oai-delay"><span>等待</span><input v-model.number="automation.oai_confirmation[mode].delay_seconds" type="number" min="1" max="604800" step="1" required :aria-label="label+' OAI 询问等待秒数'"/><span>秒</span></label>

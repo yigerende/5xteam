@@ -13,7 +13,7 @@ func TestProOAICustomMarkersAndReviewDue(t *testing.T) {
 	if got := rule.Question("child@example.com"); got != "child@example.com 确认完成! 未处理 未知" {
 		t.Fatal(got)
 	}
-	for _, tc := range []struct{ answer, want string }{{"退款已处理。\n确认完成!", "confirmed"}, {"未找到退款记录。\n未处理", "unconfirmed"}, {"无法查询。\n未知", "review"}, {"退款已处理。\n已成功", "review"}, {"无法确认退款已处理。\n确认完成!", "review"}} {
+	for _, tc := range []struct{ answer, want string }{{"退款已处理。\n确认完成!", "confirmed"}, {"未找到退款记录。\n未处理", "unconfirmed"}, {"无法查询。\n未知", "review"}, {"退款已处理。\n已成功", "review"}, {"无法确认退款已处理。\n确认完成!", "confirmed"}} {
 		if got := ProOAIAnswerStatus("child@example.com", tc.answer, rule); got != tc.want {
 			t.Fatal(tc, got)
 		}
@@ -35,16 +35,25 @@ func TestProOAICustomMarkersAndReviewDue(t *testing.T) {
 
 func TestProOAIAnswerStatus(t *testing.T) {
 	for _, tc := range []struct{ name, answer, want string }{
+		{"empty", "", "review"},
+		{"whitespace only", " \r\n \t", "review"},
+		{"blank trailing lines", "说明\r\n 已成功 \r\n\r\n", "confirmed"},
+		{"inline code marker", "说明\n`已成功`", "confirmed"},
+		{"explicit review", "退款已处理。\n待核实", "review"},
+		{"unknown final line", "已成功\n其他内容", "review"},
+		{"failure overrides body", "退款已成功处理。\n已失败", "unconfirmed"},
+		{"refund-first wording", "已为当前邮箱核对到 **已退款处理（有 1 笔退款记录）**。\n\n已成功", "confirmed"},
+		{"emphasis splits phrase", "已为当前邮箱确认该付款对应已产生**退款记录**。\n\n已成功", "confirmed"},
 		{"recorded answer", "已确认该订阅（child@example.com）对应的退款已发起/处理；预计 5–10 个工作日；发票号 TEST-0001。\n已成功", "confirmed"},
 		{"formatting", "退款已处理。\n**已成功**", "confirmed"},
 		{"not bank arrival", "已发起退款，银行尚未到账。如果超期请联系银行。\n已成功", "confirmed"},
 		{"negative", "未找到退款记录。\n已失败", "unconfirmed"},
-		{"marker only", "已成功", "review"},
+		{"marker only", "已成功", "confirmed"},
 		{"prompt echoed", "如果是退款已发起/处理请在最后一行输入:已成功\n如果是退款未发起或没有请在最后一行输入:已失败", "review"},
-		{"contradiction", "退款已处理，但无法确认退款记录。\n已成功", "review"},
-		{"not submitted", "退款尚未发起，此前退款已完成。\n已成功", "review"},
-		{"conditional", "如果退款已处理，通常需要五天。\n已成功", "review"},
-		{"other account", "other@example.com 退款已完成。\n已成功", "review"},
+		{"contradiction", "退款已处理，但无法确认退款记录。\n已成功", "confirmed"},
+		{"not submitted", "退款尚未发起，此前退款已完成。\n已成功", "confirmed"},
+		{"conditional", "如果退款已处理，通常需要五天。\n已成功", "confirmed"},
+		{"other account", "other@example.com 退款已完成。\n已成功", "confirmed"},
 		{"partial", "退款已完成。", "review"},
 		{"unknown", "当前无法查询。\n待核实", "review"},
 		{"suffix", "退款已处理。\n已成功但未查询", "review"},
@@ -57,22 +66,22 @@ func TestProOAIAnswerStatus(t *testing.T) {
 	}
 }
 
-func TestProOAIProducedRefundAnswer(t *testing.T) {
+func TestProOAILastLineIndependentOfBody(t *testing.T) {
 	for _, tc := range []struct{ name, answer, want string }{
 		{"recorded wording", "我是 OpenAI 的 AI 辅助支持。\n\n我这边看到你的账户（child@example.com）有一笔付款 5794.64 PHP，对应发票号 **TEST-0001**，并且系统记录显示该笔款项**已产生退款**。退款入账时间通常为 **5–10 个工作日**（具体以发卡行/银行处理速度为准）。\n\n已成功", "confirmed"},
 		{"one refund", "系统记录显示已产生了一笔退款，银行尚未到账。\n已成功", "confirmed"},
 		{"refund subject", "这笔退款已经产生，预计五个工作日入账。\n已成功", "confirmed"},
 		{"fee refund", "系统记录显示已产生退费。\n**已成功**", "confirmed"},
 		{"no marker", "系统记录显示已产生退款。", "review"},
-		{"wrong account", "other@example.com 已产生退款。\n已成功", "review"},
-		{"cannot verify", "无法确认是否已产生退款。\n已成功", "review"},
-		{"conditional", "如果已产生退款，通常五天到账。\n已成功", "review"},
-		{"conditional subject", "假如退款已经产生，通常五天到账。\n已成功", "review"},
-		{"negated", "这不代表已产生退款。\n已成功", "review"},
-		{"explicit denial", "并非已产生退款。\n已成功", "review"},
-		{"not yet", "尚未产生退款。\n已成功", "review"},
-		{"conflicting prior refund", "之前已产生退款，但当前这笔尚未产生退款。\n已成功", "review"},
-		{"conflicting subject", "之前退款已完成，但当前退款还未产生。\n已成功", "review"},
+		{"wrong account", "other@example.com 已产生退款。\n已成功", "confirmed"},
+		{"cannot verify", "无法确认是否已产生退款。\n已成功", "confirmed"},
+		{"conditional", "如果已产生退款，通常五天到账。\n已成功", "confirmed"},
+		{"conditional subject", "假如退款已经产生，通常五天到账。\n已成功", "confirmed"},
+		{"negated", "这不代表已产生退款。\n已成功", "confirmed"},
+		{"explicit denial", "并非已产生退款。\n已成功", "confirmed"},
+		{"not yet", "尚未产生退款。\n已成功", "confirmed"},
+		{"conflicting prior refund", "之前已产生退款，但当前这笔尚未产生退款。\n已成功", "confirmed"},
+		{"conflicting subject", "之前退款已完成，但当前退款还未产生。\n已成功", "confirmed"},
 		{"failure marker", "尚未产生退款。\n已失败", "unconfirmed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

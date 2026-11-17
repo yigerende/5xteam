@@ -2,7 +2,6 @@ package model
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -196,18 +195,9 @@ func (v *ProOAIConfirmation) Due(now time.Time) bool {
 	return (v.Status == "failed" || v.Status == "unconfirmed" || v.Status == "review") && v.NextAttemptAt != nil && !now.Before(*v.NextAttemptAt)
 }
 
-// Treat only the completed assistant answer as evidence. A marker in the
-// user's prompt, a partial stream, or a contradictory answer cannot confirm.
-var oaiRefundPositive = regexp.MustCompile(`(?:退款|退费).{0,24}(?:已发起|已处理|已完成|已成功|已退还|已退回)|已(?:发起|处理|完成).{0,16}(?:退款|退费)`)
-
-// Help also reports a recorded refund as “已产生退款”. Keep this explicit
-// wording separate from a generated invoice or a hypothetical refund.
-var oaiRefundProduced = regexp.MustCompile(`已产生(?:了)?(?:一笔)?(?:退款|退费)|(?:退款|退费)(?:已经|已)产生`)
-var oaiRefundProducedUncertain = regexp.MustCompile(`(?:未|没有).{0,8}产生.{0,8}(?:退款|退费)|(?:退款|退费).{0,8}(?:未产生|没有产生)|(?:如果|假如|假设|若|并非|不是|不代表|不表示|不意味着).{0,16}(?:已产生|(?:退款|退费)(?:已经|已)产生)`)
-var oaiRefundUncertain = regexp.MustCompile(`(?:无法|不能|未能|尚不能|暂不能).{0,16}(?:确认|核实|查询|查看)|(?:退款|退费).{0,18}(?:未发起|未处理|不存在|未完成)|(?:没有|未找到|查不到|无).{0,12}(?:退款|退费)(?:记录|申请)|(?:尚未|还未).{0,8}(?:发起|处理|完成)|(?:如果|假如|假设).{0,16}(?:退款|退费).{0,10}(?:已发起|已处理|已完成)`)
-var oaiAnswerEmail = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
-
-func ProOAIAnswerStatus(email, answer string, rules ...ProOAIInquiry) string {
+// Only the final line of a completed assistant answer determines its status.
+// The Help flow separately validates the account, conversation and message.
+func ProOAIAnswerStatus(_ string, answer string, rules ...ProOAIInquiry) string {
 	rule := DefaultProOAIInquiry()
 	if len(rules) > 0 {
 		rule = rules[0].Normalized()
@@ -223,15 +213,6 @@ func ProOAIAnswerStatus(email, answer string, rules ...ProOAIInquiry) string {
 		return "unconfirmed"
 	}
 	if last != rule.SuccessMarker {
-		return "review"
-	}
-	body := strings.Join(lines[:len(lines)-1], "\n")
-	for _, found := range oaiAnswerEmail.FindAllString(body, -1) {
-		if !strings.EqualFold(found, email) {
-			return "review"
-		}
-	}
-	if (!oaiRefundPositive.MatchString(body) && !oaiRefundProduced.MatchString(body)) || oaiRefundUncertain.MatchString(body) || oaiRefundProducedUncertain.MatchString(body) {
 		return "review"
 	}
 	return "confirmed"
