@@ -19,6 +19,7 @@ AUTH = "https://auth.openai.com"
 CHAT = SUPPORT + "/api/v1/chatkit"
 PAGE = HELP + "/en/collections/3742473-chatgpt"
 ALLOWED = {"help.openai.com", "support.api.openai.com", "auth.openai.com"}
+REDIRECTS = {301, 302, 303, 307, 308}
 
 
 class HelpError(RuntimeError):
@@ -120,10 +121,14 @@ class HelpInquiry:
         if self.session_id_token: h["x-session-id"] = self.session_id_token
         return h
 
-    def request(self, url, **kwargs):
+    @staticmethod
+    def validate_url(url):
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.hostname not in ALLOWED or parsed.port not in (None, 443) or parsed.username:
+        if parsed.scheme != "https" or parsed.hostname not in ALLOWED or parsed.port not in (None, 443) or parsed.username is not None:
             raise HelpError("Help 跳转地址不受信任")
+
+    def request(self, url, **kwargs):
+        self.validate_url(url)
         # Retry only explicitly read-only calls on the same session/proxy.
         # OAuth callbacks and support writes are never replayed here.
         read_only = kwargs.pop("read_only", False)
@@ -183,6 +188,37 @@ class HelpInquiry:
         self.session_id = identity["session_id"]
         bridge.protect_code(self.access_token); bridge.protect_code(self.session_id_token)
 
+    def redirect_target(self, current, response):
+        location = response.headers.get("location", "")
+        if not location:
+            raise HelpError("Help 跳转缺少地址")
+        target = urljoin(current, location)
+        self.validate_url(target)
+        bridge.emit("help_authorize", "redirect", "Help 页面跳转", http_status=response.status_code,
+                    request={"url": bridge.safe_url(current)}, response={"location": bridge.safe_url(target)})
+        return target
+
+    def open_page(self, navigation):
+        """Warm Help cookies; hand auth redirects to the state-checked flow.
+
+        Only ordinary Help pages are retried as reads. In particular, never
+        consume an OAuth callback here or restart an already-started login.
+        """
+        current = PAGE
+        for _ in range(6):
+            parsed = urlsplit(current)
+            if parsed.hostname == "auth.openai.com" or parsed.path.startswith("/auth/"):
+                return current
+            if parsed.hostname != "help.openai.com":
+                raise HelpError("Help 页面跳转未进入 Help 或授权页面")
+            warm = self.request(current, headers={**navigation, "sec-fetch-site": "same-origin"}, read_only=True)
+            if warm.status_code == 200:
+                return None
+            if warm.status_code not in REDIRECTS:
+                raise HelpError(f"Help 页面打开失败：HTTP {warm.status_code}")
+            current = self.redirect_target(current, warm)
+        raise HelpError("Help 页面跳转次数超限")
+
     def authorize(self):
         self.stage("authorize", "running")
         navigation = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -191,12 +227,10 @@ class HelpInquiry:
                       "sec-fetch-user": "?1", "Upgrade-Insecure-Requests": "1"}
         # The browser opens Help before clicking login. Establish Help's cookies
         # using the original curl session and its fixed proxy, just like that UI.
-        warm = self.request(PAGE, headers={**navigation, "sec-fetch-site": "same-origin"}, read_only=True)
-        if warm.status_code != 200:
-            raise HelpError(f"Help 页面打开失败：HTTP {warm.status_code}")
+        current = self.open_page(navigation)
         # Follow the same callback/landing path as Help's own login UI.
         landing = "/auth/login-success?" + urlencode({"returnTo": urlsplit(PAGE).path})
-        current = HELP + "/auth/login?" + urlencode({"redirectTo": landing})
+        current = current or HELP + "/auth/login?" + urlencode({"redirectTo": landing})
         expected_state = ""
         for _ in range(20):
             p = urlsplit(current)
@@ -212,10 +246,8 @@ class HelpInquiry:
                 bridge.protect_code(q["code"][0])
             r = self.request(current, headers={**navigation,
                 "sec-fetch-site": "same-origin" if p.hostname == "help.openai.com" else "same-site"})
-            if r.status_code in (301, 302, 303, 307, 308):
-                location = r.headers.get("location", "")
-                if not location: raise HelpError("Help 授权跳转缺少地址")
-                current = urljoin(current, location); continue
+            if r.status_code in REDIRECTS:
+                current = self.redirect_target(current, r); continue
             if r.status_code == 200 and p.hostname == "auth.openai.com" and p.path == "/choose-an-account":
                 parser = AccountButtons(); parser.feed(r.text)
                 matching = [sid for sid, text in parser.buttons if self.email in

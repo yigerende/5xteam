@@ -194,6 +194,84 @@ class HelpTests(unittest.TestCase):
         self.assertNotIn("help_sending", [n for n, _ in self.calls])
         self.assertFalse(any("/chatkit" in c.args[1] for c in req.call_args_list))
 
+    def test_help_page_redirects_continue_same_session_then_authorize_once(self):
+        for status in sorted(help.REDIRECTS):
+            with self.subTest(status=status):
+                self.calls.clear()
+                self.inquiry = help.HelpInquiry(self.flow, {"request_id": "test-request", "prompt": PROMPT})
+                auth = help.AUTH + "/oauth/authorize?" + urlencode({
+                    "redirect_uri": help.HELP + "/auth/callback", "state": "redirect-state"})
+                callback = help.HELP + "/auth/callback?code=redirect-code&state=redirect-state"
+                responses = [response(status, headers={"location": "/en/"}), response(),
+                    response(302, headers={"location": auth}), response(302, headers={"location": callback}),
+                    response(302, headers={"location": "/auth/login-success?returnTo=%2Fen%2F"}),
+                    response(302, headers={"location": help.PAGE + "?loginSuccess=true"}),
+                    response(text=help_page()), response(body={"email": EMAIL}),
+                    self.stream({"type": "thread.item.done", "item": item("assistant_message", "answer", ANSWER)})]
+                with patch.object(self.flow.web_session, "request", side_effect=responses) as req:
+                    self.assertTrue(self.inquiry.run()["success"])
+                urls = [c.args[1] for c in req.call_args_list]
+                self.assertEqual(urls[:2], [help.PAGE, help.HELP + "/en/"])
+                self.assertEqual(sum("/auth/login?" in url for url in urls), 1)
+                self.assertEqual(urls.count(callback), 1)
+                self.assertEqual(urls.count(help.CHAT), 1)
+                self.assertTrue(all(not c.kwargs["allow_redirects"] for c in req.call_args_list))
+                saved = next(v["session"] for n, v in self.calls if n == "help_session")
+                self.assertEqual(saved["proxy"], self.flow.proxy_url)
+
+    def test_help_page_can_enter_oauth_without_restarting_login(self):
+        auth = help.AUTH + "/oauth/authorize?" + urlencode({
+            "redirect_uri": help.HELP + "/auth/callback", "state": "warm-state"})
+        callback = help.HELP + "/auth/callback?code=warm-code&state=warm-state"
+        for target in [help.HELP + "/auth/login?redirectTo=fixture", auth]:
+            with self.subTest(target=target):
+                responses = [response(302, headers={"location": target})]
+                if target != auth: responses.append(response(302, headers={"location": auth}))
+                responses += [response(302, headers={"location": callback}),
+                              response(302, headers={"location": help.PAGE}),
+                              response(text=help_page()), response(body={"email": EMAIL})]
+                with patch.object(self.flow.web_session, "request", side_effect=responses) as req:
+                    self.inquiry.authorize()
+                urls = [c.args[1] for c in req.call_args_list]
+                self.assertEqual(urls.count(auth), 1)
+                self.assertEqual(urls.count(callback), 1)
+                self.assertEqual(sum("/auth/login?" in u for u in urls), int(target != auth))
+
+    def test_help_page_redirects_fail_closed_and_are_bounded(self):
+        for target in ["https://evil.invalid/", "//help.openai.com.evil.invalid/",
+                       "http://help.openai.com/", "https://user:pass@help.openai.com/",
+                       "https://@help.openai.com/", "https://help.openai.com:8443/",
+                       help.SUPPORT + "/api/v1/me", help.HELP + "/auth/callback?code=x&state=x"]:
+            with self.subTest(target=target), patch.object(self.flow.web_session, "request",
+                    return_value=response(302, headers={"location": target})) as req:
+                with self.assertRaises(help.HelpError): self.inquiry.authorize()
+                req.assert_called_once()
+        for headers, error, count in [({}, "缺少地址", 1), ({"location": help.PAGE}, "跳转次数超限", 6)]:
+            with patch.object(self.flow.web_session, "request", return_value=response(302, headers=headers)) as req:
+                with self.assertRaisesRegex(help.HelpError, error): self.inquiry.authorize()
+                self.assertEqual(req.call_count, count)
+        self.assertNotIn("help_sending", [n for n, _ in self.calls])
+
+    def test_help_redirect_diagnostics_omit_auth_query_and_fragment(self):
+        current = help.HELP + "/auth/login?state=private-state"
+        target = help.AUTH + "/oauth/authorize?code=private-code&state=private-state#private-token"
+        with patch.object(help.bridge, "emit") as emit:
+            self.assertEqual(self.inquiry.redirect_target(current, response(302, headers={"location": target})), target)
+        diagnostic = json.dumps(emit.call_args.kwargs)
+        self.assertNotIn("private-", diagnostic)
+        self.assertEqual(emit.call_args.kwargs["response"], {"location": help.AUTH + "/oauth/authorize"})
+
+    def test_warmup_auth_callback_transport_failure_is_not_replayed(self):
+        auth = help.AUTH + "/oauth/authorize?" + urlencode({
+            "redirect_uri": help.HELP + "/auth/callback", "state": "warm-state"})
+        callback = help.HELP + "/auth/callback?code=warm-code&state=warm-state"
+        with patch.object(self.flow.web_session, "request", side_effect=[
+                response(302, headers={"location": auth}), response(302, headers={"location": callback}),
+                ConnectionError("callback lost")]) as req:
+            with self.assertRaises(ConnectionError): self.inquiry.authorize()
+        self.assertEqual([c.args[1] for c in req.call_args_list], [help.PAGE, auth, callback])
+        self.assertNotIn("help_sending", [n for n, _ in self.calls])
+
     def test_read_transport_retry_keeps_session_and_does_not_retry_writes(self):
         with patch.object(help.time, "sleep"), patch.object(self.flow.web_session, "request", side_effect=[ConnectionError("proxy 504"), response(body={"email": EMAIL})]) as req:
             self.assertTrue(self.inquiry.identity())
