@@ -10,15 +10,32 @@ const clearing=trade('clear','4','100','2026-11-15'),refund=trade('refund','5','
 const data={cards:[card],operations:[],trades:[clearing,refund,refund],cases:[{email:'a@example.com',state:'returned',consumption_total:250}],recharge_ledger:{amount:'200'},reversal_fee_percent:0,balance:{data:{abroadList:[{currency:'USD',balance:'100'}]}}}
 const history={consumption:[{id:'usage',email:'a@example.com',total:250,start_day:'2026-11-15',end_day:'2026-11-16',daily_checked_at:'2026-11-16T12:00:00+08:00'}],usage_days:[{id:'usage:2026-11-15',day:'2026-11-15',email:'a@example.com',amount:100,source:'sub2_daily'},{id:'usage:2026-11-16',day:'2026-11-16',email:'a@example.com',amount:150,source:'sub2_daily'}]}
 let report=financeReport(data,history,'day','2026-11-16')
-assert.equal(report.summary.clearingUSD,'-95.00')
-assert.equal(report.summary.clearingDebitUSD,'0.00')
+assert.equal(report.summary.clearingUSD,'0.00','refund cash never creates negative cost today')
+assert.equal(report.summary.earnings.costR,'0.0000')
 assert.equal(report.summary.refundPrincipalUSD,'95.00','duplicate refund counted once')
-assert.equal(report.summary.earnings.costBeforeRefundUSD,'0.00')
+assert.equal(report.summary.earnings.costUSD,'0.00')
 assert.equal(report.summary.earnings.refundPrincipalR,'636.5000')
-assert.equal(report.summary.earnings.profitR,'786.5000')
-assert.equal(financeReport(data,history,'day','2026-11-15').summary.refundPrincipalUSD,'0.00','refund must not rewrite earlier costs')
-assert.equal(financeReport(data,history,'day','2026-11-15').summary.clearingDebitUSD,'100.00')
+assert.equal(report.summary.earnings.profitR,'150.0000')
+assert.equal(financeReport(data,history,'day','2026-11-15').summary.refundPrincipalUSD,'0.00','cash receipt stays on the actual refund day')
+assert.equal(financeReport(data,history,'day','2026-11-15').summary.clearingUSD,'5.00')
 assert.equal(pendingRefundSettlement(data.cards,data.trades).amount,'95.00')
+assert.equal(financeReport(data,history,'day','2026-11-15').summary.earnings.profitR,'63.1500','original cost is only the unreturned 5 USD plus opening fee')
+const cashOnly={...data,cases:[]},noRevenue={consumption:[],usage_days:[]}
+assert.equal(financeReport(cashOnly,noRevenue,'day','2026-11-16').summary.earnings.profitR,'0.0000','principal alone cannot be profit')
+const partial={...data,trades:[clearing,trade('refund-a','5','40','2026-11-16'),trade('refund-b','5','55','2026-11-17')]}
+assert.equal(financeReport(partial,history,'day','2026-11-15').summary.clearingUSD,'5.00')
+assert.equal(financeReport(partial,history,'day','2026-11-16').summary.refundPrincipalUSD,'40.00')
+assert.equal(financeReport(partial,history,'day','2026-11-17').summary.earnings.profitR,'0.0000')
+const undated={...data,trades:[{...clearing,trade:{...clearing.trade,createdAt:''}},refund]}
+assert.equal(financeReport(undated,history,'day','2026-11-16').refundUnallocated,1)
+assert.equal(financeReport(undated,history,'day','2026-11-16').summary.earnings.profitR,null)
+const excess={...data,trades:[clearing,trade('excess','5','110','2026-11-16')]}
+assert.equal(financeReport(excess,history,'day','2026-11-16').summary.earnings.profitR,null,'excess refund must remain unallocated, never fabricated profit')
+const paymentOnly={...data,payment_policies:[{card_id:'card',mode:'payment_only'}]}
+for(const date of ['2026-11-15','2026-11-16'])assert.equal(financeReport(paymentOnly,history,'day',date).summary.clearingUSD,'0.00','payment-only refund exclusions stay with original cost')
+const otherClear={...clearing,id:'other-clear',trade:{...clearing.trade,tradeNo:'other-clear',authCode:'other',billAmount:'30',cardAmount:'30'}}
+assert.equal(financeReport({...data,trades:[...data.trades,otherClear]},history,'day','2026-11-15').summary.clearingUSD,'35.00','refund does not consume another authorization cost')
+
 assert.equal(reconciliationCards(data)[0].refund,'95.00')
 assert.equal(reconciliationCards(data)[0].total,'100.00')
 const before=financeOverview(data)
@@ -45,4 +62,4 @@ for(const mode of ['day','week','month','all'])assert.deepEqual(financeReport(da
 const worker=createEJHFinanceWorker()
 for(const date of ['2026-11-16','2026-11-15'])assert.deepEqual(await worker.calculate(data,oldHistory,'day',date),financeReport(data,oldHistory,'day',date))
 worker.dispose();await assert.rejects(()=>worker.calculate(data,history,'all','2026-11-16'))
-console.log('Passed: cross-day posting, separate refund credits, no closure double profit/assets, unknown settlement, date-scoped revenue gaps, cached period calculation')
+console.log('Passed: original-period net cost, principal is never revenue, cross-day/partial/multiple/unknown refunds, no closure double profit/assets, unknown settlement, date-scoped revenue gaps, cached period calculation')

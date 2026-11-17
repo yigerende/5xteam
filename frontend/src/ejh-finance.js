@@ -131,7 +131,7 @@ export function financeEvents(data,history={}) {
   const historyMonth=/^20\d{2}-(0[1-9]|1[0-2])$/.test(data.recharge_ledger?.history_month||'')?data.recharge_ledger.history_month:null
   for(const e of summarizeClearingCosts(data.trades||[],cards,operations,data.cases||[]).entries){
     const t=e.record.trade
-    events.push({id:'clearing:'+e.record.card_id+':'+(t.tradeNo||e.record.id),kind:'clearing',at:financeTime(t.createdAt)||financeTime(t.tradeTime),card:cards.find(c=>c.id===e.record.card_id)?.local?.name||t.orderNo,reference:t.tradeNo,amount:e.amount,currency:e.currency,usd:e.usd,usd_precise:e.usd,refundPrincipal:!!e.refund&&!e.refundPending,incomplete:e.incomplete,note:e.refundPending?'已申请退款的清算本金 · 计入在途，不计成本':e.pending?'清算待入账，未计成本':e.refund?'清算退款冲减成本':e.estimated?'清算成本 · USD 估算':'清算成本 · 已入账'})
+    events.push({id:'clearing:'+e.record.card_id+':'+(t.tradeNo||e.record.id),kind:'clearing',at:financeTime(t.createdAt)||financeTime(t.tradeTime),card:cards.find(c=>c.id===e.record.card_id)?.local?.name||t.orderNo,reference:t.tradeNo,cardID:e.record.card_id,authorization:t.authCode,amount:e.amount,currency:e.currency,usd:e.usd,usd_precise:e.usd,refundPrincipal:!!e.refund&&!e.refundPending,incomplete:e.incomplete,note:e.refundPending?'已申请退款的清算本金 · 计入在途，不计成本':e.pending?'清算待入账，未计成本':e.refund?'清算退款冲减成本':e.estimated?'清算成本 · USD 估算':'清算成本 · 已入账'})
   }
   for(const record of (data.trades||[]).filter(r=>['5','16'].includes(r.trade?.tradeType)&&!r.refund_fee_override)){
     const fee=summarizeRefundFees([record],data.reversal_fee_percent??6,false,cards,operations),t=record.trade
@@ -145,7 +145,7 @@ export function financeEvents(data,history={}) {
     if(net===BigInt(row.costExcluded))for(const e of row.entries){
       const t=e.record.trade,n=cents(e.usd)
       if(n===null||e.incomplete)continue
-      events.push({id:'payment-only:'+row.card_id+':'+(t.tradeNo||e.record.id),kind:'clearing',at:financeTime(t.createdAt)||financeTime(t.tradeTime),card:row.last4,reference:t.tradeNo,usd:money(-n),amount:money(-n),currency:'USD',note:'只付款本金单列，冲减业务清算成本'})
+      events.push({id:'payment-only:'+row.card_id+':'+(t.tradeNo||e.record.id),kind:'clearing',at:financeTime(t.createdAt)||financeTime(t.tradeTime),card:row.last4,reference:t.tradeNo,cardID:row.card_id,refundExclusion:!!e.refund,usd:money(-n),amount:money(-n),currency:'USD',note:'只付款本金单列，冲减业务清算成本'})
     }else if(row.costExcluded)events.push({id:'payment-only:'+row.card_id,kind:'clearing',at:null,card:row.last4,usd:paymentMoney(-row.costExcluded),amount:paymentMoney(-row.costExcluded),currency:'USD',paymentOnlyUndated:true,note:'只付款本金单列 · 历史日期待核实'})
   }
   // A separate signed exclusion preserves issuer trades. The first cumulative
@@ -189,7 +189,52 @@ export function financeEvents(data,history={}) {
   const consumption=consumptionSummary(data.cases||[],history.consumption||data.consumption_history||[])
   const recordedR=usageDays.reduce((n,r)=>n+(Number.isFinite(r.amount)?r.amount:0),0)
   if(consumption.total!==null&&consumption.total>recordedR+0.0000001)events.push({id:'legacy-consumption',kind:'consumption',at:null,amount:consumption.total-recordedR,currency:'R',note:'首次采集的历史累计消费，无法还原每天发生额'})
-  return events.sort((a,b)=>(b.at??-Infinity)-(a.at??-Infinity)||String(a.id).localeCompare(String(b.id)))
+  return attributeRefundCosts(events).sort((a,b)=>(b.at??-Infinity)-(a.at??-Infinity)||String(a.id).localeCompare(String(b.id)))
+}
+// Refund cash is reported on its receipt date. Its cost reduction belongs to
+// the original clearing, never to the day principal happens to return.
+function attributeRefundCosts(events) {
+  const groups=new Map(),allocations=new Map(),out=[]
+  const key=e=>JSON.stringify([e.cardID,e.authorization,e.currency])
+  for(const e of events)if(e.id.startsWith('clearing:')&&!e.refundPrincipal&&!e.incomplete&&e.authorization){
+    const amount=tradeUnits(e.usd_precise??e.usd)
+    if(amount>0n){const rows=groups.get(key(e))||[];rows.push({event:e,left:amount});groups.set(key(e),rows)}
+  }
+  for(const rows of groups.values())rows.sort((a,b)=>(a.event.at??Infinity)-(b.event.at??Infinity)||a.event.id.localeCompare(b.event.id))
+  const refunds=events.filter(e=>e.refundPrincipal).sort((a,b)=>(a.at??Infinity)-(b.at??Infinity)||a.id.localeCompare(b.id))
+  for(const e of refunds){
+    out.push({...e,cashOnly:true})
+    let remaining=tradeUnits(String(e.usd_precise??e.usd).replace('-',''))
+    const parts=[]
+    if(remaining!==null&&!e.incomplete)for(const original of groups.get(key(e))||[]){
+      if(remaining===0n)break
+      // A later unrelated clearing cannot justify an earlier refund.
+      if(e.at!==null&&original.event.at!==null&&original.event.at>e.at)continue
+      const amount=remaining<original.left?remaining:original.left
+      if(amount<=0n)continue
+      original.left-=amount;remaining-=amount
+      parts.push({at:original.event.at,amount,reference:original.event.reference,unallocated:original.event.at===null})
+    }
+    if(remaining===null||remaining>0n||e.incomplete)parts.push({at:null,amount:remaining,unallocated:true})
+    allocations.set(JSON.stringify([e.cardID,e.reference]),parts)
+    parts.forEach((part,i)=>out.push({...e,id:e.id+':cost:'+i,at:part.at,postedAt:e.at,refundPrincipal:false,refundCostAdjustment:true,
+      refundUnallocated:!!part.unallocated,amount:part.amount===null?null:tradeMoney(-part.amount),usd:part.amount===null?null:tradeMoney(-part.amount),usd_precise:part.amount===null?null:tradeMoney(-part.amount),currency:'USD',
+      note:part.unallocated?'退款对应原支出日期或金额待核对，未算作到账日利润':'退款抵减原清算成本 · 原流水 '+part.reference+'；退款入账 '+beijingDay(e.at)}))
+  }
+  for(const e of events){
+    if(e.refundPrincipal)continue
+    if(!e.refundExclusion){out.push(e);continue}
+    const parts=allocations.get(JSON.stringify([e.cardID,e.reference]))
+    const total=tradeUnits(e.usd)
+    if(!parts?.length||total===null){out.push({...e,at:null,refundUnallocated:true});continue}
+    const basis=parts.reduce((n,p)=>n+(p.amount||0n),0n)
+    let left=total
+    parts.forEach((part,i)=>{
+      const amount=i===parts.length-1?left:basis?total*(part.amount||0n)/basis:0n;left-=amount
+      out.push({...e,id:e.id+':cost:'+i,at:part.at,refundUnallocated:!!part.unallocated,amount:tradeMoney(amount),usd:tradeMoney(amount),usd_precise:tradeMoney(amount)})
+    })
+  }
+  return out
 }
 export function eventAmountR(event) {
   if(event.incomplete)return null
@@ -197,12 +242,16 @@ export function eventAmountR(event) {
   return usdToR(event.kind==='opening'?event.amount:event.usd)
 }
 function summarizeEvents(events) {
-  let usd=0n,usdt=0n,reversalUSD=0n,rechargeUSD=0n,clearingUSD=0n,externalTransferUSD=0n,refundUSD=0n,merchantUSD=0n,deadUSD=0n,refundPrincipalUSD=0n,r=0,missing=0,consumptionMissing=0,opening=0
+  let usd=0n,usdt=0n,reversalUSD=0n,rechargeUSD=0n,clearingUSD=0n,externalTransferUSD=0n,refundUSD=0n,merchantUSD=0n,deadUSD=0n,refundPrincipalUSD=0n,refundPrincipalMissing=0,r=0,missing=0,consumptionMissing=0,opening=0
   const original=new Map()
   for(const e of events){
     if(e.kind==='consumption'){
       if(e.amount===null||e.amount===undefined||e.amount===''||!Number.isFinite(Number(e.amount))||Number(e.amount)<0)consumptionMissing++
       else r+=Number(e.amount)
+      continue
+    }
+    if(e.cashOnly){
+      const value=tradeUnits(String(e.usd_precise??e.usd).replace('-',''));if(value!==null&&!e.incomplete)refundPrincipalUSD+=value;else refundPrincipalMissing++
       continue
     }
     if(e.kind==='opening'){usdt+=cents(e.amount)||0n;opening++;continue}
@@ -214,7 +263,7 @@ function summarizeEvents(events) {
     usd+=signed
     if(e.kind==='reversal')reversalUSD+=signed
     if(e.kind==='recharge')rechargeUSD+=signed
-    if(e.kind==='clearing'){clearingUSD+=signed;if(e.refundPrincipal&&signed<0n)refundPrincipalUSD-=signed}
+    if(e.kind==='clearing')clearingUSD+=signed
     if(e.externalTransfer)externalTransferUSD-=signed
     if(e.kind==='refund')refundUSD+=signed
     if(e.kind==='merchant')merchantUSD+=signed
@@ -222,7 +271,7 @@ function summarizeEvents(events) {
   }
   const rounded=n=>money(((n<0n?-n:n)+5000n)/10000n*(n<0n?-1n:1n))
   const earnings=financeProfit({openingUSD:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),consumption:r,costMissing:missing,consumptionMissing,estimated:events.some(e=>e.kind==='reversal'||e.estimated)})
-  return {refundPrincipalUSD:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),r,missing:missing+consumptionMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
+  return {refundPrincipalUSD:refundPrincipalMissing?null:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),r,missing:missing+consumptionMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
 }
 export function prepareFinanceReport(data,history={}) {
   return {all:financeEvents(data,history),overview:financeOverview({...data,consumption_history:history.consumption||data.consumption_history})}
@@ -235,12 +284,7 @@ function consumptionOverlaps(row,range) {
   return start===null||end===null||end<start||start<range.end&&end+86400000>range.start
 }
 function cashflowSummary(row) {
-  const credit=cents(row.refundPrincipalUSD)||0n,net=cents(row.earnings.costUSD)
-  const known=cents(row.earnings.knownCostUSD),clearing=cents(row.clearingUSD)
-  row.clearingDebitUSD=clearing===null?null:money(clearing+credit)
-  row.earnings={...row.earnings,refundPrincipalR:usdToR(money(credit)),clearingDebitR:usdToR(row.clearingDebitUSD),
-    costBeforeRefundUSD:net===null?null:money(net+credit),costBeforeRefundR:net===null?null:usdToR(money(net+credit)),
-    knownCostBeforeRefundUSD:known===null?null:money(known+credit)}
+  row.earnings={...row.earnings,refundPrincipalR:usdToR(row.refundPrincipalUSD)}
   return row
 }
 export function financeReport(data,history={},mode='day',date=beijingDay(),prepared=null) {
@@ -287,7 +331,8 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
   const undatedTransfers=all.filter(e=>e.externalTransfer&&e.at===null).length
   const totalRetained=usage.reduce((sum,row)=>sum+(Number.isFinite(row.total)?row.total:0),0)
   const unscopedBaseline=baseline>0.000001&&(!usage.length||overview.consumption.total>totalRetained+0.000001)
-  const incompleteFor=period=>unscopedBaseline||usage.some(row=>consumptionOverlaps(row,period)&&pending(row))||
+  const refundUnallocated=all.filter(e=>e.refundUnallocated&&!e.refundExclusion).length
+  const incompleteFor=period=>refundUnallocated>0||unscopedBaseline||usage.some(row=>consumptionOverlaps(row,period)&&pending(row))||
     all.some(e=>e.externalTransfer&&e.at===null&&(e.recordedAt==null||e.recordedAt>=period.start))||
     days.some(row=>row.source!=='sub2_daily'&&financeTime(row.day+'T12:00:00+08:00')>=period.start&&financeTime(row.day+'T12:00:00+08:00')<period.end)||
     (['day','week'].includes(mode)&&monthlyUndated>0)
@@ -300,7 +345,7 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
   const firstLoss=first?financeOverview({...first,operations:data.operations||[]}).loss:null,lastLoss=last?financeOverview({...last,operations:data.operations||[]}).loss:null
   const samePolicies=JSON.stringify(first?.payment_policies||[])===JSON.stringify(last?.payment_policies||[])
   const lossChange=samePolicies&&first&&last&&financeTime(first.at)!==financeTime(last.at)&&firstLoss!==null&&lastLoss!==null?money(cents(lastLoss)-cents(firstLoss)):null
-  return {range,summary,events,rows,overview,baseline,dailyPending,dailyErrors,historicalPending,periodIncomplete,monthlyUndated,undatedTransfers,undated:all.filter(e=>e.at===null&&!e.month&&e.kind!=='consumption').length,lossChange,firstAt:first?.at,lastAt:last?.at,
+  return {range,summary,events,rows,overview,baseline,refundUnallocated,dailyPending,dailyErrors,historicalPending,periodIncomplete,monthlyUndated,undatedTransfers,undated:all.filter(e=>e.at===null&&!e.month&&e.kind!=='consumption').length,lossChange,firstAt:first?.at,lastAt:last?.at,
     coverage:(history.usage_days||[]).map(r=>r.day).sort()[0]||null}
 }
 
@@ -310,7 +355,8 @@ export function dailyFinanceCost(data, date=beijingDay()) {
   const range=periodRange('day',date)
   const all=financeEvents(data).filter(e=>e.kind!=='consumption')
   const events=all.filter(e=>e.at!==null&&e.at>=range.start&&e.at<range.end)
-  const earnings=summarizeEvents(events).earnings
+  const earnings=cashflowSummary(summarizeEvents(events)).earnings
+  if(all.some(e=>e.refundUnallocated)){earnings.costUSD=null;earnings.costR=null;earnings.costIncomplete=true;earnings.profitR=null;earnings.incomplete=true}
   if(cents(data.recharge_ledger?.amount)===null){
     earnings.costUSD=null;earnings.costR=null;earnings.costIncomplete=true
     earnings.profitR=null;earnings.incomplete=true
