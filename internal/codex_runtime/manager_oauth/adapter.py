@@ -11,6 +11,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlsplit
 
 from . import bridge, upstream
+from .password_first import PasswordFirstLogin
 
 
 def cookie_snapshot(flow):
@@ -52,7 +53,7 @@ def response_shape(response, flow):
             "login_session_cookie_present": any(c["name"] == "login_session" for c in cookies)}
 
 
-class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
+class ProjectProtocolLogin(PasswordFirstLogin, upstream.ChatGPTProtocolLogin):
     def __init__(self, job_id, payload):
         super().__init__(job_id, payload)
         self.web_session = None
@@ -408,7 +409,7 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
         bridge.set_login_details(self.login_details)
 
     def complete_modern_login(self, step, password, issued_after):
-        # Observe authentication only; the reference owns the entire protocol.
+        # Record the shared password, TOTP and required-email continuation.
         try:
             result = super().complete_modern_login(step, password, issued_after)
         except BaseException:
@@ -450,8 +451,13 @@ class ProjectProtocolLogin(upstream.ChatGPTProtocolLogin):
 
     def log(self, step, message, level="info"):
         self.last_stage = step
+        if (step == "mail_code_baseline" and self.payload.get("selected_login_mode") == "password_totp"
+                and not self.payload.get("_email_code_required")):
+            return
         if step in {"waiting_code", "send_code"}:
-            if self.login_details["login_method"] in {"password", "password_email_otp"}:
+            if self.login_details["login_method"] in {"password_totp", "password_email_otp_totp"}:
+                self.set_login_method("password_email_otp_totp", "ChatGPT 密码 + OpenAI TOTP + 邮箱验证码登录")
+            elif self.login_details["login_method"] in {"password", "password_email_otp"}:
                 self.set_login_method("password_email_otp", "ChatGPT 密码 + 邮箱验证码登录")
             else:
                 self.set_login_method("email_otp", "邮箱验证码登录")

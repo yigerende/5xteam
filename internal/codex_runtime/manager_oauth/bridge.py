@@ -150,7 +150,11 @@ def manual_phone_code_for_payload(payload):
 
 
 def login_mail_fetch_payload(payload):
-    return {"email": payload.get("email", ""), "generic_accounts": payload.get("generic_accounts", []),
+    # Password mode must not contact the mailbox until OAI requires email OTP.
+    accounts = payload.get("generic_accounts", [])
+    if payload.get("selected_login_mode") == "password_totp" and not payload.get("_email_code_required"):
+        accounts = []
+    return {"email": payload.get("email", ""), "generic_accounts": accounts,
             "limit": payload.get("limit", 20), "sender_filter": payload.get("sender_filter", "")}
 
 

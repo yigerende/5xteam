@@ -336,24 +336,24 @@ class MergeLoginStepTests(unittest.TestCase):
                 self.assertFalse(caught.exception.retryable)
             fetch.assert_not_called()
 
-    def test_only_pre_password_passwordless_mode_can_restart_normal_login(self):
+    def test_only_initial_password_offer_can_continue_without_mailbox(self):
         step = {"page": {"type": "email_otp_verification", "payload": {"email_verification_mode": "passwordless_login"}}}
-        for scenario in ["identifier", "password", "no_totp", "email_mode", "no_mode", "pickup"]:
+        for scenario in ["identifier", "password", "email_mode", "no_password", "no_mode", "pickup", "already_submitted"]:
             flow = self.flow(scenario == "pickup")
             flow.payload.update(password="fixture-password", selected_login_mode="password_totp")
             data = step
-            if scenario == "no_totp": flow.payload["_totp_secret"] = ""
+            if scenario == "no_password": flow.payload["password"] = ""
             if scenario == "email_mode": flow.payload["selected_login_mode"] = "email_otp"
             if scenario == "no_mode": data = {"page": {"type": "email_otp_verification"}}
-            if scenario == "pickup":
-                flow.inspect_login_step(data, "identifier")
-                continue
-            with self.subTest(scenario=scenario), self.assertRaises(upstream.LoginFlowError) as caught:
-                flow.inspect_login_step(data, "password" if scenario == "password" else "identifier")
-            self.assertEqual(caught.exception.code, "password_login_restart_required" if scenario == "identifier" else "email_code_source_missing")
-            # The outer merge coordinator alone owns this restart; no immediate
-            # generic network retry/rotation may consume it.
-            self.assertFalse(caught.exception.retryable)
+            if scenario == "already_submitted": flow._password_first_password_submitted = True
+            with self.subTest(scenario=scenario):
+                if scenario in {"identifier", "pickup"}:
+                    flow.inspect_login_step(data, "identifier")
+                else:
+                    with self.assertRaises(upstream.LoginFlowError) as caught:
+                        flow.inspect_login_step(data, "password" if scenario == "password" else "identifier")
+                    self.assertEqual(caught.exception.code, "email_code_source_missing")
+                    self.assertFalse(caught.exception.retryable)
 
     def test_configured_mailbox_still_polls_and_submits_real_code(self):
         flow = self.flow(True)

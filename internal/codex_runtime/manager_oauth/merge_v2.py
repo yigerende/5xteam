@@ -75,20 +75,9 @@ class TeamProtocolLogin(ProjectProtocolLogin):
         self.raise_if_passkey_or_challenge(data, url)
         email_code = page == "email_otp_verification" or "/email-verification" in url.lower()
         if email_code:
+            if phase == "identifier" and self.can_continue_with_password(data, self.payload.get("password")):
+                return
             if not upstream.login_payload_has_pickup_link(self.payload):
-                # This is an alternative *primary* login method, before any
-                # password/MFA verification. Only restart the ordinary login
-                # when it selected email passwordless despite password+TOTP
-                # credentials. Never apply this to a post-password challenge.
-                if (phase == "identifier" and page == "email_otp_verification"
-                        and self.extract_email_verification_mode(data) == "passwordless_login"
-                        and self.payload.get("selected_login_mode") == "password_totp"
-                        and self.payload.get("password") and self.payload.get("_totp_secret")
-                        and not data.get("error")):
-                    raise upstream.LoginFlowError(
-                        "登录入口返回邮箱免密方式，与已配置的密码和2FA方式不一致，等待按配置重新登录",
-                        code="password_login_restart_required", retryable=False,
-                    )
                 raise upstream.LoginFlowError(
                     "本次登录要求邮箱验证码，但账号未配置收码链接；请补充收码来源后续跑",
                     code="email_code_source_missing", retryable=False,

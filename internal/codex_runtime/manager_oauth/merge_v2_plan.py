@@ -19,11 +19,6 @@ class PersonalLogin(ProjectProtocolLogin):
         bridge.emit("merge_v2_recovery", event, "个人空间登录回调核对", details=details)
 
 
-    def log(self, step, message, level="info"):
-        if step == "waiting_code":
-            raise RuntimeError("additional verification required")
-        super().log(step, message, level)
-
     def submit_workspace_and_org(self, referer_url):
         data = self.decode_oauth_session_cookie()
         rows = data.get("workspaces", []) if isinstance(data, dict) else []
