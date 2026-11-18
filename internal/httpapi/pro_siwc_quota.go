@@ -26,13 +26,19 @@ func (s *Server) queryProSIWCQuota(ctx context.Context, p model.MailAccountProfi
 	if err != nil {
 		return sub2.QuotaUsage{}, err
 	}
-	c := credentials.SIWC
-	if c == nil {
-		return sub2.QuotaUsage{}, errors.New("账号缺少 SIWC 凭证，不能同步网页额度")
-	}
 	endpoint, err := sub2.EndpointKey(v.Sub2.URL)
 	if err != nil {
 		return sub2.QuotaUsage{}, err
+	}
+	c, linked := proSIWCQuotaCredentials(credentials, endpoint, p.Sub2AccountID)
+	if c == nil {
+		return sub2.QuotaUsage{}, errors.New("账号缺少 SIWC 凭证或有效关联，不能同步网页额度")
+	}
+	updateWeb := func(update func(*model.SIWCCredentials) error) error {
+		if linked {
+			return s.store.UpdateMailAccountSIWCLinkedWeb(p.Email, endpoint, p.Sub2AccountID, update)
+		}
+		return s.store.UpdateMailAccountSIWCWeb(p.Email, c.ClientID, update)
 	}
 	expiry, validExpiry := workflow.AccessTokenExpiry(c.WebAccessToken)
 	state := c.WebQuota
@@ -75,7 +81,7 @@ func (s *Server) queryProSIWCQuota(ctx context.Context, p model.MailAccountProfi
 			return sub2.QuotaUsage{}, errors.New("网页额度凭证正在等待登录重试，保留原账号和额度")
 		}
 		next := time.Now().Add(time.Duration(max(60, v.Sub2.QuotaCheckIntervalSeconds)) * time.Second)
-		if err = s.store.UpdateMailAccountSIWCWeb(p.Email, c.ClientID, func(current *model.SIWCCredentials) error {
+		if err = updateWeb(func(current *model.SIWCCredentials) error {
 			if current.WebQuota == nil {
 				current.WebQuota = &model.SIWCWebQuotaState{}
 			}
@@ -114,7 +120,7 @@ func (s *Server) queryProSIWCQuota(ctx context.Context, p model.MailAccountProfi
 		if err = checkBinding(); err != nil {
 			return sub2.QuotaUsage{}, err
 		}
-		if err = s.store.UpdateMailAccountSIWCWeb(p.Email, c.ClientID, func(current *model.SIWCCredentials) error {
+		if err = updateWeb(func(current *model.SIWCCredentials) error {
 			current.WebAccessToken, current.WebAccountID = token, info.AccountID
 			current.WebQuota = &model.SIWCWebQuotaState{LoginAt: time.Now(), RetryAt: next, Endpoint: endpoint, AccountID: p.Sub2AccountID}
 			return nil
@@ -129,8 +135,8 @@ func (s *Server) queryProSIWCQuota(ctx context.Context, p model.MailAccountProfi
 	if err != nil {
 		return sub2.QuotaUsage{}, err
 	}
-	fresh := credentials.SIWC
-	if fresh == nil || fresh.ClientID != c.ClientID {
+	fresh, freshLinked := proSIWCQuotaCredentials(credentials, endpoint, p.Sub2AccountID)
+	if fresh == nil || freshLinked != linked || fresh.ClientID != c.ClientID {
 		return sub2.QuotaUsage{}, errors.New("SIWC 授权已变化，停止同步网页凭证")
 	}
 	if err = s.sub2.UpdateSIWCWebCredentials(ctx, v.Sub2, password, p.Sub2AccountID, fresh.WebAccessToken, fresh.WebAccountID); err != nil {
@@ -139,7 +145,7 @@ func (s *Server) queryProSIWCQuota(ctx context.Context, p model.MailAccountProfi
 	if err = checkBinding(); err != nil {
 		return sub2.QuotaUsage{}, err
 	}
-	if err = s.store.UpdateMailAccountSIWCWeb(p.Email, c.ClientID, func(current *model.SIWCCredentials) error {
+	if err = updateWeb(func(current *model.SIWCCredentials) error {
 		if current.WebAccessToken != fresh.WebAccessToken {
 			return errors.New("网页凭证已更新，丢弃旧同步结果")
 		}
@@ -152,4 +158,11 @@ func (s *Server) queryProSIWCQuota(ctx context.Context, p model.MailAccountProfi
 	}
 	s.auditProEvent(p, "quota", "running", "sub2", "新网页 AT 已同步原账号，重新查询 SIWC 额度", nil)
 	return s.sub2.RefreshSIWCQuota(ctx, v.Sub2, password, p.Sub2AccountID)
+}
+
+func proSIWCQuotaCredentials(c model.MailAccountCredentials, endpoint string, accountID int64) (*model.SIWCCredentials, bool) {
+	if w := c.SIWCWebLink; w != nil && w.Endpoint == endpoint && w.AccountID == accountID && strings.EqualFold(w.Email, c.Email) {
+		return &model.SIWCCredentials{WebAccessToken: w.WebAccessToken, WebAccountID: w.WebAccountID, WebQuota: w.WebQuota}, true
+	}
+	return c.SIWC, false
 }

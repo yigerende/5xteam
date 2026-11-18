@@ -19,6 +19,11 @@ JWK.update(kid="fixture-key", use="sig", alg="RS256")
 
 
 class SIWCScenario(Scenario):
+    def __init__(self, **options):
+        super().__init__(**options)
+        self.sentinel_requests = []
+        self.authorization_sentinels = []
+
     def consent(self, url):
         if not getattr(self,"web_login_done",False):
             return Response(url,body={"continue_url":"https://chatgpt.com/api/auth/callback/openai?code=web-code&state=web-state"})
@@ -26,6 +31,11 @@ class SIWCScenario(Scenario):
 
     def request(self, method, url, **kw):
         path = urlsplit(url).path
+        if path == "/backend-api/sentinel/req":
+            data = json.loads(kw["data"])
+            self.sentinel_requests.append(data)
+            self.calls.append({"path": path, "body": data, **kw})
+            return Response(url, body={"token": "private-sentinel-" + str(len(self.sentinel_requests))})
         if path == "/": return Response(url)
         if path == "/api/auth/csrf": return Response(url,body={"csrfToken":"fixture-csrf"})
         if path == "/api/auth/signin/openai": return Response(url,body={"url":"https://auth.openai.com/authorize?state=web-state"})
@@ -38,7 +48,16 @@ class SIWCScenario(Scenario):
             return Response(url,body={"accessToken":"x."+encoded({"email":"fixture@example.com","https://api.openai.com/auth":{"chatgpt_account_id":"personal"}})+".x","user":{"email":"fixture@example.com"},"account":{"id":"personal"}})
 
         if path in ("/api/accounts/session/select", "/api/accounts/client_auth_session_dump", "/api/accounts/dynamic-agent-clients/consent/grant"):
-            assert kw.get("headers", {}).get("openai-sentinel-token"), "HAR requires the login Sentinel token"
+            assert len(self.clients) == 1 and not self.clients[0].closed
+            cookies = {cookie.name: cookie.value for cookie in self.clients[0].cookies.jar}
+            assert cookies.get("__Secure-next-auth.session-token") == "private-web-cookie"
+            assert cookies.get("auth-session-minimized") == "private-minimized"
+            token = json.loads(kw.get("headers", {}).get("openai-sentinel-token", "{}"))
+            assert token.get("flow") == "authorize_continue", "SIWC requires an authorization-stage Sentinel"
+            assert token.get("c") == "private-sentinel-" + str(len(self.sentinel_requests))
+            assert token.get("c") not in self.authorization_sentinels, "SIWC actions must not reuse a Sentinel"
+            assert token.get("id") == self.sentinel_requests[0]["id"], "SIWC changed the login device"
+            self.authorization_sentinels.append(token["c"])
         if path in ("/oauth/token", "/oauth/authorize", "/api/accounts/workspace/select", "/api/accounts/organization/select"):
             raise AssertionError("SIWC used a Codex-only endpoint: " + path)
         if path == "/api/accounts/authorize":
@@ -143,6 +162,7 @@ class SIWCFlowTests(unittest.TestCase):
     def test_full_login_paths_use_same_engine_and_proxy(self):
         for options, payload in [({}, {}), ({"choose": True}, {}),
                                  ({"password": True, "totp": True}, {"login_mode": "password_totp", "gpt_password": "private-password", "totp_secret": "JBSWY3DPEHPK3PXP"}),
+                                 ({"password": True, "totp": True, "choose": True}, {"login_mode": "password_totp", "gpt_password": "private-password", "totp_secret": "JBSWY3DPEHPK3PXP"}),
                                  ({"email_mfa": True}, {"totp_secret": "JBSWY3DPEHPK3PXP"})]:
             with self.subTest(options=options):
                 s = SIWCScenario(**options)
@@ -153,9 +173,14 @@ class SIWCFlowTests(unittest.TestCase):
                 self.assertEqual(result["client_id"], "oaiapp_fixture")
                 self.assertTrue(result["plan_use_enabled"])
                 self.assertEqual(s.tokens, 1)
+                self.assertEqual(s.identifiers, 1)
+                self.assertEqual(len(s.authorization_sentinels), 3 if options.get("choose") else 2)
+                if options.get("password"):
+                    self.assertEqual([r["flow"] for r in s.sentinel_requests],
+                                     ["authorize_continue", "password_verify"] + ["authorize_continue"] * len(s.authorization_sentinels))
                 for c in s.calls:
                     self.assertIn("proxy.example", str(c.get("proxies")))
-                for secret in ["private-siwc-at", "private-siwc-rt", "private-auth-session", "private-password", "private-siwc-code"]:
+                for secret in ["private-siwc-at", "private-siwc-rt", "private-auth-session", "private-password", "private-siwc-code", "private-sentinel-"]:
                     self.assertNotIn(secret, s.logs.getvalue())
 
     def test_remote_interface_reuses_login_session_and_never_exchanges_locally(self):
@@ -178,15 +203,66 @@ class SIWCFlowTests(unittest.TestCase):
                         "auth_mode": "siwc", "email": "fixture@example.com", "client_id": "oaiapp_fixture"}
             raise AssertionError(method)
         with patch.object(bridge, "call", rpc):
-            scenario = SIWCScenario(password=True, totp=True)
+            scenario = SIWCScenario(password=True, totp=True, choose=True)
             result = scenario.run(siwc_authorization_source="sub2api", login_mode="password_totp",
                                   gpt_password="private-password", totp_secret="JBSWY3DPEHPK3PXP")
         self.assertTrue(result["success"], result)
         self.assertEqual(calls, ["siwc_generate", "siwc_callback"])
         self.assertEqual(scenario.tokens, 0)
         self.assertEqual(len(scenario.clients), 1)
+        self.assertEqual(len(scenario.authorization_sentinels), 3)
+        self.assertEqual([r["flow"] for r in scenario.sentinel_requests],
+                         ["authorize_continue", "password_verify"] + ["authorize_continue"] * 3)
         for secret in ("remote-at", "remote-rt", "remote-state", "private-siwc-code"):
             self.assertNotIn(secret, scenario.logs.getvalue())
+
+    def test_missing_authorization_sentinel_stops_before_request_without_using_login_token(self):
+        from manager_oauth import upstream
+        original = upstream.generate_openai_sentinel_token
+        endpoints = ["/api/accounts/session/select", "/api/accounts/client_auth_session_dump",
+                     "/api/accounts/dynamic-agent-clients/consent/grant"]
+        for fail_at in (1, 2, 3):
+            for raises in (False, True):
+                with self.subTest(fail_at=fail_at, raises=raises):
+                    scenario = SIWCScenario(password=True, totp=True, choose=True)
+                    attempts = []
+                    def sentinel(device_id, flow, proxy):
+                        if getattr(scenario, "web_login_done", False):
+                            attempts.append(flow)
+                            if len(attempts) == fail_at:
+                                if raises:
+                                    raise RuntimeError("private-sentinel-generation-error")
+                                return ""
+                        return original(device_id, flow, proxy)
+                    with patch.object(upstream, "generate_openai_sentinel_token", side_effect=sentinel):
+                        result = scenario.run(login_mode="password_totp", gpt_password="private-password",
+                                              totp_secret="JBSWY3DPEHPK3PXP")
+                    self.assertFalse(result["success"], result)
+                    self.assertEqual(result["error_code"], "siwc_sentinel_failed")
+                    self.assertTrue(result["retryable"])
+                    self.assertEqual(attempts, ["authorize_continue"] * fail_at)
+                    self.assertEqual([c["path"] for c in scenario.calls if c["path"] in endpoints], endpoints[:fail_at - 1])
+                    self.assertEqual(scenario.tokens, 0)
+                    self.assertEqual(scenario.identifiers, 1)
+                    self.assertNotIn("private-sentinel-generation-error", scenario.logs.getvalue())
+
+    def test_sentinel_refresh_is_limited_to_siwc_authorization_endpoints(self):
+        from manager_oauth import upstream
+        from manager_oauth.adapter import ProjectProtocolLogin
+        from manager_oauth.siwc import SIWCProtocolLogin
+        flow = object.__new__(SIWCProtocolLogin)
+        flow.sentinel_token = "existing-login-token"
+        for source, url in [("chatgpt_web", "https://auth.openai.com/api/accounts/client_auth_session_dump"),
+                            ("siwc", "https://auth.openai.com/api/accounts/password/verify"),
+                            ("siwc", "https://auth.openai.com/api/accounts/oauth/token"),
+                            ("siwc", "https://other.example/api/accounts/client_auth_session_dump")]:
+            with self.subTest(source=source, url=url):
+                flow.oauth_authorize_source = source
+                with patch.object(upstream, "generate_openai_sentinel_token") as generate, patch.object(ProjectProtocolLogin, "request") as request:
+                    flow.request(url, headers={"Accept": "application/json"})
+                generate.assert_not_called()
+                request.assert_called_once_with(url, headers={"Accept": "application/json"})
+                self.assertEqual(flow.sentinel_token, "existing-login-token")
 
     def test_callback_validation_precedes_exchange(self):
         for opts in [{"callback": {"state": "wrong"}}, {"callback": {"code": ""}},

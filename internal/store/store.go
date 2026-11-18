@@ -611,7 +611,7 @@ func (s *Store) saveImportedMailAccount(profile model.MailAccountProfile, creden
 		profile.ProAuto.NextCheckAt, profile.ProAuto.RetryAt = nil, nil
 	}
 	// Re-importing ordinary mailbox credentials must preserve the separate SIWC bundle.
-	if credentials.SIWC == nil && encrypted != "" {
+	if (credentials.SIWC == nil || credentials.SIWCWebLink == nil) && encrypted != "" {
 		plain, err := s.decrypt(encrypted)
 		if err != nil {
 			return model.MailAccountProfile{}, err
@@ -620,7 +620,12 @@ func (s *Store) saveImportedMailAccount(profile model.MailAccountProfile, creden
 		if err := json.Unmarshal([]byte(plain), &oldCredentials); err != nil {
 			return model.MailAccountProfile{}, err
 		}
-		credentials.SIWC = oldCredentials.SIWC
+		if credentials.SIWC == nil {
+			credentials.SIWC = oldCredentials.SIWC
+		}
+		if credentials.SIWCWebLink == nil {
+			credentials.SIWCWebLink = oldCredentials.SIWCWebLink
+		}
 	}
 	profile.SIWCPresent = credentials.SIWC != nil && credentials.SIWC.AccessToken != "" && credentials.SIWC.RefreshToken != ""
 	sealed, err := s.encrypt(mustJSON(credentials))

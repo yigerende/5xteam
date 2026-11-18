@@ -268,7 +268,7 @@ func (s *Store) UpdateProAccountIfUnchanged(email string, expected time.Time, mu
 	return s.updateProAccount(email, expected, mutate)
 }
 
-func (s *Store) updateProAccount(email string, expected time.Time, mutate func(*model.MailAccountProfile)) (model.MailAccountProfile, error) {
+func (s *Store) updateProAccount(email string, expected time.Time, mutate func(*model.MailAccountProfile), webLink ...*model.SIWCLinkedWebCredentials) (model.MailAccountProfile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	email = strings.ToLower(strings.TrimSpace(email))
@@ -307,6 +307,37 @@ func (s *Store) updateProAccount(email string, expected time.Time, mutate func(*
 		(p.ProAuto.Status == "running" && (p.ProAuto.Stage == "merge" || p.ProAuto.Stage == "deactivate"))
 	if mutate != nil {
 		mutate(&p)
+	}
+	if len(webLink) > 0 && p.ProPushDownstream != nil && p.Sub2AccountID > 0 {
+		rows, e := s.db.Query("SELECT profile FROM mail_accounts WHERE email<>? AND json_extract(profile,'$.sub2_account_id')=?", email, p.Sub2AccountID)
+		if e != nil {
+			return p, e
+		}
+		conflict := false
+		for rows.Next() {
+			var otherRaw string
+			var other model.MailAccountProfile
+			if e = rows.Scan(&otherRaw); e != nil {
+				break
+			}
+			if e = json.Unmarshal([]byte(otherRaw), &other); e != nil {
+				break
+			}
+			if other.ProPushDownstream != nil && other.ProPushDownstream.Matches(*p.ProPushDownstream) {
+				conflict = true
+				break
+			}
+		}
+		if e == nil {
+			e = rows.Err()
+		}
+		rows.Close()
+		if e != nil {
+			return p, e
+		}
+		if conflict {
+			return p, errors.New("这个 Sub 账号已关联其他 Space 账号，未重复关联")
+		}
 	}
 	if previous.ProDead != nil {
 		p.ProDead = previous.ProDead
@@ -369,6 +400,26 @@ func (s *Store) updateProAccount(email string, expected time.Time, mutate func(*
 	if err != nil {
 		return p, err
 	}
+	var linkedSealed string
+	if len(webLink) > 0 {
+		var current string
+		if err = s.db.QueryRow("SELECT encrypted_credentials FROM mail_accounts WHERE email=?", email).Scan(&current); err != nil {
+			return p, err
+		}
+		plain, e := s.decrypt(current)
+		if e != nil {
+			return p, e
+		}
+		var credentials model.MailAccountCredentials
+		if e = json.Unmarshal([]byte(plain), &credentials); e != nil {
+			return p, e
+		}
+		credentials.SIWCWebLink = webLink[0]
+		linkedSealed, err = s.encrypt(mustJSON(credentials))
+		if err != nil {
+			return p, err
+		}
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return p, err
@@ -376,6 +427,11 @@ func (s *Store) updateProAccount(email string, expected time.Time, mutate func(*
 	defer tx.Rollback()
 	if _, err = tx.Exec("UPDATE mail_accounts SET profile=?,updated_at=? WHERE email=?", string(encoded), formatTime(p.UpdatedAt), email); err != nil {
 		return p, err
+	}
+	if len(webLink) > 0 {
+		if _, err = tx.Exec("UPDATE mail_accounts SET encrypted_credentials=? WHERE email=?", linkedSealed, email); err != nil {
+			return p, err
+		}
 	}
 	// Archive the old round in the same transaction that accepts/resets a
 	// manual restart. Never include credentials or the whole account profile.

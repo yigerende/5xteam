@@ -160,18 +160,30 @@ type AccountPlanCheckResult struct {
 }
 
 type MailAccountCredentials struct {
-	SIWC             *SIWCCredentials `json:"siwc,omitempty"`
-	Email            string           `json:"email"`
-	MailPassword     string           `json:"mail_password"`
-	ClientID         string           `json:"client_id"`
-	MailRefreshToken string           `json:"mail_refresh_token"`
-	PickupURL        string           `json:"pickup_url"`
-	GptPassword      string           `json:"gpt_password"`
-	TotpSecret       string           `json:"totp_secret"`
-	AccessToken      string           `json:"access_token"`
-	RefreshToken     string           `json:"refresh_token"`
-	IDToken          string           `json:"id_token"`
-	ChatGPTSession   string           `json:"chatgpt_session"`
+	SIWCWebLink      *SIWCLinkedWebCredentials `json:"siwc_web_link,omitempty"`
+	SIWC             *SIWCCredentials          `json:"siwc,omitempty"`
+	Email            string                    `json:"email"`
+	MailPassword     string                    `json:"mail_password"`
+	ClientID         string                    `json:"client_id"`
+	MailRefreshToken string                    `json:"mail_refresh_token"`
+	PickupURL        string                    `json:"pickup_url"`
+	GptPassword      string                    `json:"gpt_password"`
+	TotpSecret       string                    `json:"totp_secret"`
+	AccessToken      string                    `json:"access_token"`
+	RefreshToken     string                    `json:"refresh_token"`
+	IDToken          string                    `json:"id_token"`
+	ChatGPTSession   string                    `json:"chatgpt_session"`
+}
+
+// A manually linked remote authorization stays owned by Sub2. Space stores
+// only its independent web-quota credential, never invented OAuth tokens.
+type SIWCLinkedWebCredentials struct {
+	Endpoint       string             `json:"endpoint"`
+	AccountID      int64              `json:"account_id"`
+	Email          string             `json:"email"`
+	WebAccessToken string             `json:"web_access_token,omitempty"`
+	WebAccountID   string             `json:"web_account_id,omitempty"`
+	WebQuota       *SIWCWebQuotaState `json:"web_quota,omitempty"`
 }
 
 // SIWC credentials are separate from the Codex and Web login credentials.

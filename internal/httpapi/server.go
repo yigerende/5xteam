@@ -387,6 +387,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pro-accounts/oauth/complete", s.completeProOAuth)
 	mux.HandleFunc("POST /api/pro-accounts/{email}/oauth/refresh", s.refreshProOAuth)
 	mux.HandleFunc("POST /api/pro-accounts/{email}/push", s.pushProAccount)
+	mux.HandleFunc("POST /api/pro-accounts/{email}/link-sub", s.linkProSubAccount)
 	mux.HandleFunc("POST /api/pro-accounts/push", s.pushProAccounts)
 	mux.HandleFunc("POST /api/pro-accounts/{email}/quota", s.checkProAccountQuota)
 	mux.HandleFunc("POST /api/pro-accounts/quota", s.checkProAccountQuotas)

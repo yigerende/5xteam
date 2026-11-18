@@ -33,9 +33,33 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
         return adapter.exchange_oauth_callback(callback)
 
     def request(self, url, **kwargs):
-        if urlsplit(url).path in {"/api/accounts/session/select", "/api/accounts/client_auth_session_dump",
-                                  "/api/accounts/dynamic-agent-clients/consent/grant"} and self.sentinel_token:
-            kwargs["headers"] = {**(kwargs.get("headers") or {}), "openai-sentinel-token": self.sentinel_token}
+        parsed = urlsplit(url)
+        if (getattr(self, "oauth_authorize_source", "") == "siwc"
+                and (parsed.scheme, parsed.netloc) == ("https", "auth.openai.com")
+                and parsed.path in {"/api/accounts/session/select", "/api/accounts/client_auth_session_dump",
+                                    "/api/accounts/dynamic-agent-clients/consent/grant"}):
+            # Each SIWC action gets a fresh authorize_continue challenge. The
+            # password/email token belongs to the earlier login transaction.
+            # Keep the live auth client, its cookies, device and sticky proxy.
+            self.sentinel_token = ""
+            started = time.monotonic()
+            try:
+                token = upstream.generate_openai_sentinel_token(
+                    self.device_id, "authorize_continue", self.proxy_url)
+            except Exception:
+                token = ""
+            if not isinstance(token, str) or not token.strip():
+                bridge.emit("siwc_sentinel", "refresh_failed", "SIWC 授权校验令牌生成失败",
+                            details={"endpoint": parsed.path, "flow": "authorize_continue"}, level="warning",
+                            duration_ms=int((time.monotonic() - started) * 1000))
+                raise upstream.LoginFlowError("SIWC 授权校验令牌生成失败，请重试",
+                                             code="siwc_sentinel_failed", retryable=True)
+            self.sentinel_token = token
+            bridge.protect_code(token)
+            kwargs["headers"] = {**(kwargs.get("headers") or {}), "openai-sentinel-token": token}
+            bridge.emit("siwc_sentinel", "refreshed", "SIWC 授权校验令牌已刷新",
+                        details={"endpoint": parsed.path, "flow": "authorize_continue"},
+                        duration_ms=int((time.monotonic() - started) * 1000))
         return super().request(url, **kwargs)
 
     def prepare_oauth_authorize_url(self):
