@@ -33,7 +33,9 @@ class ContinuousSessionTest(unittest.TestCase):
 
     def scenario(self, drift_at=0, relogin=False, payment_error=False, bad_trace_at=0,
                  expected_ip='198.51.100.8', real_login=False, login_mode='email_otp', trace_error_at=0,
-                 all_unavailable=False, request_error_path='', request_error='CONNECT tunnel failed, response 504'):
+                 all_unavailable=False, request_error_path='', request_error='CONNECT tunnel failed, response 504',
+                 email_offer=False, extra_email='', dump_email='pro@example.com', password_status=200,
+                 mailbox_code='234567', return_password=False):
         clients, calls, events, diagnostics = [], [], [], []
         outer = self
         proxy = 'http://sticky:pass@proxy.test:80'
@@ -66,7 +68,22 @@ class ContinuousSessionTest(unittest.TestCase):
                 outer.assertIn('auth-cookie', [c.value for c in self.cookies.jar])
                 if real_login:
                     if path=='/api/accounts/authorize/continue':
+                        if email_offer:
+                            return Response(url,body={'page':{'type':'email_otp_verification','payload':{'email_verification_mode':'passwordless_login'}},'continue_url':'/email-verification'})
                         return Response(url,body={'page':{'type':'login_password' if login_mode=='password_totp' else 'email_otp_verification'}})
+                    if path=='/api/accounts/client_auth_session_dump':
+                        outer.assertEqual(method,'GET')
+                        self.cookies.set('password-state','same-login','auth.openai.com','/')
+                        return Response(url,body={'client_auth_session':{'email':dump_email,'email_verification_mode':'passwordless_login'}})
+                    if path=='/api/accounts/password/verify':
+                        if email_offer:outer.assertIn('same-login',[c.value for c in self.cookies.jar])
+                        if password_status!=200:return Response(url,status=password_status,body={'error':{'code':'invalid_password'}})
+                        if return_password:return Response(url,body={'page':{'type':'login_password'}})
+                        if extra_email=='password':return Response(url,body={'page':{'type':'email_otp_verification'},'continue_url':'/email-verification'})
+                    if path=='/api/accounts/mfa/verify' and extra_email in ('mfa','repeat'):
+                        return Response(url,body={'page':{'type':'email_otp_verification'},'continue_url':'/email-verification'})
+                    if path=='/api/accounts/email-otp/validate' and extra_email=='repeat':
+                        return Response(url,body={'page':{'type':'mfa_challenge','payload':{'factors':[{'id':'factor','factor_type':'totp'}]}}})
                     if path=='/api/accounts/password/verify' or (path=='/api/accounts/email-otp/validate' and login_mode=='email_mfa'):
                         return Response(url,body={'page':{'type':'mfa_challenge','payload':{'factors':[{'id':'factor','factor_type':'totp'}]}}})
                     if path=='/api/accounts/mfa/issue_challenge':return Response(url)
@@ -121,7 +138,10 @@ class ContinuousSessionTest(unittest.TestCase):
             if not real_login:
                 stack.enter_context(patch.object(pro.ContinuousProLogin,'login',login))
             stack.enter_context(patch.object(upstream,'generate_openai_sentinel_token',side_effect=sentinel))
-            stack.enter_context(patch.object(upstream,'fetch_login_verification_code',return_value='234567'))
+            def pickup(*args,**kwargs):
+                events.append('pickup')
+                return mailbox_code
+            stack.enter_context(patch.object(upstream,'fetch_login_verification_code',side_effect=pickup))
             stack.enter_context(patch.object(pro.time,'sleep',lambda *_:None))
             stack.enter_context(patch.object(pro.bridge,'emit',side_effect=lambda *a,**k:diagnostics.append((a,k))))
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
@@ -141,7 +161,44 @@ class ContinuousSessionTest(unittest.TestCase):
             self.assertTrue(all(c['client_consistent'] and not c['relogin'] for c in self.comparisons))
             self.assertEqual([c['credentials_saved'] for c in self.comparisons],[False,False,True])
             self.assertLess(calls.index('/oauth/token'),max(i for i,c in enumerate(calls) if c=='/api/auth/session'))
-        return result,events,calls
+        self.pickup_count=events.count('pickup')
+        self.sequence=list(events)
+        return result,[e for e in events if e!='pickup'],calls
+
+    def test_first_email_offer_uses_password_totp_without_mailbox(self):
+        result,events,calls=self.scenario(real_login=True,login_mode='password_totp',email_offer=True)
+        self.assertTrue(result['success'],result)
+        self.assertEqual(self.pickup_count,0)
+        expected=['/api/accounts/authorize/continue','/api/accounts/client_auth_session_dump','/api/accounts/password/verify','/api/accounts/mfa/issue_challenge','/api/accounts/mfa/verify']
+        self.assertEqual([p for p in calls if p in expected],expected)
+        self.assertEqual(events.count('pay'),1);self.assertEqual(events.count('tokens'),1)
+
+    def test_email_after_password_or_totp_uses_original_mailbox(self):
+        for stage in ('password','mfa'):
+            result,events,calls=self.scenario(real_login=True,login_mode='password_totp',email_offer=True,extra_email=stage)
+            self.assertTrue(result['success'],result)
+            self.assertEqual(self.pickup_count,1)
+            self.assertEqual(calls.count('/api/accounts/password/verify'),1)
+            self.assertLess(calls.index('/api/accounts/password/verify'),calls.index('/api/accounts/email-otp/validate'))
+            self.assertLess(self.sequence.index('pickup'),self.sequence.index('pay'))
+
+    def test_incomplete_password_or_required_email_cannot_reach_payment(self):
+        for options in ({'dump_email':'other@example.com'},{'password_status':401},
+                        {'extra_email':'mfa','mailbox_code':''},{'return_password':True},
+                        {'extra_email':'repeat'},
+                        {'request_error_path':'/api/accounts/client_auth_session_dump'}):
+            result,events,calls=self.scenario(real_login=True,login_mode='password_totp',email_offer=True,**options)
+            self.assertFalse(result['success'],options)
+            self.assertNotIn('pay',events);self.assertNotIn('tokens',events)
+            self.assertLessEqual(calls.count('/api/accounts/password/verify'),1)
+            self.assertLessEqual(self.pickup_count,1)
+
+    def test_explicit_email_mode_keeps_mailbox_login(self):
+        result,events,calls=self.scenario(real_login=True,login_mode='email_otp',email_offer=True)
+        self.assertTrue(result['success'],result)
+        self.assertEqual(self.pickup_count,1)
+        self.assertNotIn('/api/accounts/password/verify',calls)
+        self.assertNotIn('/api/accounts/client_auth_session_dump',calls)
     def test_keeps_one_client_through_payment_and_oauth(self):
         result,events,calls=self.scenario();self.assertTrue(result['success'],result)
         self.assertEqual(events,['ip1','ip2','login','ip3','pay','ip4','ip5','ip6','tokens','close']);self.assertEqual(calls.count('/oauth/token'),1)
