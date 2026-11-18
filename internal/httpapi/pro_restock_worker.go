@@ -224,7 +224,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 				cancel()
 				if ae == nil {
 					for _, a := range accounts {
-						if a.ID == t.AccountID && a.Ready(now, pinned.Sub2.Models) {
+						if a.ID == t.AccountID && a.Ready(now) {
 							verified = true
 						}
 					}
@@ -235,7 +235,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Status = "ready"
 			t.ReadyAt = &now
 			t.ETA = nil
-			t.Message = "已核验 Sub2 账号、组归属、模型和可调度状态"
+			t.Message = "已核验 Sub2 账号、组归属和可调度状态"
 		} else if profile.ProAuto.ID != "" {
 			t.Status = "running"
 			t.Message = profile.ProAuto.DisplayError()

@@ -140,7 +140,7 @@ func (s *Server) appendSIWCRestock(ctx context.Context, c restock.Config, p mode
 			if demandServerKey(target.Sub2.URL) == demandServerKey(p.Sub2.URL) {
 				id = a.ID
 			}
-			v := restock.Account{ID: id, RemoteID: a.ID, SourceURL: target.Sub2.URL, TargetID: targetID, Name: a.Name, Plan: a.Credentials.Plan, Capacity: a.Concurrency, Ready: a.Ready(time.Now(), target.Sub2.Models), Shared: len(a.GroupIDs) > 1, Fault: a.Status == "error"}
+			v := restock.Account{ID: id, RemoteID: a.ID, SourceURL: target.Sub2.URL, TargetID: targetID, Name: a.Name, Plan: a.Credentials.Plan, Capacity: a.Concurrency, Ready: a.Ready(time.Now()), Shared: len(a.GroupIDs) > 1, Fault: a.Status == "error"}
 			l, ok := loads.Account[a.ID]
 			if !ok || l.AccountID != a.ID || l.Capacity != a.Concurrency || l.Used < 0 || l.Waiting < 0 || l.Known != nil && !*l.Known {
 				return errors.New("SIWC 账号容量或并发数据不完整")

@@ -326,7 +326,7 @@ func (s *Server) runProSIWC(ctx context.Context, email string) error {
 		}
 		ready := false
 		for _, a := range as {
-			if a.ID == v.AccountID && a.Ready(time.Now(), target.Sub2.Models) {
+			if a.ID == v.AccountID && a.Ready(time.Now()) {
 				l, ok := loads.Account[a.ID]
 				ready = ok && l.AccountID == a.ID && l.Capacity == a.Concurrency && l.Used >= 0 && l.Waiting >= 0 && (l.Known == nil || *l.Known) && validDemandLoads(loads, time.Now(), 30) && len(as) == len(loads.Account) && (v.ReadyAt == nil || !loads.At.Before(*v.ReadyAt))
 			}

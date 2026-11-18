@@ -230,7 +230,7 @@ func (s *Server) collectProRestock(ctx context.Context, c restock.Config, p mode
 	}
 	members := make([]string, 0, len(accounts))
 	for _, a := range accounts {
-		members = append(members, fmt.Sprintf("%d:%s:%t", a.ID, a.Credentials.Plan, a.Ready(now, p.Sub2.Models)))
+		members = append(members, fmt.Sprintf("%d:%s:%t", a.ID, a.Credentials.Plan, a.Ready(now)))
 	}
 	sort.Strings(members)
 	moneyScope := fmt.Sprintf("%s:%v:%t:%s:%v", snap.Binding, snap.MonitorGroups, scoped, tc.Role, members)
@@ -241,7 +241,7 @@ func (s *Server) collectProRestock(ctx context.Context, c restock.Config, p mode
 		s.proRestock.moneyGeneration++
 	}
 	for _, a := range accounts {
-		v := restock.Account{Fault: a.Status == "error" || (a.OverloadUntil != nil && a.OverloadUntil.After(now)) || (a.TempUntil != nil && a.TempUntil.After(now)), ID: a.ID, Name: a.Name, Plan: a.Credentials.Plan, Ready: a.Ready(now, p.Sub2.Models), Shared: len(a.GroupIDs) > 1, Capacity: a.Concurrency, Windows: append([]restock.Window{}, s.proRestock.quota[a.ID]...)}
+		v := restock.Account{Fault: a.Status == "error" || (a.OverloadUntil != nil && a.OverloadUntil.After(now)) || (a.TempUntil != nil && a.TempUntil.After(now)), ID: a.ID, Name: a.Name, Plan: a.Credentials.Plan, Ready: a.Ready(now), Shared: len(a.GroupIDs) > 1, Capacity: a.Concurrency, Windows: append([]restock.Window{}, s.proRestock.quota[a.ID]...)}
 		v.Money = s.proRestock.money[a.ID]
 		if scoped {
 			_, local := own[a.ID]

@@ -119,7 +119,7 @@ func TestSIWCTransferWarmupFreshMonitorAndOriginalDeadline(t *testing.T) {
 			write(map[string]any{"access_token": "test"})
 		case "/api/v1/admin/accounts":
 			calls++
-			write(map[string]any{"total": 1, "items": []any{map[string]any{"id": 42, "group_ids": []int64{7, 8}, "platform": "openai", "status": "active", "schedulable": true, "concurrency": 20}}})
+			write(map[string]any{"total": 1, "items": []any{map[string]any{"id": 42, "group_ids": []int64{7, 8}, "platform": "openai", "status": "active", "schedulable": true, "concurrency": 20, "credentials": map[string]any{"model_mapping": map[string]string{"gpt-6.1-sol": "gpt-6.1-sol"}}}}})
 		case "/api/v1/admin/ops/concurrency":
 			at := time.Now()
 			if stale {
@@ -135,6 +135,7 @@ func TestSIWCTransferWarmupFreshMonitorAndOriginalDeadline(t *testing.T) {
 	cfg := model.DefaultProSIWCSettings()
 	cfg.Sub2.URL = remote.URL
 	cfg.Sub2.Email = "admin@example.test"
+	cfg.Sub2.Models = []string{"gpt-6.1-sol", "gpt-6.2-sol"}
 	cfg.Sub2.GroupIDs = []int64{7}
 	cfg.MonitorGroupIDs = []int64{7, 8}
 	if _, e := f.s.store.SaveProSIWCSettings(cfg, "test"); e != nil {
@@ -235,7 +236,7 @@ func TestSIWCCombinedRestockCapacityDemandAndMissingLoads(t *testing.T) {
 		case "/api/v1/auth/login":
 			write(map[string]any{"access_token": "test"})
 		case "/api/v1/admin/accounts":
-			write(map[string]any{"total": 1, "items": []any{map[string]any{"id": 42, "group_ids": []int64{7, 8}, "platform": "openai", "status": "active", "schedulable": true, "concurrency": 20}}})
+			write(map[string]any{"total": 1, "items": []any{map[string]any{"id": 42, "group_ids": []int64{7, 8}, "platform": "openai", "status": "active", "schedulable": true, "concurrency": 20, "credentials": map[string]any{"model_mapping": map[string]string{"gpt-6.1-sol": "gpt-6.1-sol"}}}}})
 		case "/api/v1/admin/ops/concurrency":
 			load := map[string]any{}
 			if !broken {
@@ -251,6 +252,7 @@ func TestSIWCCombinedRestockCapacityDemandAndMissingLoads(t *testing.T) {
 	cfg := model.DefaultProSIWCSettings()
 	cfg.Sub2.URL = remote.URL
 	cfg.Sub2.Email = "admin@example.test"
+	cfg.Sub2.Models = []string{"gpt-6.1-sol", "gpt-6.2-sol"}
 	cfg.Sub2.GroupIDs = []int64{7, 8}
 	target, e := f.s.store.SaveDownstreamTarget(model.DownstreamTarget{Scope: "pro-siwc", Provider: "sub2", Sub2: cfg.Sub2, Secret: "test"})
 	if e != nil {
@@ -265,7 +267,7 @@ func TestSIWCCombinedRestockCapacityDemandAndMissingLoads(t *testing.T) {
 	if e = f.s.appendSIWCRestock(context.Background(), c, primary, []model.MailAccountProfile{owner, owner}, &snap); e != nil {
 		t.Fatal(e)
 	}
-	if len(snap.Accounts) != 2 || snap.Accounts[1].ID >= 0 || snap.Accounts[1].RemoteID != 42 || snap.Accounts[1].Used != 6 || snap.Accounts[1].Capacity != 20 {
+	if len(snap.Accounts) != 2 || snap.Accounts[1].ID >= 0 || snap.Accounts[1].RemoteID != 42 || snap.Accounts[1].Used != 6 || snap.Accounts[1].Capacity != 20 || !snap.Accounts[1].Ready {
 		t.Fatalf("cross-server collision or duplicate groups: %+v", snap.Accounts)
 	}
 	broken = true

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -65,29 +64,16 @@ func CountGroupOAuth(accounts []MonitorAccount, group int64) (int, error) {
 	return count, nil
 }
 
-func (a MonitorAccount) Ready(now time.Time, models []string) bool {
+// Ready reports account-wide supply availability. Model mappings control
+// request routing; a missing model does not remove the account's other traffic
+// or capacity from group monitoring.
+func (a MonitorAccount) Ready(now time.Time) bool {
 	if a.Platform != "openai" || a.Status != "active" || !a.Schedulable || a.Concurrency < 1 || (a.ExpiresAt != nil && *a.ExpiresAt <= now.Unix()) {
 		return false
 	}
 	for _, t := range []*time.Time{a.RateLimitResetAt, a.OverloadUntil, a.TempUntil} {
 		if t != nil && t.After(now) {
 			return false
-		}
-	}
-	if len(a.Credentials.Models) > 0 {
-		for _, m := range models {
-			m = strings.TrimSpace(m)
-			supported := false
-			for pattern := range a.Credentials.Models {
-				// Match Sub2's exact or trailing-star model whitelist semantics.
-				if m != "" && (pattern == m || (strings.HasSuffix(pattern, "*") && strings.HasPrefix(m, strings.TrimSuffix(pattern, "*")))) {
-					supported = true
-					break
-				}
-			}
-			if !supported {
-				return false
-			}
 		}
 	}
 	return true

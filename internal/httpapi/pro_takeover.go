@@ -441,7 +441,7 @@ func (s *Server) reconcileTakeoverGroups(ctx context.Context, p model.ProSetting
 		}
 		available := map[int64]sub2.MonitorAccount{}
 		for _, a := range listing {
-			if a.Ready(s.takeoverNow(), p.Sub2.Models) {
+			if a.Ready(s.takeoverNow()) {
 				available[a.ID] = a
 			}
 		}
