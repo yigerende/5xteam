@@ -34,7 +34,7 @@ function close(){if(!saving.value){opened.value=false;editing.value=false;error.
  <button class="btn ghost" type="button" :disabled="disabled" @click="opened=true">退款费用</button>
  <Teleport to="body"><div v-if="opened" class="refund-fee-overlay" @click.self="close" @keydown.esc="close">
   <section class="refund-fee-dialog" role="dialog" aria-modal="true" aria-labelledby="refund-fee-title">
-   <header><div><h2 id="refund-fee-title">清算退款手续费</h2><p>按发生时间计入成本 · 1 USD = 6.7 R</p></div><button type="button" class="btn ghost" aria-label="关闭退款费用" :disabled="saving" @click="close"><X :size="18"/></button></header>
+   <header><div><h2 id="refund-fee-title">清算退款手续费</h2><p>按发生时间单列展示，不计成本或净利润 · 1 USD = 6.7 R</p></div><button type="button" class="btn ghost" aria-label="关闭退款费用" :disabled="saving" @click="close"><X :size="18"/></button></header>
    <p class="refund-fee-note">已入账退款按配置费率自动计费。登记已核对费用时，请关联对应退款流水，登记总额将替代这些流水的估算费用，避免重复计费；多笔关联按退款金额分摊。未关联的登记按额外费用计入。</p>
    <p v-if="error" class="refund-fee-error" role="alert">{{error}}</p>
    <form v-if="editing" @submit.prevent="save">

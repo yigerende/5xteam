@@ -89,11 +89,13 @@ export function financeOverview(data={}) {
   const loss=reasons.length?null:net-externalTransfer-BigInt(paymentOnly.amount)-account-(cents(cardUSD.amount)||0n)-(cents(inFlight.paymentUSD.amount)||0n)-(cents(refundSettlement.amount)||0n)
   const openingFee=money(BigInt(opening.length)*50n)
   let earnings=financeProfit({openingUSD:openingFee,reversalUSD:reversal.usd.amount??(!reversal.count?'0.00':null),rechargeUSD:money(deposit),clearingUSD:platformClearingUSD,refundUSD:refundFees.amount,merchantUSD:merchantFee,deadUSD:money(BigInt(dead.amount)),consumption:consumption.total,
-    costMissing:dead.missing+paymentOnly.missing+reversal.missing+reversal.pending+reversal.usd.missing+clearing.missing+clearing.pending+refundFees.missing,consumptionMissing:consumption.missing,estimated:!!reversal.count||clearing.estimated||refundFees.estimated})
+    costMissing:dead.missing+paymentOnly.missing+reversal.missing+reversal.pending+reversal.usd.missing+clearing.missing+clearing.pending,refundMissing:refundFees.missing,consumptionMissing:consumption.missing,estimated:!!reversal.count||clearing.estimated})
   const refundPrincipalUSD=money(cents(tradeMoney(clearing.entries.filter(e=>e.refund&&!e.refundPending&&!e.incomplete).reduce((sum,e)=>sum+(tradeUnits(String(e.usd).replace('-',''))||0n),0n))))
   earnings=cashflowSummary({earnings,clearingUSD:platformClearingUSD,refundPrincipalUSD}).earnings
   const reconciliation=authorizationDiscrepancies(cases,(data.trades||[]).filter(t=>!paymentOnly.rows.some(p=>p.card_id===t.card_id)),cards,operations,inFlight.authorizationKeys)
-  const gap=loss===null||earnings.costUSD===null?null:money(loss-(cents(earnings.costUSD)-deposit-(cents(merchantFee)||0n)))
+  // Cash reconciliation still accounts for disclosed refund fees; excluding
+  // them from operating profit must not manufacture an unexplained cash gap.
+  const gap=loss===null||earnings.costUSD===null||refundFees.missing?null:money(loss-(cents(earnings.costUSD)+(cents(refundFees.amount)||0n)-deposit-(cents(merchantFee)||0n)))
   const closurePending=reconciliation.unaccountedUSD.missing?null:reconciliation.unaccountedUSD.amount??'0.00'
   const unexplained=gap===null||closurePending===null?null:money(cents(gap)-cents(closurePending))
   const assets=reasons.length?null:money(account+(cents(cardUSD.amount)||0n)+(cents(inFlight.paymentUSD.amount)||0n)+(cents(refundSettlement.amount)||0n))
@@ -244,7 +246,7 @@ export function eventAmountR(event) {
   return usdToR(event.kind==='opening'?event.amount:event.usd)
 }
 function summarizeEvents(events) {
-  let usd=0n,usdt=0n,reversalUSD=0n,rechargeUSD=0n,clearingUSD=0n,externalTransferUSD=0n,refundUSD=0n,merchantUSD=0n,deadUSD=0n,refundPrincipalUSD=0n,refundPrincipalMissing=0,r=0,missing=0,consumptionMissing=0,opening=0
+  let usd=0n,usdt=0n,reversalUSD=0n,rechargeUSD=0n,clearingUSD=0n,externalTransferUSD=0n,refundUSD=0n,refundMissing=0,merchantUSD=0n,deadUSD=0n,refundPrincipalUSD=0n,refundPrincipalMissing=0,r=0,missing=0,consumptionMissing=0,opening=0
   const original=new Map()
   for(const e of events){
     if(e.kind==='consumption'){
@@ -260,6 +262,11 @@ function summarizeEvents(events) {
     if(e.kind==='reversal'&&e.amount!==null){const n=cents(e.amount);if(n!==null)original.set(e.currency,(original.get(e.currency)||0n)+n)}
     const raw=e.usd_precise??e.usd
     const n=cents(raw)===null?null:BigInt(String(raw).replace('-','').split('.')[0])*1000000n+BigInt((String(raw).split('.')[1]||'').padEnd(6,'0'))
+    if(e.kind==='refund'){
+      if(n===null||e.incomplete)refundMissing++
+      else refundUSD+=String(raw).startsWith('-')?-n:n
+      continue
+    }
     if(n===null||e.incomplete){missing++;continue}
     const signed=String(raw).startsWith('-')?-n:n
     usd+=signed
@@ -267,13 +274,12 @@ function summarizeEvents(events) {
     if(e.kind==='recharge')rechargeUSD+=signed
     if(e.kind==='clearing')clearingUSD+=signed
     if(e.externalTransfer)externalTransferUSD-=signed
-    if(e.kind==='refund')refundUSD+=signed
     if(e.kind==='merchant')merchantUSD+=signed
  if(e.kind==='dead')deadUSD+=signed
   }
   const rounded=n=>money(((n<0n?-n:n)+5000n)/10000n*(n<0n?-1n:1n))
-  const earnings=financeProfit({openingUSD:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),consumption:r,costMissing:missing,consumptionMissing,estimated:events.some(e=>e.kind==='reversal'||e.estimated)})
-  return {refundPrincipalUSD:refundPrincipalMissing?null:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),r,missing:missing+consumptionMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
+  const earnings=financeProfit({openingUSD:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),consumption:r,costMissing:missing,consumptionMissing,refundMissing,estimated:events.some(e=>e.kind!=='refund'&&(e.kind==='reversal'||e.estimated))})
+  return {refundPrincipalUSD:refundPrincipalMissing?null:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:refundMissing?null:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),r,missing:missing+consumptionMissing+refundMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
 }
 export function prepareFinanceReport(data,history={}) {
   return {all:financeEvents(data,history),overview:financeOverview({...data,consumption_history:history.consumption||data.consumption_history})}
@@ -289,6 +295,26 @@ function cashflowSummary(row) {
   row.earnings={...row.earnings,refundPrincipalR:usdToR(row.refundPrincipalUSD)}
   return row
 }
+export function openedAccountRows(cases=[],range=periodRange('all')) {
+  const accounts=new Map()
+  for(const row of cases){
+    if(row.payment_status!=='success'||row.plan==='codex_point')continue
+    const at=financeTime(row.opened_at)
+    // Order creation/refund times cannot stand in for a missing opening time.
+    if(at===null||at<range.start||at>=range.end)continue
+    const key=String(row.email||'').trim().toLowerCase()
+    if(!key)continue
+    const previous=accounts.get(key)
+    // The count and drill-down share one deduplicated set. Show the latest
+    // successful opening within the selected period for repeat subscribers.
+    if(previous&&financeTime(previous.opened_at)>=at)continue
+    accounts.set(key,{email:key,opened_at:row.opened_at,plan:row.plan||'',state:row.state||'',deleted:!!row.deleted,last4:String(row.last4||'').slice(-4)})
+  }
+  return [...accounts.values()].sort((a,b)=>financeTime(b.opened_at)-financeTime(a.opened_at)||a.email.localeCompare(b.email))
+}
+export function openedAccountCount(cases=[],range=periodRange('all')) {
+  return openedAccountRows(cases,range).length
+}
 export function financeReport(data,history={},mode='day',date=beijingDay(),prepared=null) {
   const range=periodRange(mode,date),{all,overview}=prepared||prepareFinanceReport(data,history)
   const events=all.filter(e=>mode==='all'||e.month&&mode==='month'&&e.month===date.slice(0,7)||e.at!==null&&e.at>=range.start&&e.at<range.end)
@@ -300,7 +326,7 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
     summary.rechargeUSD=overview.depositFee
     summary.externalTransferUSD=overview.externalTransfer
     summary.clearingUSD=overview.platformClearingUSD
-    summary.usd=overview.depositFee===null?null:money((cents(summary.reversalUSD)||0n)+(cents(summary.clearingUSD)||0n)+(cents(summary.refundUSD)||0n)+(cents(summary.merchantUSD)||0n)+BigInt(overview.dead.amount)+cents(overview.depositFee))
+    summary.usd=overview.depositFee===null?null:money((cents(summary.reversalUSD)||0n)+(cents(summary.clearingUSD)||0n)+(cents(summary.merchantUSD)||0n)+BigInt(overview.dead.amount)+cents(overview.depositFee))
     summary.missing+=overview.consumption.missing
     summary.earnings=overview.earnings
   }
@@ -347,7 +373,8 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
   const firstLoss=first?financeOverview({...first,operations:data.operations||[]}).loss:null,lastLoss=last?financeOverview({...last,operations:data.operations||[]}).loss:null
   const samePolicies=JSON.stringify(first?.payment_policies||[])===JSON.stringify(last?.payment_policies||[])
   const lossChange=samePolicies&&first&&last&&financeTime(first.at)!==financeTime(last.at)&&firstLoss!==null&&lastLoss!==null?money(cents(lastLoss)-cents(firstLoss)):null
-  return {range,summary,events,rows,overview,baseline,refundUnallocated,dailyPending,dailyErrors,historicalPending,periodIncomplete,monthlyUndated,undatedTransfers,undated:all.filter(e=>e.at===null&&!e.month&&e.kind!=='consumption').length,lossChange,firstAt:first?.at,lastAt:last?.at,
+  const openedRows=openedAccountRows(data.cases,range)
+  return {range,openedAccounts:openedRows.length,openedAccountRows:openedRows,summary,events,rows,overview,baseline,refundUnallocated,dailyPending,dailyErrors,historicalPending,periodIncomplete,monthlyUndated,undatedTransfers,undated:all.filter(e=>e.at===null&&!e.month&&e.kind!=='consumption').length,lossChange,firstAt:first?.at,lastAt:last?.at,
     coverage:(history.usage_days||[]).map(r=>r.day).sort()[0]||null}
 }
 

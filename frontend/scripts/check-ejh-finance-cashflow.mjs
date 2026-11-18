@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { financeReport, financeOverview, prepareFinanceReport } from '../src/ejh-finance.js'
+import { financeReport, financeOverview, prepareFinanceReport, dailyFinanceCost } from '../src/ejh-finance.js'
 import { pendingRefundSettlement } from '../src/ejh-refund-settlement.js'
 import { reconciliationCards } from '../src/ejh-reconciliation-view.js'
 import { createEJHFinanceWorker } from '../src/ejh-finance-client.js'
@@ -16,6 +16,26 @@ assert.equal(report.summary.refundPrincipalUSD,'95.00','duplicate refund counted
 assert.equal(report.summary.earnings.costUSD,'0.00')
 assert.equal(report.summary.earnings.refundPrincipalR,'636.5000')
 assert.equal(report.summary.earnings.profitR,'150.0000')
+const withFee={...data,reversal_fee_percent:5}
+const disclosed=financeReport(withFee,history,'day','2026-11-16')
+assert.equal(disclosed.summary.refundUSD,'4.75')
+assert.equal(disclosed.summary.earnings.refundR,'31.8250')
+assert.equal(disclosed.summary.earnings.costUSD,'0.00','cross-day refund fee is separate from the arrival-day operating cost')
+assert.equal(disclosed.summary.earnings.profitR,'150.0000','refund fee is not deducted from arrival-day profit')
+assert.equal(disclosed.summary.refundPrincipalUSD,'95.00','disclosing fees does not reduce gross recovered principal')
+assert.equal(dailyFinanceCost(withFee,'2026-11-16').earnings.costUSD,'0.00','dashboard daily cost uses the same rule')
+for(const mode of ['day','week','month','all']) {
+ const feeReport=financeReport(withFee,history,mode,'2026-11-16')
+ const withoutFee=financeReport(data,history,mode,'2026-11-16')
+ assert.equal(feeReport.summary.earnings.costUSD,withoutFee.summary.earnings.costUSD)
+ assert.equal(feeReport.summary.earnings.profitR,withoutFee.summary.earnings.profitR)
+ assert.equal(feeReport.summary.refundPrincipalUSD,withoutFee.summary.refundPrincipalUSD)
+ for(const row of feeReport.rows) {
+  const before=withoutFee.rows.find(v=>v.day===row.day)
+  assert.equal(row.earnings.costUSD,before.earnings.costUSD)
+  assert.equal(row.earnings.profitR,before.earnings.profitR)
+ }
+}
 assert.equal(financeReport(data,history,'day','2026-11-15').summary.refundPrincipalUSD,'0.00','cash receipt stays on the actual refund day')
 assert.equal(financeReport(data,history,'day','2026-11-15').summary.clearingUSD,'5.00')
 assert.equal(pendingRefundSettlement(data.cards,data.trades).amount,'95.00')

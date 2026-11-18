@@ -27,4 +27,12 @@ assert.equal(usdToR('not money'),null)
 assert.equal(usdToR('100000000000000.01'),'670000000000000.0670','decimal math must not lose cents at large values')
 // Per-card costs deliberately exclude shared recharge fees, which are deducted once in the ledger.
 assert.equal(financeProfit({...input,rechargeUSD:0}).profitR,'79.3980')
+for(const refundUSD of ['18.14', '0.00', null, 'invalid']) {
+  const disclosed=financeProfit({...input,refundUSD})
+  assert.equal(disclosed.costUSD,value.costUSD,'refund fees are not operating costs')
+  assert.equal(disclosed.profitR,value.profitR,'refund fees are disclosure-only, including unknown amounts')
+}
+assert.equal(financeProfit({...input,refundUSD:'18.14'}).refundR,'121.5380')
+assert.equal(financeProfit({...input,refundUSD:'18.14',refundMissing:1}).refundR,null)
+assert.equal(financeProfit({...input,refundUSD:'18.14',refundMissing:1}).profitR,value.profitR)
 console.log('Passed: fixed 6.7 conversion, all costs, losses, zero and negative adjustments, incomplete data and exact decimal rounding')

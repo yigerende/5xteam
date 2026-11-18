@@ -29,7 +29,8 @@ assert.equal(missing.earnings.costUSD,null)
 assert.equal(missing.earnings.costR,null)
 assert.equal(missing.earnings.knownCostUSD,'3.50')
 const datedFee={id:'fee',at,amount:'2',revision:1}
-assert.equal(dailyFinanceCost({...data,refund_fees:[datedFee]},date).earnings.costUSD,'5.50')
+assert.equal(dailyFinanceCost({...data,refund_fees:[datedFee]},date).earnings.costUSD,'3.50','refund fees stay out of daily operating costs')
+assert.equal(dailyFinanceCost({...data,refund_fees:[datedFee]},date).earnings.refundR,'13.4000','refund fees remain available for display')
 const transfer={id:'external',at,delta:'1',baseline:false}
 const adjusted={...data,recharge_ledger:{amount:'1200',external_transfer_amount:'1'},external_transfer_history:[transfer]}
 assert.equal(dailyFinanceCost(adjusted,date).earnings.costUSD,'2.50','dated external reclassification must not inflate costs')
