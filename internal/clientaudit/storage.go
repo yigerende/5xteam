@@ -18,6 +18,7 @@ import (
 
 type Database struct {
 	db   *sql.DB
+	read *sql.DB
 	path string
 }
 
@@ -31,7 +32,6 @@ func OpenDatabase(path string) (*Database, error) {
 		return nil, e
 	}
 	db.SetMaxOpenConns(1)
-	d := &Database{db, path}
 	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS audit_records(source TEXT NOT NULL,entity TEXT NOT NULL,id INTEGER NOT NULL,at INTEGER NOT NULL,user_id INTEGER NOT NULL DEFAULT 0,key_id INTEGER NOT NULL DEFAULT 0,request_id TEXT NOT NULL DEFAULT '',model TEXT NOT NULL DEFAULT '',cost INTEGER NOT NULL DEFAULT 0,raw_cost INTEGER NOT NULL DEFAULT 0,balance_cost INTEGER NOT NULL DEFAULT 0,credit INTEGER NOT NULL DEFAULT 0,flags TEXT NOT NULL DEFAULT '',payload BLOB NOT NULL,PRIMARY KEY(source,entity,id));
  CREATE INDEX IF NOT EXISTS audit_records_time ON audit_records(source,entity,at,user_id);
  CREATE INDEX IF NOT EXISTS audit_records_request ON audit_records(source,entity,key_id,request_id);
@@ -54,9 +54,23 @@ func OpenDatabase(path string) (*Database, error) {
 		db.Close()
 		return nil, e
 	}
-	return d, nil
+	// WAL readers use their own read-only connections, so a long sync batch
+	// cannot monopolize the only connection used by page/status requests.
+	read, e := sql.Open("sqlite", strings.SplitN(dsn, "?", 2)[0]+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+	if e != nil {
+		db.Close()
+		return nil, e
+	}
+	read.SetMaxOpenConns(4)
+	read.SetMaxIdleConns(4)
+	if e = read.Ping(); e != nil {
+		read.Close()
+		db.Close()
+		return nil, e
+	}
+	return &Database{db: db, read: read, path: path}, nil
 }
-func (d *Database) Close() error { return d.db.Close() }
+func (d *Database) Close() error { return errors.Join(d.read.Close(), d.db.Close()) }
 func pack(raw []byte) ([]byte, error) {
 	var b bytes.Buffer
 	w, _ := zlib.NewWriterLevel(&b, zlib.BestSpeed)
@@ -246,7 +260,7 @@ func (d *Database) SaveBatch(ctx context.Context, source, entity string, b Batch
 }
 func (d *Database) Cursor(source, entity string) (Cursor, error) {
 	var raw string
-	e := d.db.QueryRow("SELECT payload FROM audit_cursors WHERE source=? AND entity=?", source, entity).Scan(&raw)
+	e := d.read.QueryRow("SELECT payload FROM audit_cursors WHERE source=? AND entity=?", source, entity).Scan(&raw)
 	if errors.Is(e, sql.ErrNoRows) {
 		return Cursor{}, nil
 	}
@@ -259,7 +273,7 @@ func (d *Database) Cursor(source, entity string) (Cursor, error) {
 func (d *Database) State(source string) (Status, error) {
 	v := Status{Source: source}
 	var raw string
-	e := d.db.QueryRow("SELECT payload FROM audit_state WHERE source=?", source).Scan(&raw)
+	e := d.read.QueryRow("SELECT payload FROM audit_state WHERE source=?", source).Scan(&raw)
 	if errors.Is(e, sql.ErrNoRows) {
 		return v, nil
 	}

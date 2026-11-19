@@ -92,7 +92,7 @@ func (d *Database) Report(ctx context.Context, c Config, a, b int64, query, stat
 	if e != nil {
 		return out, e
 	}
-	tx, e := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, e := d.read.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if e != nil {
 		return out, e
 	}
@@ -376,7 +376,7 @@ func (d *Database) Detail(ctx context.Context, c Config, user, a, b, before int6
 	if entity == "user" && len(positive) > 0 && positive[0] {
 		q = strings.Replace(q, "ORDER BY id DESC", "AND flags='active_positive' ORDER BY id DESC", 1)
 	}
-	rows, e := d.db.QueryContext(ctx, q, c.SourceID(), entity, user, user, a, b, before, before)
+	rows, e := d.read.QueryContext(ctx, q, c.SourceID(), entity, user, user, a, b, before, before)
 	if e != nil {
 		return nil, e
 	}

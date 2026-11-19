@@ -2,6 +2,7 @@ package clientaudit
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -80,15 +81,37 @@ func (e *Engine) verifyCandidates(ctx context.Context, c Config, s Secrets, thro
 }
 
 func (d *Database) Progress(ctx context.Context, c Config) (map[string]any, error) {
+	tx, err := d.read.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	cursors := map[string]Cursor{}
 	for _, entity := range entities {
-		cur, err := d.Cursor(c.SourceID(), entity)
+		cursors[entity] = Cursor{}
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT entity,payload FROM audit_cursors WHERE source=?", c.SourceID())
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var entity, payload string
+		var cur Cursor
+		if err = rows.Scan(&entity, &payload); err == nil {
+			err = json.Unmarshal([]byte(payload), &cur)
+		}
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		cursors[entity] = cur
 	}
-	rows, err := d.db.QueryContext(ctx, "SELECT started,finished,rows_count,message FROM audit_runs WHERE source=? ORDER BY id DESC LIMIT 30", c.SourceID())
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	rows, err = tx.QueryContext(ctx, "SELECT started,finished,rows_count,message FROM audit_runs WHERE source=? ORDER BY id DESC LIMIT 30", c.SourceID())
 	if err != nil {
 		return nil, err
 	}

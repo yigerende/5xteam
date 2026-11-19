@@ -45,7 +45,7 @@ func (d *Database) BackupBalances(ctx context.Context, c Config, objects map[str
 
 func (d *Database) Balances(ctx context.Context, c Config, at int64, query string) (map[string]any, error) {
 	runs := []map[string]any{}
-	rows, err := d.db.QueryContext(ctx, "SELECT at,users,total FROM audit_backup_runs WHERE source=? ORDER BY at DESC LIMIT 200", c.SourceID())
+	rows, err := d.read.QueryContext(ctx, "SELECT at,users,total FROM audit_backup_runs WHERE source=? ORDER BY at DESC LIMIT 200", c.SourceID())
 	if err != nil {
 		return nil, err
 	}
@@ -73,14 +73,14 @@ func (d *Database) Balances(ctx context.Context, c Config, at int64, query strin
 	}
 	var count int
 	var total Money
-	err = d.db.QueryRowContext(ctx, "SELECT users,total FROM audit_backup_runs WHERE source=? AND at=?", c.SourceID(), at).Scan(&count, &total)
+	err = d.read.QueryRowContext(ctx, "SELECT users,total FROM audit_backup_runs WHERE source=? AND at=?", c.SourceID(), at).Scan(&count, &total)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("备份不存在或已超过保留期")
 	}
 	if err != nil {
 		return nil, err
 	}
-	rows, err = d.db.QueryContext(ctx, "SELECT user_id,email,balance,frozen,recharged FROM audit_balance_backups WHERE source=? AND at=? AND (?='' OR instr(lower(email),lower(?))>0 OR cast(user_id AS TEXT)=?) ORDER BY balance DESC,user_id", c.SourceID(), at, query, query, query)
+	rows, err = d.read.QueryContext(ctx, "SELECT user_id,email,balance,frozen,recharged FROM audit_balance_backups WHERE source=? AND at=? AND (?='' OR instr(lower(email),lower(?))>0 OR cast(user_id AS TEXT)=?) ORDER BY balance DESC,user_id", c.SourceID(), at, query, query, query)
 	if err != nil {
 		return nil, err
 	}
