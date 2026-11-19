@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"chatgpt-space-merge/internal/clientaudit"
 	"chatgpt-space-merge/internal/cpa"
 	"chatgpt-space-merge/internal/gptpay"
 	"chatgpt-space-merge/internal/mailbridge"
@@ -26,6 +27,7 @@ import (
 )
 
 type Server struct {
+	clientAudit               *clientaudit.Engine
 	gptRegister               gptRegisterRuntime
 	notifications             notificationRuntime
 	proQuality                proQualityRuntime
@@ -185,6 +187,9 @@ func New(dataStore *store.Store, jobs *workflow.Manager) (*Server, error) {
 		server.accountCycles.Store(account.ID, account.CycleID)
 	}
 	server.startNotifications()
+	if err := server.startClientAudit(); err != nil {
+		slog.Error("client audit unavailable; other services continue", "error", err)
+	}
 	go server.auditWriter()
 	server.startProAutomationMonitor()
 	server.startProQualityMonitor()
@@ -199,6 +204,9 @@ func (s *Server) Close() {
 		return
 	}
 	s.auditCloseOnce.Do(func() {
+		if s.clientAudit != nil {
+			s.clientAudit.Close()
+		}
 		s.stopGPTRegister()
 		s.stopProQuality()
 		s.stopEJH()
@@ -229,6 +237,7 @@ func (s *Server) Close() {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.registerClientAudit(mux)
 	s.gptRegisterRoutes(mux)
 	s.ejhRoutes(mux)
 	s.nexovccRoutes(mux)

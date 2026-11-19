@@ -18,6 +18,7 @@ import NexovccManagementView from './components/NexovccManagementView.vue'
 import EJHManagementView from './components/EJHManagementView.vue'
 import EJHFinanceView from './components/EJHFinanceView.vue'
 import EJHReconciliationView from './components/EJHReconciliationView.vue'
+import Sub2ApiView from './components/Sub2ApiView.vue'
 import ProxiesView from './components/ProxiesView.vue'
 import SettingsView from './components/SettingsView.vue'
 import NotificationsView from './components/NotificationsView.vue'
@@ -37,6 +38,7 @@ const nav = [
   { id: 'free', label: 'Team 轮转', icon: Waypoints, group: '账号流水线' },
   { id: 'admins', label: '母号管理', icon: UserRoundCog, group: '账号' },
   { id: 'sms', label: '接码管理', icon: Smartphone, group: '账号' },
+  { id: 'client-audit', label: 'Sub2Api', icon: ChartNoAxesCombined, group: '数据' },
   { id: 'history', label: '执行历史', icon: History, group: '数据' },
   { id: 'openai', label: 'OpenAI 账号', icon: Bot, group: '账号' },
   { id: 'proxies', label: '代理管理', icon: Network, group: '系统' },
@@ -177,6 +179,7 @@ onMounted(checkAuth)
       <ProManagementView v-if="settings && current === 'pro'" :accounts="proAccounts" :admin-accounts="adminAccounts" :default-page-size="settings.default_page_size || 10" @reload="syncProAccounts" @open-ejh-card="openEJHCard" @open-nexovcc-card="openNexovccCard" />
       <EJHManagementView v-if="settings && current === 'ejh'" :default-page-size="settings.default_page_size || 10" :entry="ejhEntry" @entry-applied="ejhEntry=null" />
       <NexovccManagementView v-if="settings && current === 'nexovcc'" :default-page-size="settings.default_page_size || 10" :entry="nexovccEntry" @entry-applied="nexovccEntry=null" />
+      <Sub2ApiView v-if="current === 'client-audit'" />
       <EJHFinanceView v-if="settings && current === 'ejh-finance'" :default-page-size="settings.default_page_size || 10" />
       <EJHReconciliationView v-if="settings && current === 'ejh-reconciliation'" :default-page-size="settings.default_page_size || 10" @navigate="selectTab" />
       <template v-if="spaceMergeVisited">
