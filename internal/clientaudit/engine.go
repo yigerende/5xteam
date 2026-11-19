@@ -77,7 +77,7 @@ func (e *Engine) loop(ctx context.Context) {
 			e.mu.Lock()
 			e.running = true
 			e.mu.Unlock()
-			runctx, cancel := context.WithTimeout(ctx, time.Duration(c.RoundSeconds)*time.Second)
+			runctx, cancel := context.WithTimeoutCause(ctx, time.Duration(c.RoundSeconds)*time.Second, errRoundBudget)
 			e.mu.Lock()
 			e.runCancel = cancel
 			e.mu.Unlock()
@@ -99,6 +99,8 @@ func (e *Engine) loop(ctx context.Context) {
 		timer.Reset(time.Second)
 	}
 }
+
+var errRoundBudget = errors.New("sync round budget reached")
 
 var entities = []string{"usage", "billing", "funding", "affiliate", "payment", "audit"}
 
@@ -133,6 +135,12 @@ func (e *Engine) Run(ctx context.Context, c Config, secrets Secrets) (err error)
 	rowsRead := 0
 	status.Coverage = "backfilling"
 	defer func() {
+		// Expiring the configured per-round budget is a normal checkpoint.
+		// database/sql may surface ErrTxDone while rolling back the unfinished
+		// batch; committed rows and their cursor remain atomic.
+		if errors.Is(context.Cause(ctx), errRoundBudget) {
+			err = nil
+		}
 		if err != nil {
 			status.Error = err.Error()
 		} else {

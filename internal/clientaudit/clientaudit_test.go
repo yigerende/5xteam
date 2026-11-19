@@ -324,3 +324,34 @@ func TestBalanceBackupFilterIntervalHistoryAndPrune(t *testing.T) {
 		t.Fatal(v, e)
 	}
 }
+
+type budgetSource struct{ fakeSource }
+
+func (f *budgetSource) Read(ctx context.Context, c Config, s Secrets, entity string, cur Cursor, end time.Time) (Batch, error) {
+	<-ctx.Done()
+	return Batch{}, context.Cause(ctx)
+}
+func TestRoundBudgetCheckpointIsNotSourceFailure(t *testing.T) {
+	d := testDB(t)
+	c := DefaultConfig()
+	c.DBHost = "fixture"
+	c.DBName = "fixture"
+	c.DBUser = "read"
+	c.PauseMS = 0
+	f := &budgetSource{fakeSource: fakeSource{cur: current(time.Now().Add(-time.Hour), "10"), now: time.Now()}}
+	e := NewEngine(d, f, nil)
+	ctx, cancel := context.WithTimeoutCause(t.Context(), 50*time.Millisecond, errRoundBudget)
+	defer cancel()
+	if err := e.Run(ctx, c, Secrets{}); err != nil {
+		t.Fatal("normal budget reported as failure", err)
+	}
+	v, err := d.State(c.SourceID())
+	if err != nil || v.Error != "" || v.LastSuccess == 0 || v.Through != 0 {
+		t.Fatal(v, err)
+	}
+	ctx2, cancel2 := context.WithCancel(t.Context())
+	cancel2()
+	if err = e.Run(ctx2, c, Secrets{}); err == nil {
+		t.Fatal("explicit cancellation hidden")
+	}
+}
