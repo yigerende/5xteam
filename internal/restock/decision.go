@@ -146,7 +146,7 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	arrival := now.Add(time.Duration(lead * float64(time.Minute)))
 	futureCapacity := 0
 	for _, a := range s.Accounts {
-		if usableAt(a, arrival, now, time.Duration(c.QuotaSeconds*2)*time.Second) {
+		if usableAt(a, arrival, now, c.QuotaFreshness()) {
 			futureCapacity += a.Capacity
 		}
 	}

@@ -167,7 +167,7 @@ func (s *Server) appendSIWCRestock(ctx context.Context, c restock.Config, p mode
 			}
 			applySIWCExitPolicy(&v, cfg)
 			for _, w := range v.Windows {
-				if w.Fresh(time.Now(), time.Duration(c.QuotaSeconds*2)*time.Second) && w.Used >= 100 {
+				if w.Fresh(time.Now(), c.QuotaFreshness()) && w.Used >= 100 {
 					v.Ready = false
 				}
 			}

@@ -50,6 +50,7 @@ type Config struct {
 	EmptyGroupCount          int    `json:"empty_group_count"`
 	CheckSeconds             int    `json:"check_seconds"`
 	QuotaSeconds             int    `json:"quota_seconds"`
+	QuotaConcurrency         int    `json:"quota_concurrency"`
 	MoneyWindowMinutes       int    `json:"money_window_minutes"`
 	CooldownSeconds          int    `json:"cooldown_seconds"`
 	EmergencyCooldownSeconds int    `json:"emergency_cooldown_seconds"`
@@ -70,7 +71,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{CapacityPercent: DefaultCapacityPercent, ExitMinutes: 5, ExitWarningPercent: 5, ExitRefreshSeconds: 15, ExitDemandHoldSeconds: 60, NoRestockStart: "00:00", NoRestockEnd: "07:00", ForceMergeMinutes: 15, FaultPercent: 50, Version: 1, Mode: "observe", TimeEnabled: true, TriggerMinutes: 10, TargetMinutes: 15, Early: true, ConcurrencyEnabled: true, TriggerPercent: 85, TargetPercent: 75, Confirmations: 2, EmergencyQueue: 3, MinBatch: 3, MaxBatch: 5, AllowSmall: true, MaxInflight: 6, CheckSeconds: 5, QuotaSeconds: 60, MoneyWindowMinutes: DefaultMoneyWindowMinutes, CooldownSeconds: 60, EmergencyCooldownSeconds: 20, HourLimit: 20, DayLimit: 100, PoolLimit: 100, FailureLimit: 3, FreshSeconds: 20, QuotaCoverage: 80, LeadMinutes: 5, MarginMinutes: 1, ForecastMinutes: 60, LeadSamples: 10, RetentionDays: 7}
+	return Config{CapacityPercent: DefaultCapacityPercent, ExitMinutes: 5, ExitWarningPercent: 5, ExitRefreshSeconds: 15, ExitDemandHoldSeconds: 60, NoRestockStart: "00:00", NoRestockEnd: "07:00", ForceMergeMinutes: 15, FaultPercent: 50, Version: 1, Mode: "observe", TimeEnabled: true, TriggerMinutes: 10, TargetMinutes: 15, Early: true, ConcurrencyEnabled: true, TriggerPercent: 85, TargetPercent: 75, Confirmations: 2, EmergencyQueue: 3, MinBatch: 3, MaxBatch: 5, AllowSmall: true, MaxInflight: 6, CheckSeconds: 5, QuotaSeconds: 60, QuotaConcurrency: 4, MoneyWindowMinutes: DefaultMoneyWindowMinutes, CooldownSeconds: 60, EmergencyCooldownSeconds: 20, HourLimit: 20, DayLimit: 100, PoolLimit: 100, FailureLimit: 3, FreshSeconds: 20, QuotaCoverage: 80, LeadMinutes: 5, MarginMinutes: 1, ForecastMinutes: 60, LeadSamples: 10, RetentionDays: 7}
 }
 func (c Config) Validate() error {
 	if err := c.validateCapacityTiers(); err != nil {
@@ -122,8 +123,8 @@ func (c Config) Validate() error {
 	if c.MinBatch < 1 || c.MaxBatch < c.MinBatch || c.MaxBatch > 100 || c.MaxInflight < c.MinBatch || c.MaxInflight > 1000 || c.Reserve < 0 || c.Reserve > c.PoolLimit {
 		return errors.New("批量、在途或备用上限无效")
 	}
-	if c.CheckSeconds < 2 || c.CheckSeconds > 300 || c.QuotaSeconds < 30 || c.QuotaSeconds > 3600 || c.CooldownSeconds < 1 || c.CooldownSeconds > 86400 || c.EmergencyCooldownSeconds < 1 || c.EmergencyCooldownSeconds > c.CooldownSeconds {
-		return errors.New("检查周期或冷却时间无效")
+	if err := c.validateCadence(); err != nil {
+		return err
 	}
 	if c.HourLimit < 1 || c.DayLimit < c.HourLimit || c.DayLimit > 10000 || c.PoolLimit < 1 || c.PoolLimit > 10000 || c.FailureLimit < 1 || c.FailureLimit > 100 || c.HourBudget < 0 || c.DayBudget < 0 || c.UnitCost < 0 || c.UnitCost > 100000000 || c.HourBudget > 100000000000 || c.DayBudget > 100000000000 {
 		return errors.New("预算、数量限制或熔断参数无效")
@@ -131,7 +132,7 @@ func (c Config) Validate() error {
 	if (c.HourBudget > 0 || c.DayBudget > 0) && c.UnitCost <= 0 {
 		return errors.New("设置金额预算时必须填写每号成本预留，使用与预算一致的记账单位")
 	}
-	if c.FreshSeconds < c.CheckSeconds || c.FreshSeconds > 3600 || c.QuotaCoverage < 1 || c.QuotaCoverage > 100 || c.LeadMinutes < 1 || c.LeadMinutes > 1440 || c.MarginMinutes < 0 || c.MarginMinutes > 120 || c.LeadSamples < 2 || c.LeadSamples > 1000 || c.RetentionDays < 1 || c.RetentionDays > 90 {
+	if c.FreshSeconds < 1 || c.FreshSeconds > 3600 || c.QuotaCoverage < 1 || c.QuotaCoverage > 100 || c.LeadMinutes < 1 || c.LeadMinutes > 1440 || c.MarginMinutes < 0 || c.MarginMinutes > 120 || c.LeadSamples < 2 || c.LeadSamples > 1000 || c.RetentionDays < 1 || c.RetentionDays > 90 {
 		return errors.New("数据保护或就绪耗时参数无效")
 	}
 	return nil

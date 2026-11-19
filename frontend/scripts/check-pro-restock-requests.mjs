@@ -479,3 +479,20 @@ console.log('Passed: high-demand visual settings validation and save/load')
  f.unmounted()
 }
 console.log('Passed: independent history, nonblocking save, polling throttle and initial-load recovery')
+
+// Cadence settings survive the actual form save and server refresh without
+// restoring the former 30-second floor, fixed concurrency, or linked cooldowns.
+{
+ const f=fixture()
+ const config={version:1,enabled:false,check_seconds:1,quota_seconds:10,quota_concurrency:9,cooldown_seconds:0,emergency_cooldown_seconds:120}
+ f.applyConfig(config);f.state.value={config}
+ const saving=f.save();await tick()
+ const put=f.requests.find(r=>r.options.method==='PUT')
+ for(const key of ['check_seconds','quota_seconds','quota_concurrency','cooldown_seconds','emergency_cooldown_seconds'])assert.equal(put.options.body[key],config[key])
+ const saved={...put.options.body,version:2};put.resolve(saved);await saving
+ const refresh=f.requests.find(r=>r.url==='/api/pro-restock');if(refresh)refresh.resolve({config:saved})
+ await tick()
+ assert.equal(f.form.quota_concurrency,9);assert.equal(f.form.quota_seconds,10);assert.equal(f.form.cooldown_seconds,0)
+ f.unmounted()
+}
+console.log('Passed: configurable restock cadence save and reload')

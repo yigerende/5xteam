@@ -221,7 +221,7 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 	}
 	// Percent samples are a fallback, never mixed across plans or reset windows.
 	for _, w := range a.Windows {
-		if seen[w.Seconds] || !w.Fresh(now, time.Duration(c.QuotaSeconds*2)*time.Second) {
+		if seen[w.Seconds] || !w.Fresh(now, c.QuotaFreshness()) {
 			continue
 		}
 		threshold := 100.

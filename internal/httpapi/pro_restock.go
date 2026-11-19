@@ -296,7 +296,7 @@ func (s *Server) collectProRestock(ctx context.Context, c restock.Config, p mode
 			v.Used, v.Waiting = load.Used, load.Waiting
 		}
 		for _, w := range v.Windows {
-			if w.Fresh(now, time.Duration(c.QuotaSeconds*2)*time.Second) && w.Used >= 100 {
+			if w.Fresh(now, c.QuotaFreshness()) && w.Used >= 100 {
 				v.Ready = false
 			}
 		}
@@ -343,12 +343,12 @@ func (s *Server) refreshRestockQuota(c restock.Config, p model.ProSettings, pass
 		defer func() { s.proRestock.mu.Lock(); s.proRestock.quotaBusy = false; s.proRestock.mu.Unlock() }()
 		jobs := make(chan restock.Account)
 		var wg sync.WaitGroup
-		for range 4 {
+		for range min(max(1, c.QuotaConcurrency), len(snap.Accounts)) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for a := range jobs {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					ctx, cancel := context.WithTimeout(context.Background(), restock.QuotaRequestTimeout)
 					target, secret, id, e := s.restockAccountTarget(a, p, password)
 					var q sub2.QuotaUsage
 					if e == nil {
@@ -370,7 +370,7 @@ func (s *Server) refreshRestockQuota(c restock.Config, p model.ProSettings, pass
 							windows = append(windows, restock.Window{Seconds: w.LimitWindowSeconds, ResetAt: reset, Used: w.UsedPercent, At: at})
 						}
 					}
-					windows = restock.ObserveWindows(windows, a.Windows, true, time.Duration(c.QuotaSeconds*3)*time.Second)
+					windows = restock.ObserveWindows(windows, a.Windows, true, c.QuotaObservationAge())
 					s.proRestock.mu.Lock()
 					if s.proRestock.quotaBinding == snap.Binding {
 						s.proRestock.quota[a.ID] = windows
