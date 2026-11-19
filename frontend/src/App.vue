@@ -5,6 +5,7 @@ import {
   Smartphone, Sun, UserRoundCog, UsersRound, Waypoints, X, LogOut, KeyRound, ChartNoAxesCombined,
 } from 'lucide-vue-next'
 import { api } from './api'
+import { financeReportCache } from './ejh-finance-report-client'
 import AdminAccountsView from './components/AdminAccountsView.vue'
 import HistoryView from './components/HistoryView.vue'
 import FreePipelineView from './components/FreePipelineView.vue'
@@ -85,6 +86,7 @@ const activeNav = computed(() => {
 })
 const runtimeHost = window.location.host
 const authenticated = ref(false)
+watch(authenticated, () => financeReportCache.clear(), {flush:'sync'})
 const authReady = ref(false)
 const passwordDialog = ref(false)
 const passwordForm = reactive({ current_password: '', new_password: '', confirm_password: '' })

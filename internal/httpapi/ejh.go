@@ -34,6 +34,7 @@ type ejhRuntime struct {
 	ctx          context.Context
 	views        ejhViewCache
 	overview     ejhOverviewHistory
+	finance      ejhFinanceReports
 	syncClosed   bool // guarded by lifecycle; prevents Add racing shutdown Wait
 }
 
@@ -83,6 +84,7 @@ func (s *Server) ejhRoutes(m *http.ServeMux) {
 	m.HandleFunc("GET /api/ejh/revision", s.ejhRevision)
 	m.HandleFunc("GET /api/ejh/operations", s.ejhOperationProgress)
 	m.HandleFunc("GET /api/ejh/finance", s.ejhFinance)
+	m.HandleFunc("GET /api/ejh/finance/report", s.ejhFinanceReport)
 	m.HandleFunc("POST /api/ejh/sync", s.syncEJH)
 	m.HandleFunc("GET /api/ejh/sync/{id}", s.getEJHSyncTask)
 	m.HandleFunc("POST /api/ejh/open", s.openEJH)

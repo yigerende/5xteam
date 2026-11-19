@@ -81,7 +81,40 @@ func (s *Store) initializeEJHDisplayRevision() error {
 	UPDATE display_revisions SET revision=revision+1 WHERE scope='ejh'; END;`); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(`INSERT OR IGNORE INTO display_revisions VALUES('ejh_finance',1)`); err != nil {
+		return err
+	}
+	for _, event := range []string{"INSERT", "UPDATE", "DELETE"} {
+		row := "NEW"
+		if event == "DELETE" {
+			row = "OLD"
+		}
+		predicate := row + ".kind='finance_usage_day'"
+		if event == "UPDATE" {
+			predicate = "(" + predicate + " OR OLD.kind='finance_usage_day')"
+		}
+		statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS ejh_finance_days_%s AFTER %s ON ejh_records WHEN %s BEGIN
+		UPDATE display_revisions SET revision=revision+1 WHERE scope='ejh_finance'; END;`, strings.ToLower(event), event, predicate)
+		if _, err = tx.Exec(statement); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// Daily financial evidence is not part of the card overview revision.
+func (s *Store) EJHFinanceRevision(ctx context.Context) (string, error) {
+	base, err := s.EJHDisplayRevision(ctx)
+	if err != nil {
+		return "", err
+	}
+	s.revisionMu.Lock()
+	defer s.revisionMu.Unlock()
+	var version int64
+	if err = s.revisionDB.QueryRowContext(ctx, `SELECT revision FROM display_revisions WHERE scope='ejh_finance'`).Scan(&version); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s:finance:%d", base, version), nil
 }
 
 func (s *Store) EJHDisplayRevision(ctx context.Context) (string, error) {

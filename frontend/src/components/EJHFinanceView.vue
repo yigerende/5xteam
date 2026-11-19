@@ -2,17 +2,17 @@
 import { computed, onMounted, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { RefreshCw, ArrowUpRight, ChevronLeft, ChevronRight, Wallet, ChartNoAxesCombined, ReceiptText, X } from 'lucide-vue-next'
 import { api } from '../api'
-import { createEJHFinanceWorker } from '../ejh-finance-client'
-import { applyEJHOverviewResponse } from '../ejh-overview-state'
-import { beijingDay, financeReport, financeTime, eventAmountR, cents, money, financeEventPeriod } from '../ejh-finance'
+import { financeReportCache } from '../ejh-finance-report-client'
+import { beijingDay, financeReport, financeTime, eventAmountR, cents, money } from '../ejh-finance'
 import Pagination from './Pagination.vue'
 import { ejhPageRefreshSeconds } from '../ejhRefresh'
 import { returnStates } from '../ejh'
 import { proPlanName } from '../gptpay'
 const props=defineProps({defaultPageSize:{type:Number,default:10}})
-const data=shallowRef(null),history=shallowRef({}),busy=ref(false),calculating=ref(false),hasReport=ref(false),error=ref(''),updated=ref('')
-const worker=createEJHFinanceWorker()
-let source=null,calculation=0,controller
+const data=shallowRef(null),history=shallowRef({}),busy=ref(false),hasReport=ref(false),error=ref(''),updated=ref('')
+let generation=0,controller,eventsController,accountsController,searchTimer,accountSearchTimer
+const eventsBusy=ref(false),accountsBusy=ref(false),eventsError=ref(''),accountsError=ref('')
+const eventRows=shallowRef([]),eventTotal=ref(0),accountRows=shallowRef([]),accountTotal=ref(0)
 const mode=ref('day'),date=ref(beijingDay()),kind=ref(''),query=ref(''),dayFilter=ref(''),page=ref(1),pageSize=ref(props.defaultPageSize || 10),detail=ref(null)
 const openedExpanded=ref(false),openedQuery=ref(''),openedPage=ref(1),openedPageSize=ref(props.defaultPageSize||10)
 let disposed=false,timer
@@ -27,42 +27,66 @@ const labels={merchant:'API 收费',opening:'开卡费',reversal:'授权撤销�
 const report=shallowRef(financeReport({}, {}, mode.value,date.value))
 const summary=computed(()=>report.value.summary)
 const overview=computed(()=>report.value.overview)
-const openedFiltered=computed(()=>(report.value.openedAccountRows||[]).filter(row=>[row.email,proPlanName(row.plan),row.last4].join(' ').toLowerCase().includes(openedQuery.value.trim().toLowerCase())))
-const openedVisible=computed(()=>openedFiltered.value.slice((openedPage.value-1)*openedPageSize.value,openedPage.value*openedPageSize.value))
+const openedVisible=computed(()=>accountRows.value)
 const openingTime=value=>new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(financeTime(value))
 const trends=computed(()=>report.value.rows.filter(r=>r.day!=='未分期历史').slice(0,31).reverse())
 const earnings=computed(()=>summary.value.earnings)
 const trendMax=computed(()=>Object.fromEntries(['costR','profitR'].map(field=>[field,Math.max(1,...trends.value.map(r=>Math.abs(Number(r.earnings[field])||0)))])))
-const filtered=computed(()=>report.value.events.filter(e=>(!kind.value||(kind.value==='refund_credit'?e.refundPrincipal:e.kind===kind.value&&!e.refundPrincipal))&&(!dayFilter.value||financeEventPeriod(e,mode.value)===dayFilter.value)&&[e.email,e.card,e.reference,e.note].join(' ').toLowerCase().includes(query.value.trim().toLowerCase())))
-const visible=computed(()=>filtered.value.slice((page.value-1)*pageSize.value,page.value*pageSize.value))
+const visible=computed(()=>eventRows.value)
 const when=value=>{const n=typeof value==='number'?value:financeTime(value);return n===null?'未分期历史':new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(n)}
 const numR=value=>value===null?'—':Number(value).toFixed(4)
 const numMoney=value=>money(cents(value))??'待核实'
-watch([mode,date],()=>{page.value=1;openedPage.value=1;openedQuery.value='';dayFilter.value='';detail.value=null;if(data.value)calculate()})
-watch([openedQuery,openedPageSize],()=>openedPage.value=1)
-watch(()=>openedFiltered.value.length,()=>{openedPage.value=Math.min(openedPage.value,Math.max(1,Math.ceil(openedFiltered.value.length/openedPageSize.value)))})
-watch([kind,query,dayFilter,pageSize],()=>page.value=1)
-watch(()=>filtered.value.length,()=>{page.value=Math.min(page.value,Math.max(1,Math.ceil(filtered.value.length/pageSize.value)))})
-async function calculate(){
- const version=++calculation
- calculating.value=true
- try{
-  const result=await worker.calculate(data.value,history.value,mode.value,date.value)
-  if(!disposed&&version===calculation){report.value=result;hasReport.value=true;error.value=''}
- }catch(e){if(!disposed&&version===calculation)error.value=e.message}
- finally{if(!disposed&&version===calculation)calculating.value=false}
+const scope=()=>({mode:mode.value,date:date.value})
+function applyReport(value){data.value=value;history.value=value;report.value=value;updated.value=value.server_time;hasReport.value=true}
+function showCached(){
+ const cached=financeReportCache.peek(scope())
+ if(cached){applyReport(cached);showCachedDetails()}
+ else{hasReport.value=false;data.value=null;eventRows.value=[];accountRows.value=[];report.value=financeReport({}, {},mode.value,date.value)}
 }
+function detailParams(section){return {...scope(),section,revision:report.value.revision,page:section==='accounts'?openedPage.value:page.value,page_size:section==='accounts'?openedPageSize.value:pageSize.value,query:section==='accounts'?openedQuery.value.trim():query.value.trim(),...(section==='events'?{kind:kind.value,day:dayFilter.value}:{})}}
+function showCachedDetails(){
+ const events=financeReportCache.peek(detailParams('events'))
+ eventRows.value=events?.items||[];eventTotal.value=events?.total||0
+ const accounts=financeReportCache.peek(detailParams('accounts'))
+ accountRows.value=accounts?.items||[];accountTotal.value=accounts?.total||0
+}
+async function loadDetails(section){
+ if(disposed||!hasReport.value||!report.value.revision)return
+ const accounts=section==='accounts'
+ if(accounts&&!openedExpanded.value)return
+ const prior=accounts?accountsController:eventsController;prior?.abort()
+ const request=new AbortController(),version=generation,params=detailParams(section)
+ if(accounts)accountsController=request;else eventsController=request
+ const loading=accounts?accountsBusy:eventsBusy,notice=accounts?accountsError:eventsError
+ loading.value=true;notice.value=''
+ const cached=financeReportCache.peek(params)
+ if(cached){if(accounts){accountRows.value=cached.items;accountTotal.value=cached.total}else{eventRows.value=cached.items;eventTotal.value=cached.total}}
+ try{
+  const result=await financeReportCache.read(params,request.signal)
+  if(disposed||version!==generation||request.signal.aborted)return
+  if(accounts){accountRows.value=result.items;accountTotal.value=result.total;if(openedPage.value!==result.page)openedPage.value=result.page}
+  else{eventRows.value=result.items;eventTotal.value=result.total;if(page.value!==result.page)page.value=result.page}
+ }catch(e){if(!disposed&&version===generation&&!request.signal.aborted){if(e.status===409)load();else notice.value=e.message}}
+ finally{if(!disposed&&(accounts?accountsController:eventsController)===request)loading.value=false}
+}
+watch([mode,date],()=>{generation++;controller?.abort();eventsController?.abort();accountsController?.abort();page.value=1;openedPage.value=1;openedQuery.value='';dayFilter.value='';detail.value=null;showCached();load()})
+watch([kind,query,dayFilter,pageSize],()=>{page.value=1;clearTimeout(searchTimer);searchTimer=setTimeout(()=>loadDetails('events'),200)})
+watch(page,()=>loadDetails('events'))
+watch([openedQuery,openedPageSize],()=>{openedPage.value=1;clearTimeout(accountSearchTimer);accountSearchTimer=setTimeout(()=>loadDetails('accounts'),200)})
+watch(openedPage,()=>loadDetails('accounts'))
+watch(openedExpanded,value=>{if(value)loadDetails('accounts');else{accountsController?.abort();accountsBusy.value=false}})
 async function load(){
- if(busy.value||disposed)return
+ if(disposed)return
+ controller?.abort();controller=new AbortController()
+ const request=controller,version=++generation
  busy.value=true;error.value='';clearTimeout(timer)
- controller=new AbortController()
  try{
-  const query=new URLSearchParams({format:'delta',since:source?.revision||''})
-  const [a,b]=await Promise.all([api('/api/ejh/overview?'+query,{signal:controller.signal}),api('/api/ejh/finance?snapshots=none',{signal:controller.signal})])
-  if(!disposed){source=applyEJHOverviewResponse(source,a);data.value=source;history.value=b;updated.value=b.server_time||new Date().toISOString();await calculate()}
- }catch(e){if(!disposed)error.value=e.message}
- finally{if(!disposed){busy.value=false;timer=setTimeout(load,refreshSeconds.value*1000)}}
+  const value=await financeReportCache.read(scope(),request.signal)
+  if(!disposed&&version===generation){applyReport(value);showCachedDetails();loadDetails('events');if(openedExpanded.value)loadDetails('accounts')}
+ }catch(e){if(!disposed&&version===generation&&!request.signal.aborted){error.value=e.message;if(e.status===401){financeReportCache.clear();hasReport.value=false;data.value=null}}}
+ finally{if(!disposed&&version===generation){busy.value=false;timer=setTimeout(load,refreshSeconds.value*1000)}}
 }
+showCached()
 function shift(direction){
  const at=financeTime(date.value+'T12:00:00+08:00');if(at===null)return
  if(mode.value==='month'){const d=new Date(at+8*3600000);d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()+direction);date.value=beijingDay(d.getTime()-8*3600000)}
@@ -70,11 +94,11 @@ function shift(direction){
 }
 function showDay(day){dayFilter.value=day;document.querySelector('#ejh-finance-details')?.scrollIntoView({behavior:'smooth',block:'start'})}
 onMounted(load)
-onBeforeUnmount(()=>{disposed=true;calculation++;clearTimeout(timer);controller?.abort();worker.dispose()})
+onBeforeUnmount(()=>{disposed=true;generation++;clearTimeout(timer);clearTimeout(searchTimer);clearTimeout(accountSearchTimer);controller?.abort();eventsController?.abort();accountsController?.abort()})
 </script>
 <template>
  <div class="finance-page">
-  <header class="finance-heading"><div><span class="eyebrow">EJH · COST & PROFIT</span><h1>成本统计</h1><p>消费收益 − 实际成本 = 净利润 · 退款本金不算收入 · 1 USD = 6.7 R</p></div><button class="btn ghost" :disabled="busy||calculating" @click="load"><RefreshCw :size="14" :class="{spin:busy||calculating}"/>{{busy||calculating?'更新中…':'刷新统计'}}</button></header>
+  <header class="finance-heading"><div><span class="eyebrow">EJH · COST & PROFIT</span><h1>成本统计</h1><p>消费收益 − 实际成本 = 净利润 · 退款本金不算收入 · 1 USD = 6.7 R</p></div><button class="btn ghost" :disabled="busy" @click="load"><RefreshCw :size="14" :class="{spin:busy}"/>{{busy?'更新中…':'刷新统计'}}</button></header>
   <form v-if="periodEditor" class="period-toolbar" @submit.prevent="savePeriod"><label>历史充值归属月份 <input v-model="historyMonth" type="month" required aria-label="历史充值归属月份"/></label><small>只调整历史充值手续费归属，不改变充值金额；具体日期未知时仅计入月报。</small><button class="btn primary" :disabled="savingPeriod">{{savingPeriod?'保存中…':'保存'}}</button><button type="button" class="btn ghost" :disabled="savingPeriod" @click="periodEditor=false">取消</button></form>
   <p v-if="report.monthlyUndated&&['day','week'].includes(mode)" class="finance-notice">有历史充值只确认了月份，尚未分摊到具体日期；该笔手续费仅在对应月报和全部统计中单列展示，不影响成本或净利润。</p>
   <div class="period-toolbar"><div class="period-switch" role="group" aria-label="统计周期"><button v-for="[value,label] in [['day','每天'],['week','每周'],['month','每月'],['all','全部']]" :key="value" :aria-pressed="mode===value" :class="{active:mode===value}" @click="mode=value">{{label}}</button></div><div v-if="mode!=='all'" class="date-controls"><button class="icon-button" aria-label="上一期" @click="shift(-1)"><ChevronLeft :size="16"/></button><input v-model="date" type="date" aria-label="统计日期"/><button class="icon-button" aria-label="下一期" @click="shift(1)"><ChevronRight :size="16"/></button><button class="today" @click="date=beijingDay()">今天</button></div><button class="today" :disabled="!data||busy" @click="editPeriod">充值归属</button><span class="period-label">{{report.range.label}} · 北京时间</span></div>
@@ -83,12 +107,12 @@ onBeforeUnmount(()=>{disposed=true;calculation++;clearTimeout(timer);controller?
   <template v-else>
    <div v-if="history.recording?.error" class="finance-error" role="alert">历史记录保存失败：{{history.recording.error}}。现有统计保留，后台将重试。</div>
    <button type="button" class="period-opened-count" :aria-expanded="openedExpanded" aria-controls="ejh-opened-accounts" @click="openedExpanded=!openedExpanded"><span>本期开通账号</span><strong>{{report.openedAccounts}}</strong><span>个</span><small>按开通时间统计 · 同一账号去重 · 包含申请待回款和已回款账号</small><span class="opened-toggle">{{openedExpanded?'收起明细':'查看账号明细'}} <ChevronRight :size="14" :class="{expanded:openedExpanded}"/></span></button>
-   <section v-if="openedExpanded" id="ejh-opened-accounts" class="finance-panel" aria-label="本期开通账号明细" :aria-busy="calculating">
+   <section v-if="openedExpanded" id="ejh-opened-accounts" class="finance-panel" aria-label="本期开通账号明细" :aria-busy="accountsBusy">
     <div class="panel-heading"><h2>本期开通账号明细 <small>{{report.openedAccounts}} 个</small></h2><small>{{report.range.label}} · 北京时间</small></div>
-    <div class="detail-filters"><input v-model="openedQuery" type="search" aria-label="搜索开通账号、套餐或卡尾号" placeholder="搜索账号、套餐或卡尾号"/></div>
+    <p v-if="accountsError" class="finance-error">{{accountsError}} <button @click="loadDetails('accounts')">重试</button></p><div class="detail-filters"><input v-model="openedQuery" type="search" aria-label="搜索开通账号、套餐或卡尾号" placeholder="搜索账号、套餐或卡尾号"/></div>
     <p class="opened-earnings-note">消费收益与结余为账号当前累计值，与账号详情一致；日期仅筛选开通账号。结余未分摊开卡费。</p>
-    <div class="finance-table"><table><thead><tr><th>账号</th><th>套餐</th><th>开通时间</th><th>当前状态</th><th>卡尾号</th><th>消费收益 R</th><th>账号结余 R</th></tr></thead><tbody><tr v-for="row in openedVisible" :key="row.email"><td>{{row.email}}<small v-if="row.deleted">账号已删除，保留开通记录</small></td><td>{{proPlanName(row.plan)||'—'}}</td><td>{{openingTime(row.opened_at)}}</td><td>{{returnStates[row.state]||'状态未知'}}</td><td>{{row.last4?'尾号 '+row.last4:'—'}}</td><td>{{row.earnings.consumptionR??'—'}}<small v-if="row.earnings.consumptionR===null">{{row.earnings.consumptionNotPushed?'未推送，无消费数据':'未查询'}}</small></td><td><span class="profit-value" :class="{negative:row.earnings.profitR?.startsWith('-')}">{{row.earnings.profitR!==null&&row.earnings.estimated?'≈ ':''}}{{row.earnings.profitR??'—'}}</span><small v-if="row.earnings.reason">{{row.earnings.reason}}</small></td></tr><tr v-if="!openedVisible.length"><td colspan="7" class="empty">{{openedQuery?'没有匹配的账号':'本期没有开通账号'}}</td></tr></tbody></table></div>
-    <Pagination :page="openedPage" :page-size="openedPageSize" :total="openedFiltered.length" @update:page="openedPage=$event" @update:page-size="openedPageSize=$event"/>
+    <div class="finance-table"><table><thead><tr><th>账号</th><th>套餐</th><th>开通时间</th><th>当前状态</th><th>卡尾号</th><th>消费收益 R</th><th>账号结余 R</th></tr></thead><tbody><tr v-for="row in openedVisible" :key="row.email"><td>{{row.email}}<small v-if="row.deleted">账号已删除，保留开通记录</small></td><td>{{proPlanName(row.plan)||'—'}}</td><td>{{openingTime(row.opened_at)}}</td><td>{{returnStates[row.state]||'状态未知'}}</td><td>{{row.last4?'尾号 '+row.last4:'—'}}</td><td>{{row.earnings.consumptionR??'—'}}<small v-if="row.earnings.consumptionR===null">{{row.earnings.consumptionNotPushed?'未推送，无消费数据':'未查询'}}</small></td><td><span class="profit-value" :class="{negative:row.earnings.profitR?.startsWith('-')}">{{row.earnings.profitR!==null&&row.earnings.estimated?'≈ ':''}}{{row.earnings.profitR??'—'}}</span><small v-if="row.earnings.reason">{{row.earnings.reason}}</small></td></tr><tr v-if="!openedVisible.length"><td colspan="7" class="empty">{{accountsBusy?'正在读取账号明细…':accountsError|| (openedQuery?'没有匹配的账号':'本期没有开通账号')}}</td></tr></tbody></table></div>
+    <Pagination :page="openedPage" :page-size="openedPageSize" :total="accountTotal" @update:page="openedPage=$event" @update:page-size="openedPageSize=$event"/>
    </section>
    <div class="finance-heroes">
     <section class="hero usage"><div class="hero-label"><ChartNoAxesCombined :size="17"/>本期消费收益</div><div class="hero-number">{{earnings.consumptionR??'—'}} <small>R</small></div><div class="hero-secondary">{{mode==='all'?'累计用户消费':'本期实际用户扣费'}}</div><p>扣除全部成本前的收益</p></section>
@@ -107,7 +131,7 @@ onBeforeUnmount(()=>{disposed=true;calculation++;clearTimeout(timer);controller?
    <div v-if="report.baseline||report.undated||summary.missing||overview.consumption.missing||earnings.costIncomplete||report.dailyPending||report.historicalPending||report.periodIncomplete||report.refundUnallocated" class="finance-notice"><span v-if="report.periodIncomplete||report.refundUnallocated">分期收支尚未核对完整，暂不计算分期净利润。 </span><span v-if="report.dailyPending">本期 {{report.dailyPending}} 个账号等待按实际日期核对<span v-if="report.dailyErrors">（{{report.dailyErrors}} 个查询异常，保留原数据）</span>。 </span><span v-if="report.historicalPending">另有 {{report.historicalPending}} 条旧期间记录待核对，保留历史金额，不影响本期已核实数据。 </span><span v-if="report.baseline">历史累计 {{numR(report.baseline)}} R 未分期，计入“全部”。 </span><span v-if="report.undatedTransfers">平台外转出含未确认消费日期的累计金额，已从“全部”清算成本扣除。 </span><span v-if="report.undated">{{report.undated}} 笔历史费用无日期，仅计入“全部”。 </span><span v-if="summary.missing||earnings.costIncomplete">部分数据待核实，当前合计不完整。 </span><span v-if="overview.consumption.missing">{{overview.consumption.missing}} 个账号消费尚未查询。 </span></div>
    <div class="finance-charts"><section v-for="[field,title] in [['costR','实际成本趋势'],['profitR','净利润趋势']]" :key="field" class="finance-panel"><div class="panel-heading"><h2>{{title}}</h2><small>{{mode==='all'?'最近 31 个有记录的月份':'按日'}} · R</small></div><div v-if="trends.length" class="trend-bars" :aria-label="title"><button v-for="row in trends" :key="row.day" class="trend-column" :title="row.day+'：'+(row.earnings[field]??'待核实')+' R'" @click="showDay(row.day)"><span class="bar-track"><i v-if="row.earnings[field]!==null" :style="{height:Math.max(2,Math.abs(Number(row.earnings[field])||0)/trendMax[field]*100)+'%'}" :class="{usage:field==='profitR',negative:Number(row.earnings[field])<0}"></i></span><small>{{row.day.slice(mode==='all'?2:5)}}</small><strong>{{row.earnings[field]===null?'—':Number(row.earnings[field]).toFixed(2)}}</strong></button></div><div v-else class="chart-empty">本期暂无分期记录</div></section></div>
    <section class="finance-panel"><div class="panel-heading"><h2>{{mode==='all'?'按月汇总':'每日明细'}}</h2><small>按已记录数据统计 · 点击日期查看明细</small></div><div class="finance-table"><table><thead><tr><th>日期</th><th>消费收益 R</th><th>开卡费 R</th><th>充值手续费 R</th><th>授权撤销费 R</th><th>清算支出 R</th><th>退款本金回收 R</th><th>退款手续费 R</th><th>API 收费 R</th><th>死号亏损 R</th><th>实际成本 R</th><th>净利润 R</th></tr></thead><tbody><tr v-for="row in report.rows" :key="row.day"><td><button class="text-link" @click="showDay(row.day)">{{row.day}}</button><small v-if="row.missing" class="table-warning">部分待核实</small></td><td>{{row.earnings.consumptionR??'—'}}</td><td>{{row.earnings.openingR??'—'}}</td><td>{{row.earnings.rechargeR??'—'}}</td><td>{{row.earnings.reversalR??'—'}}</td><td>{{row.earnings.clearingR??'—'}}</td><td>{{row.earnings.refundPrincipalR??'—'}}</td><td>{{row.earnings.refundR??'—'}}</td><td>{{row.earnings.merchantR??'—'}}</td><td>{{row.earnings.deadR??'—'}}</td><td>{{row.earnings.costR??'—'}}</td><td class="profit-value" :class="{negative:row.earnings.profitR?.startsWith('-')}">{{row.earnings.profitR??'—'}}</td></tr><tr v-if="!report.rows.length"><td colspan="12" class="empty">本期暂无记录</td></tr></tbody></table></div></section>
-   <section id="ejh-finance-details" class="finance-panel"><div class="panel-heading"><h2>收益与成本明细 <small>{{filtered.length}} 条</small></h2><button v-if="dayFilter" class="text-link" @click="dayFilter=''">{{dayFilter}} ×</button></div><div class="detail-filters"><select v-model="kind" aria-label="明细类型"><option value="">全部类型</option><option v-for="(label,key) in labels" :key="key" :value="key">{{label}}</option></select><input v-model="query" type="search" aria-label="搜索账号、卡片或流水" placeholder="搜索账号、卡片或流水"/></div><div class="finance-table"><table><thead><tr><th>时间</th><th>类型</th><th>卡片 / 账号</th><th>金额 R</th><th>原币 / USD</th><th></th></tr></thead><tbody><tr v-for="entry in visible" :key="entry.id"><td>{{entry.day||(entry.month?(entry.month+'（日期未记录）'):when(entry.at))}}</td><td><span class="entry-kind" :class="entry.kind">{{entry.externalTransfer?'平台外转出扣减':entry.refundPrincipal?'退款本金回收':entry.refundCostAdjustment?'原成本抵减':labels[entry.kind]}}</span></td><td>{{entry.email||entry.card||'—'}}</td><td><strong>{{entry.refundPrincipal&&eventAmountR(entry)!==null?'+'+eventAmountR(entry).replace('-',''):eventAmountR(entry)??'待核实'}}</strong></td><td>{{entry.amount===null?'待核实':entry.kind==='consumption'?numR(entry.amount):numMoney(entry.refundPrincipal?String(entry.amount).replace('-',''):entry.amount)}} {{entry.currency}}<small v-if="['reversal','clearing'].includes(entry.kind)&&entry.currency!=='USD'">{{numMoney(entry.refundPrincipal?String(entry.usd).replace('-',''):entry.usd)}} USD</small></td><td><button class="text-link" @click="detail=entry">详情</button></td></tr><tr v-if="!visible.length"><td colspan="6" class="empty">没有匹配的记录</td></tr></tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="filtered.length" @update:page="page=$event" @update:page-size="pageSize=$event"/></section>
+   <section id="ejh-finance-details" class="finance-panel" :aria-busy="eventsBusy"><p v-if="eventsError" class="finance-error">{{eventsError}} <button @click="loadDetails('events')">重试</button></p><div class="panel-heading"><h2>收益与成本明细 <small>{{eventTotal}} 条</small></h2><button v-if="dayFilter" class="text-link" @click="dayFilter=''">{{dayFilter}} ×</button></div><div class="detail-filters"><select v-model="kind" aria-label="明细类型"><option value="">全部类型</option><option v-for="(label,key) in labels" :key="key" :value="key">{{label}}</option></select><input v-model="query" type="search" aria-label="搜索账号、卡片或流水" placeholder="搜索账号、卡片或流水"/></div><div class="finance-table"><table><thead><tr><th>时间</th><th>类型</th><th>卡片 / 账号</th><th>金额 R</th><th>原币 / USD</th><th></th></tr></thead><tbody><tr v-for="entry in visible" :key="entry.id"><td>{{entry.day||(entry.month?(entry.month+'（日期未记录）'):when(entry.at))}}</td><td><span class="entry-kind" :class="entry.kind">{{entry.externalTransfer?'平台外转出扣减':entry.refundPrincipal?'退款本金回收':entry.refundCostAdjustment?'原成本抵减':labels[entry.kind]}}</span></td><td>{{entry.email||entry.card||'—'}}</td><td><strong>{{entry.refundPrincipal&&eventAmountR(entry)!==null?'+'+eventAmountR(entry).replace('-',''):eventAmountR(entry)??'待核实'}}</strong></td><td>{{entry.amount===null?'待核实':entry.kind==='consumption'?numR(entry.amount):numMoney(entry.refundPrincipal?String(entry.amount).replace('-',''):entry.amount)}} {{entry.currency}}<small v-if="['reversal','clearing'].includes(entry.kind)&&entry.currency!=='USD'">{{numMoney(entry.refundPrincipal?String(entry.usd).replace('-',''):entry.usd)}} USD</small></td><td><button class="text-link" @click="detail=entry">详情</button></td></tr><tr v-if="!visible.length"><td colspan="6" class="empty">{{eventsBusy?'正在读取明细…':eventsError||'没有匹配的记录'}}</td></tr></tbody></table></div><Pagination :page="page" :page-size="pageSize" :total="eventTotal" @update:page="page=$event" @update:page-size="pageSize=$event"/></section>
    <section class="cash-reconciliation"><div><span>退款待销卡结算 <b>{{overview.refundSettlement.amount??'待核实'}} USD</b><small>{{overview.refundSettlement.count}} 笔 · 已有退款流水，尚未计入卡余额或主余额</small></span></div><details v-if="overview.refundSettlement.count"><summary>查看待结算明细</summary><p v-for="row in overview.refundSettlement.rows" :key="row.id">{{row.card}} · {{row.usd??'待核实'}} USD · {{when(row.at)}}</p></details><small>销卡完成后由主余额体现，本项移出，不重复计成本或利润。金额来自已入账退款流水，余额以最近查询结果为准。</small><p v-if="overview.gap!==null">已登记费用之外的资金差额：{{overview.gap}} USD（待核对）</p><span>当前资金核对 · 累计值</span><div><span>实际到账 <b>{{overview.netR??'—'}} R</b><small>{{overview.net??'—'}} USD</small></span><span>实际损耗{{overview.estimated?'（估算）':''}} <b>{{overview.lossR??'—'}} R</b><small>{{overview.loss??'—'}} USD</small></span></div><small>{{overview.lossReasons.join('；')||'仅用于核对资金，不再次扣入成本或净利润。'}}</small></section>
    <footer class="finance-footnote"><span>更新于 {{when(updated)}} · 每 {{refreshSeconds}} 秒更新</span><details><summary>折算口径与历史说明</summary><p>净利润＝消费收益 R − 实际成本 R。退款本金回收是资金回收，不是营业收入，不再加到到账日利润。当期成本包含开卡费、撤销费、清算支出、API 收费及死号损失。清算退款手续费在退款本金回收下单列展示，不计入成本，也不扣减净利润。跨天退款保留入账日期，已匹配的退款抵减原清算日期的成本；历史利润会随退款证据更新。销卡回主余额仅为资金转移，不重复计入利润。1 USD = 6.7 R；开卡费固定 0.50 USDT/张，按 1 USDT = 1 USD 记账，即 3.3500 R/张，包含已销卡。单卡结余扣本卡开卡费、撤销费和清算成本，充值手续费单列展示，不计成本或净利润；实际到账仍扣除充值手续费。退款手续费按退款入账或登记的发生时间分期，仅供展示与资金核对，余额核对来源保留估算标记。平台外转出从清算成本扣除，原始交易保留；首次累计金额列为未分期历史，后续增减按登记时间记录为调整，不视为当日新增消费。充值手续费不受影响。</p><p>撤销费按当前配置比例估算，原币转 USD 使用各卡初始开卡结算比例；分项先汇总 USD 再折算 R，分期与单笔四舍五入可能有尾差。充值手续费按累计充值总账的 1% 计算，周期内总账下调可产生负数调整。缺失金额或折算依据时不显示完整净利润。</p><p>消费收益来自 Pro 账号的下游用户消耗。按北京时间从 Sub2 查询每日用户扣费，历史首次累计会自动补齐到实际消费日期；日、周、月使用同一组每日数据汇总。账号删除后保留已记录消耗和原下游标识。查询失败或历史缺失时保留原数据并标记待核对，不把未知金额记到今天。</p><p>实际损耗＝实际到账 − 平台外转出 − EJH 账户余额 − 正常及销卡中卡片余额折合 USD − 在途卡内付款折合 USD − 退款待销卡结算 USD。资金余额使用最近查询值；该差额独立展示，不重复计入全部成本或利润。</p></details></footer>
   </template>
