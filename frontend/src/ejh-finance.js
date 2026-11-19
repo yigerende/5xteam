@@ -1,3 +1,4 @@
+import { createAccountEarnings } from './ejh-account-profit.js'
 import { ejhDeadLoss } from './dead-account-loss.js'
 import { applyPaymentPolicies, paymentOnlySummary, paymentMoney } from './payment-only.js'
 import { summarizeReversalFees } from './ejh-reversal-fees.js'
@@ -287,7 +288,9 @@ function summarizeEvents(events) {
   return {refundPrincipalUSD:refundPrincipalMissing?null:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rechargeMissing?null:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:refundMissing?null:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),r,missing:missing+consumptionMissing+refundMissing+rechargeMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
 }
 export function prepareFinanceReport(data,history={}) {
-  return {all:financeEvents(data,history),overview:financeOverview({...data,consumption_history:history.consumption||data.consumption_history})}
+  const accountData=applyRefundFeeOverrides(applyPaymentPolicies(data))
+  const earnings=createAccountEarnings(accountData),normalized=new Map((data.cases||[]).map((row,i)=>[row,accountData.cases[i]]))
+  return {all:financeEvents(data,history),overview:financeOverview({...data,consumption_history:history.consumption||data.consumption_history}),openedCases:data.cases,accountEarnings:row=>earnings(normalized.get(row))}
 }
 
 // Undated historical evidence only affects periods it could belong to. A
@@ -300,7 +303,7 @@ function cashflowSummary(row) {
   row.earnings={...row.earnings,refundPrincipalR:usdToR(row.refundPrincipalUSD)}
   return row
 }
-export function openedAccountRows(cases=[],range=periodRange('all')) {
+export function openedAccountRows(cases=[],range=periodRange('all'),earningsForRow=null) {
   const accounts=new Map()
   for(const row of cases){
     if(row.payment_status!=='success'||row.plan==='codex_point')continue
@@ -313,15 +316,15 @@ export function openedAccountRows(cases=[],range=periodRange('all')) {
     // The count and drill-down share one deduplicated set. Show the latest
     // successful opening within the selected period for repeat subscribers.
     if(previous&&financeTime(previous.opened_at)>=at)continue
-    accounts.set(key,{email:key,opened_at:row.opened_at,plan:row.plan||'',state:row.state||'',deleted:!!row.deleted,last4:String(row.last4||'').slice(-4)})
+    accounts.set(key,row)
   }
-  return [...accounts.values()].sort((a,b)=>financeTime(b.opened_at)-financeTime(a.opened_at)||a.email.localeCompare(b.email))
+  return [...accounts].map(([email,row])=>({email,opened_at:row.opened_at,plan:row.plan||'',state:row.state||'',deleted:!!row.deleted,last4:String(row.last4||'').slice(-4),...(earningsForRow?{earnings:earningsForRow(row)}:{})})).sort((a,b)=>financeTime(b.opened_at)-financeTime(a.opened_at)||a.email.localeCompare(b.email))
 }
 export function openedAccountCount(cases=[],range=periodRange('all')) {
   return openedAccountRows(cases,range).length
 }
 export function financeReport(data,history={},mode='day',date=beijingDay(),prepared=null) {
-  const range=periodRange(mode,date),{all,overview}=prepared||prepareFinanceReport(data,history)
+  const range=periodRange(mode,date),{all,overview,openedCases,accountEarnings}=prepared||prepareFinanceReport(data,history)
   const events=all.filter(e=>mode==='all'||e.month&&mode==='month'&&e.month===date.slice(0,7)||e.at!==null&&e.at>=range.start&&e.at<range.end)
   const summary=summarizeEvents(events)
   if(mode!=='all'&&all.some(e=>e.paymentOnlyUndated)){summary.earnings.profitR=null;summary.earnings.incomplete=true}
@@ -377,7 +380,7 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
   const firstLoss=first?financeOverview({...first,operations:data.operations||[]}).loss:null,lastLoss=last?financeOverview({...last,operations:data.operations||[]}).loss:null
   const samePolicies=JSON.stringify(first?.payment_policies||[])===JSON.stringify(last?.payment_policies||[])
   const lossChange=samePolicies&&first&&last&&financeTime(first.at)!==financeTime(last.at)&&firstLoss!==null&&lastLoss!==null?money(cents(lastLoss)-cents(firstLoss)):null
-  const openedRows=openedAccountRows(data.cases,range)
+  const openedRows=openedAccountRows(openedCases,range,accountEarnings)
   return {range,openedAccounts:openedRows.length,openedAccountRows:openedRows,summary,events,rows,overview,baseline,refundUnallocated,dailyPending,dailyErrors,historicalPending,periodIncomplete,monthlyUndated,undatedTransfers,undated:all.filter(e=>e.at===null&&!e.month&&e.kind!=='consumption').length,lossChange,firstAt:first?.at,lastAt:last?.at,
     coverage:(history.usage_days||[]).map(r=>r.day).sort()[0]||null}
 }
