@@ -3,12 +3,25 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import MessageBar from './MessageBar.vue'
 import Sub2ProxyPicker from './Sub2ProxyPicker.vue'
-const props=defineProps({ transfer: {type:Boolean,default:true} })
+const props=defineProps({ transfer: {type:Boolean,default:true}, disabled: Boolean })
 const form=ref(null), groups=ref([]), busy=ref(false)
 const message=reactive({text:'',type:''})
 const models=computed({get:()=>form.value?.sub2.models?.join('\n')||'',set:v=>{form.value.sub2.models=v.split(/[\n,]/).map(s=>s.trim()).filter(Boolean)}})
 function normalize(data){return {...data,monitor_group_ids:data.monitor_group_ids||[],sub2:{...data.sub2,proxy_release_minutes:data.sub2?.proxy_release_minutes||0,group_ids:data.sub2?.group_ids||[],group_names:data.sub2?.group_names||[],proxy_ids:data.sub2?.proxy_ids||[],models:data.sub2?.models||[]}}}
-async function save(){busy.value=true;try{if(form.value.sub2.proxy_release_minutes===null)throw new Error('请填写代理绑定分钟数');form.value=normalize(await api('/api/pro-siwc/settings',{method:'PUT',body:form.value}));message.text='SIWC 设置已保存';message.type='success'}catch(e){message.text=e.message;message.type='error'}finally{busy.value=false}}
+async function save(){
+ if(busy.value)throw new Error('SIWC 设置正在处理，请稍候')
+ if(!form.value)throw new Error('SIWC 设置尚未加载，请稍后重试')
+ busy.value=true
+ try{
+  if(form.value.sub2.proxy_release_minutes===null)throw new Error('请填写代理绑定分钟数')
+  form.value=normalize(await api('/api/pro-siwc/settings',{method:'PUT',body:form.value}))
+  message.text='SIWC 设置已保存';message.type='success'
+  return form.value
+ }catch(e){message.text=e.message;message.type='error';throw e}
+ finally{busy.value=false}
+}
+async function saveLocally(){try{await save()}catch{ /* The inline message keeps the unsaved draft visible. */ }}
+defineExpose({save,busy})
 async function loadGroups(){busy.value=true;try{const r=await api('/api/pro-siwc/groups',{method:'POST',body:form.value});groups.value=r.groups;message.text=''}catch(e){message.text=e.message;message.type='error'}finally{busy.value=false}}
 onMounted(async()=>{try{form.value=normalize(await api('/api/pro-siwc/settings'))}catch(e){message.text=e.message;message.type='error'}})
 </script>
@@ -16,7 +29,7 @@ onMounted(async()=>{try{form.value=normalize(await api('/api/pro-siwc/settings')
  <section class="siwc-settings" aria-label="SIWC 转入和额度设置">
   <h3>{{transfer?'降智转入 SIWC':'SIWC 额度退出规则'}}</h3>
   <MessageBar :message="message" />
-  <template v-if="form">
+  <fieldset v-if="form" :disabled="busy||disabled" class="siwc-form">
    <template v-if="transfer">
     <p class="table-note">移除原服务分组后授权并推送。期间暂停自动补货；推送成功等待 10 秒并核验监控，再合并两边并发和容量。原推送超时继续计时。</p>
     <div class="siwc-grid">
@@ -36,10 +49,10 @@ onMounted(async()=>{try{form.value=normalize(await api('/api/pro-siwc/settings')
     <label v-for="[enabled,value,label] in [['five_hour_enabled','five_hour_remaining','5h'],['seven_day_enabled','seven_day_remaining','7d']]" :key="enabled" class="field"><span><input v-model="form[enabled]" type="checkbox" />{{label}} 剩余 ≤（%）时退出</span><input v-model.number="form[value]" type="number" min="0" max="100" step="0.1" :disabled="!form[enabled]" /></label>
     <label class="field"><span>SIWC 额度检查周期（秒）</span><input v-model.number="form.poll_seconds" type="number" min="10" max="86400" /></label>
    </div>
-   <button type="button" class="btn primary" :disabled="busy" @click="save">{{busy?'处理中…':'保存 SIWC 设置'}}</button>
-  </template>
+   <button type="button" class="btn primary" :disabled="busy" @click="saveLocally">{{busy?'处理中…':'保存 SIWC 设置'}}</button>
+  </fieldset>
  </section>
 </template>
 <style scoped>
-.siwc-settings{border-top:1px solid var(--line);padding-top:20px;margin-top:20px}.siwc-settings{margin-bottom:20px}.siwc-settings h3{font-size:15px;margin-bottom:12px}.siwc-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:16px 0}.wide{grid-column:1/-1}.group-options{border:1px solid var(--line);border-radius:6px;padding:10px;max-height:180px;overflow:auto}.group-options label{display:flex;align-items:center;gap:8px;margin:6px 0}input[type=checkbox]{width:15px;height:15px;min-height:15px;margin-right:6px}.table-note{white-space:normal;line-height:1.8}@media(max-width:700px){.siwc-grid{grid-template-columns:1fr}}
+.siwc-form{border:0;padding:0;margin:0;min-width:0}.siwc-settings{border-top:1px solid var(--line);padding-top:20px;margin-top:20px}.siwc-settings{margin-bottom:20px}.siwc-settings h3{font-size:15px;margin-bottom:12px}.siwc-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:16px 0}.wide{grid-column:1/-1}.group-options{border:1px solid var(--line);border-radius:6px;padding:10px;max-height:180px;overflow:auto}.group-options label{display:flex;align-items:center;gap:8px;margin:6px 0}input[type=checkbox]{width:15px;height:15px;min-height:15px;margin-right:6px}.table-note{white-space:normal;line-height:1.8}@media(max-width:700px){.siwc-grid{grid-template-columns:1fr}}
 </style>

@@ -20,14 +20,13 @@ export function usdToR(value) {
   const n = units(value)
   return format(n === null ? null : rounded(n * 67n, 1000n))
 }
-export function financeProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUSD = 0, refundUSD = 0, merchantUSD = 0, deadUSD = 0, consumption, costMissing = 0, consumptionMissing = 0, refundMissing = 0, rechargeMissing = 0, estimated = false }) {
-  // Recharge and refund fees remain disclosed separately, outside operating
-  // cost and profit for every period, including historical records.
+function calculateProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUSD = 0, refundUSD = 0, merchantUSD = 0, deadUSD = 0, consumption, costMissing = 0, consumptionMissing = 0, refundMissing = 0, rechargeMissing = 0, estimated = false }, deductRefund) {
   const usdCosts = [openingUSD, reversalUSD, clearingUSD, merchantUSD, deadUSD].map(units)
+  if (deductRefund) usdCosts.push(units(refundUSD))
   const costs = usdCosts.map(n => {
     return n === null ? null : rounded(n * 67n, 1000n)
   })
-  const partial = !!costMissing || costs.some(n => n === null)
+  const partial = !!costMissing || deductRefund && !!refundMissing || costs.some(n => n === null)
   const known = costs.filter(n => n !== null)
   const cost = known.reduce((sum, n) => sum + n, 0n)
   const usd = usdCosts.filter(n => n !== null).reduce((sum,n) => sum+n,0n)
@@ -44,3 +43,10 @@ export function financeProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUS
     costIncomplete: partial, incomplete, estimated: !!estimated,
   }
 }
+
+// Period reports keep refund/recharge fees as separate disclosures.
+export function financeProfit(input) { return calculateProfit(input, false) }
+
+// Account/card balances deduct their own refund fees, regardless of the day
+// they arrive. Recharge fees are shared and remain outside these balances.
+export function balanceProfit(input) { return calculateProfit(input, true) }

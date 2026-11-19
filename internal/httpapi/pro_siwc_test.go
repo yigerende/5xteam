@@ -310,6 +310,47 @@ func TestSIWCQuotaPoliciesAndTransferGate(t *testing.T) {
 	}
 }
 
+func TestSIWCQuotaOnePercentSaveReloadAndExit(t *testing.T) {
+	f := newProExecutionFixture(t)
+	cfg := model.DefaultProSIWCSettings()
+	cfg.FiveHourEnabled, cfg.SevenDayEnabled = false, true
+	cfg.SevenDayRemaining, cfg.PollSeconds = 1, 60
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := f.request(f.s.saveProSIWCSettings, "PUT", "/api/pro-siwc/settings", string(raw))
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = f.request(f.s.getProSIWCSettings, "GET", "/api/pro-siwc/settings", "")
+	var response struct {
+		Data model.ProSIWCSettings `json:"data"`
+	}
+	if err = json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != http.StatusOK {
+		t.Fatal(err, w.Code)
+	}
+	if response.Data.SevenDayRemaining != 1 || response.Data.PollSeconds != 60 || response.Data.FiveHourEnabled || !response.Data.SevenDayEnabled {
+		t.Fatalf("saved rule did not survive GET: %+v", response.Data)
+	}
+	settings := model.DefaultProSettings()
+	settings.Sub2.AuthMode = "siwc"
+	now := time.Now()
+	p := model.MailAccountProfile{QuotaCheckedAt: &now, Quota7D: &model.FreeQuotaWindow{UsedPercent: 99}}
+	if !f.s.proQuotaExitReached(p, settings, 100) {
+		t.Fatal("99% used must reach saved 1% remaining threshold")
+	}
+	p.Quota7D.UsedPercent = 98.99
+	if f.s.proQuotaExitReached(p, settings, 100) {
+		t.Fatal("rounded display must not cause early exit")
+	}
+	p.Quota7D.UsedPercent = 99
+	now = now.Add(-6 * time.Minute)
+	if f.s.proQuotaExitReached(p, settings, 100) {
+		t.Fatal("stale quota must be rechecked")
+	}
+}
+
 func TestSIWCCreateUsesDurableIdempotentRequest(t *testing.T) {
 	f := newProExecutionFixture(t)
 	requests := 0

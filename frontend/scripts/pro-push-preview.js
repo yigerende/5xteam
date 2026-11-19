@@ -22,8 +22,12 @@ window.fetch = async (path, options = {}) => {
   fixture.requests.push({ path: url.pathname, method, body })
   if (url.pathname === '/api/pro-settings/sub2/variant') return reply({ auth_mode:url.searchParams.get('auth_mode'), url:'', email:'', password_present:false, proxy_ids:null, account_concurrency:10, priority:1 })
   if (url.pathname === '/api/pro-siwc/settings') {
-    fixture.siwc ??= {sub2:{...initial.sub2,auth_mode:'siwc',url:'https://siwc.example.com',proxy_ids:[]},monitor_group_ids:[10],five_hour_enabled:true,five_hour_remaining:5,seven_day_enabled:true,seven_day_remaining:10,poll_seconds:120}
-    if(method==='PUT') fixture.siwc=structuredClone(body)
+    fixture.siwc ??= JSON.parse(sessionStorage.getItem(key+'-siwc')||'null') || {sub2:{...initial.sub2,auth_mode:'siwc',url:'https://siwc.example.com',proxy_ids:[]},monitor_group_ids:[10],five_hour_enabled:true,five_hour_remaining:5,seven_day_enabled:true,seven_day_remaining:10,poll_seconds:120}
+    if(method==='PUT') {
+      if(fixture.fail==='siwc') return reply(null,'模拟 SIWC 保存失败')
+      fixture.siwc=structuredClone(body)
+      sessionStorage.setItem(key+'-siwc',JSON.stringify(fixture.siwc))
+    }
     return reply(fixture.siwc)
   }
   if (url.pathname === '/api/pro-siwc/groups') return reply({groups:fixture.groups.sub2})

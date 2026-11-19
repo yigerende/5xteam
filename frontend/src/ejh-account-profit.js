@@ -1,7 +1,7 @@
 import { ejhDeadLoss } from './dead-account-loss.js'
 import { casePaymentTrades, summarizeClearingCosts } from './ejh-clearing.js'
 import { paymentOnlySummary, paymentMoney } from './payment-only.js'
-import { financeProfit } from './ejh-profit.js'
+import { balanceProfit } from './ejh-profit.js'
 import { summarizeReversalFees, reversalProfit } from './ejh-reversal-fees.js'
 import { summarizeRefundFees } from './ejh-refund-cost.js'
 import { accountConsumption, accountConsumptionForProfit, consumptionNotPushed } from './ejh-consumption.js'
@@ -23,7 +23,7 @@ export function accountCaseCosts(row, cards = [], operations = [], trades = []) 
 export function accountProfit({fee,refund,clearing=null,deadFeeUSD='0.00',merchantFeeUSD='0.00',consumption=null,consumptionMissing=0}) {
  const base=reversalProfit(fee,consumption,consumptionMissing)
  if(deadFeeUSD!==null&&!Number(deadFeeUSD)&&!clearing&&!Number(merchantFeeUSD)&&!refund.count&&!refund.missing&&!refund.pending)return base
- const earnings=financeProfit({openingUSD:0,rechargeUSD:0,reversalUSD:fee.usd.amount??(!fee.count?'0.00':null),refundUSD:refund.usd.amount??'0.00',deadUSD:deadFeeUSD,merchantUSD:merchantFeeUSD,clearingUSD:clearing?.usd.amount||'0.00',consumption,consumptionMissing,costMissing:refund.missing+refund.pending+fee.missing+fee.pending+fee.usd.missing+(clearing?.missing||0)+(clearing?.pending||0)})
+ const earnings=balanceProfit({openingUSD:0,rechargeUSD:0,reversalUSD:fee.usd.amount??(!fee.count?'0.00':null),refundUSD:refund.usd.amount??'0.00',deadUSD:deadFeeUSD,merchantUSD:merchantFeeUSD,clearingUSD:clearing?.usd.amount||'0.00',consumption,consumptionMissing,costMissing:refund.missing+refund.pending+fee.missing+fee.pending+fee.usd.missing+(clearing?.missing||0)+(clearing?.pending||0)})
  return {...base,profit:earnings.profitR,estimated:base.estimated||refund.estimated||clearing?.estimated}
 }
 

@@ -6,6 +6,7 @@ import MessageBar from './MessageBar.vue'
 import ProSIWCSettings from './ProSIWCSettings.vue'
 const emit = defineEmits(['updated'])
 const form = reactive({ normal_group_ids: [], degraded_group_ids: [] })
+const siwcSettings = ref(null)
 const data = ref(null), groups = ref([]), busy = ref(''), loaded = ref(false)
 const message = reactive({ text: '', type: '' })
 const running = computed(() => !!data.value?.runtime?.running)
@@ -26,8 +27,13 @@ async function poll() {
   if (!disposed) timer = setTimeout(poll, 5000)
 }
 async function save() {
+  if (busy.value || siwcSettings.value?.busy) return
   busy.value = 'save'
   try {
+    if (form.action === 'siwc') {
+      if (!siwcSettings.value) throw new Error('SIWC 设置尚未加载，请稍后重试')
+      await siwcSettings.value.save()
+    }
     const result = await api('/api/pro-quality/settings', { method: 'PUT', body: form })
     data.value = result; Object.assign(form, result.settings)
     show('Pro 降智检测设置已保存', 'success'); emit('updated')
@@ -85,8 +91,8 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         <label v-if="form.auto_restore" class="field recovery-count"><span>连续正常次数</span><input v-model.number="form.recovery_limit" type="number" min="1" max="20" required /></label>
       </div>
       <p class="table-note">{{ form.action === 'siwc' ? '降智后转入 SIWC。已直接推送 SIWC 的账号只更新检测结果，不重复转入；未选择移除分组时移除原推送分组。' : form.action === 'merge' ? '确认降智后，跳过额度等待，执行全自动配置的最后一步。' : '确认降智后切组，保留其他分组；切组失败下次查询重试。' }} 连续检测失败达限后，先用 gpt-6.1-sol 测试该账号连接：成功则恢复正常并清零，仅复核上游状态码命中配置才执行处理。网络超时、Sub2 管理接口错误、响应不完整或状态码未命中时，仅记录错误并等待下次检测。接口查询失败按查询轮次累计，同一条 Sub2 检测失败结果不重复计数；未确认、过期结果不触发。</p>
-      <div class="panel-actions"><button class="btn primary" type="submit" :disabled="!!busy"><LoaderCircle v-if="busy === 'save'" class="spin" :size="15" /><Save v-else :size="15" />{{ busy === 'save' ? '保存中…' : '保存设置' }}</button><button class="btn ghost" type="button" :disabled="!!busy || running || !data?.settings?.enabled || !!data?.inactive_reason" @click="run"><LoaderCircle v-if="busy === 'run' || running" class="spin" :size="15" /><Play v-else :size="15" />立即查询并处理</button></div>
-    <ProSIWCSettings v-if="form.action === 'siwc'"/>
+      <div class="panel-actions"><button class="btn primary" type="submit" :disabled="!!busy || siwcSettings?.busy"><LoaderCircle v-if="busy === 'save'" class="spin" :size="15" /><Save v-else :size="15" />{{ busy === 'save' ? '保存中…' : '保存设置' }}</button><button class="btn ghost" type="button" :disabled="!!busy || running || !data?.settings?.enabled || !!data?.inactive_reason" @click="run"><LoaderCircle v-if="busy === 'run' || running" class="spin" :size="15" /><Play v-else :size="15" />立即查询并处理</button></div>
+    <ProSIWCSettings ref="siwcSettings" v-if="form.action === 'siwc'" :disabled="!!busy"/>
     </form>
     <p v-else class="table-note"><LoaderCircle class="spin" :size="15" />正在加载配置…</p>
   </section>
