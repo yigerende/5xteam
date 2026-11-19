@@ -8,7 +8,7 @@ assert.equal(reconciliationStatus(base,now).state,'balanced')
 for (const [balance,state,gap] of [['98.00','small','1.00'],['100.00','small','-1.00'],['97.99','difference','1.01'],['100.01','difference','-1.01']]) {
  const result=reconciliationStatus(withBalance(balance),now)
  assert.equal(result.state,state);assert.equal(result.value.gap,gap)
- assert.equal(result.value.earnings.costUSD,'1.00','difference must not be deducted as cost')
+ assert.equal(result.value.earnings.costUSD,'0.00','difference must not be deducted as cost')
 }
 assert.equal(reconciliationStatus({...base,balance:null},now).state,'unknown')
 assert.equal(reconciliationStatus({...base,recharge_ledger:{}},now).value.gap,null)
@@ -19,7 +19,7 @@ assert.equal(reconciliationStatus(base,now+601000,1200).state,'balanced','respec
 const card={id:'c',issuer_linked:true,remote:{orderNo:'order',cardNo:'**** 1234',status:'8',cardCurrency:'USD'},balance:'40.00',balance_at:at}
 const data={...withBalance('48.50'),cards:[card],cases:[{id:'case',ejh_card_id:'c',state:'waiting',charge:{type:'1',status:'1',trade_no:'held',card_amount:'10.00',card_currency:'USD'}}]}
 let r=reconciliationStatus(data,now)
-assert.equal(r.state,'balanced');assert.equal(r.value.assets,'98.50');assert.equal(r.value.earnings.costUSD,'1.50')
+assert.equal(r.state,'balanced');assert.equal(r.value.assets,'98.50');assert.equal(r.value.earnings.costUSD,'0.50')
 let rows=reconciliationCards(data)
 assert.equal(rows[0].processing,true);assert.equal(rows[0].pending,'10.00');assert.equal(rows[0].total,'50.00')
 assert.equal(reconciliationCards({...data,cards:[{...card,remote:{...card.remote,status:'2'}}]}).length,0)

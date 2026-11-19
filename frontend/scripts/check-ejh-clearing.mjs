@@ -34,7 +34,7 @@ assert.equal(difference.completedUSD.amount,'0.23');assert.equal(difference.pend
 const data={cards:[card],operations:[op],cases:[row],trades:evidence,recharge_ledger:{amount:'3000'},balance:{data:{abroadList:[{currency:'USD',balance:'2013.95'}]}}}
 let overview=financeOverview(data)
 assert.equal(overview.earnings.clearingR,'1.4740')
-assert.equal(overview.earnings.costUSD,'30.72')
+assert.equal(overview.earnings.costUSD,'0.72')
 assert.equal(financeReport(data,{},'day','2026-10-17').summary.clearingUSD,'0.22','cost follows issuer posting day')
 assert.equal(financeReport(data,{},'day','2026-10-16').summary.clearingUSD,'0.00')
 assert.equal(financeOverview({...data,trades:[auth,returned]}).earnings.clearingR,'0.0000','reversal shortfall is not a cost')

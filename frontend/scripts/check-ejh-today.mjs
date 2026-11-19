@@ -14,8 +14,8 @@ const data={cards:[],cases:[],operations:[
 ],external_transfer_history:[],merchant_fees:[{request_id:'api',at,amount:'1.00'}]}
 const unchanged=JSON.stringify(data), allCost=financeOverview(data).earnings.costUSD
 const today=dailyFinanceCost(data,date)
-assert.equal(today.earnings.costUSD,'3.50')
-assert.equal(today.earnings.costR,'23.4500')
+assert.equal(today.earnings.costUSD,'1.50')
+assert.equal(today.earnings.costR,'10.0500')
 assert.equal(today.undated,1,'baseline must not be charged on its recording date')
 assert.equal(dailyFinanceCost(data,'2026-11-08').earnings.costUSD,'0.50')
 assert.equal(dailyFinanceCost(data,'2026-11-09').earnings.costUSD,'0.00')
@@ -23,17 +23,17 @@ assert.equal(calculateEJHOverview(data,Date.parse(at)-1).today.date,'2026-11-06'
 assert.equal(calculateEJHOverview(data,Date.parse(at)).today.date,date)
 const history={recharges:data.recharge_history,external_transfers:data.external_transfer_history}
 assert.equal(today.earnings.costUSD,financeReport(data,history,'day',date).summary.earnings.costUSD)
-assert.equal(dailyFinanceCost({...data,consumption_history:[{id:'unknown',email:'unknown@example.com',total:null}]},date).earnings.costUSD,'3.50','unknown revenue cannot hide dated costs')
+assert.equal(dailyFinanceCost({...data,consumption_history:[{id:'unknown',email:'unknown@example.com',total:null}]},date).earnings.costUSD,'1.50','unknown revenue cannot hide dated costs')
 const missing=dailyFinanceCost({...data,recharge_ledger:{amount:''}},date)
-assert.equal(missing.earnings.costUSD,null)
-assert.equal(missing.earnings.costR,null)
-assert.equal(missing.earnings.knownCostUSD,'3.50')
+assert.equal(missing.earnings.costUSD,'1.50')
+assert.equal(missing.earnings.costR,'10.0500')
+assert.equal(missing.earnings.knownCostUSD,'1.50')
 const datedFee={id:'fee',at,amount:'2',revision:1}
-assert.equal(dailyFinanceCost({...data,refund_fees:[datedFee]},date).earnings.costUSD,'3.50','refund fees stay out of daily operating costs')
+assert.equal(dailyFinanceCost({...data,refund_fees:[datedFee]},date).earnings.costUSD,'1.50','refund fees stay out of daily operating costs')
 assert.equal(dailyFinanceCost({...data,refund_fees:[datedFee]},date).earnings.refundR,'13.4000','refund fees remain available for display')
 const transfer={id:'external',at,delta:'1',baseline:false}
 const adjusted={...data,recharge_ledger:{amount:'1200',external_transfer_amount:'1'},external_transfer_history:[transfer]}
-assert.equal(dailyFinanceCost(adjusted,date).earnings.costUSD,'2.50','dated external reclassification must not inflate costs')
+assert.equal(dailyFinanceCost(adjusted,date).earnings.costUSD,'0.50','dated external reclassification must not inflate costs')
 assert.equal(JSON.stringify(data),unchanged)
 assert.equal(financeOverview(data).earnings.costUSD,allCost)
 
@@ -50,3 +50,5 @@ assert.equal(summarizeInFlightPayments([{...charged,charge:{...charged.charge,ca
 assert.equal(summarizeInFlightPayments([waiting],[{...card,remote:{status:'2'}}]).missingRows.length,0,'closed cards do not create new in-flight obligations')
 assert.equal(summarizeInFlightPayments([{...waiting,state:'returned'}],[card]).missingRows.length,0)
 console.log('Passed: Beijing daily costs, date boundaries, historical baseline, dated recharges/fees/exclusions, missing data diagnostics and unchanged all-time costs')
+
+assert.equal(missing.earnings.rechargeR,null,'unknown recharge does not hide known operating costs')

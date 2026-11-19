@@ -20,10 +20,10 @@ export function usdToR(value) {
   const n = units(value)
   return format(n === null ? null : rounded(n * 67n, 1000n))
 }
-export function financeProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUSD = 0, refundUSD = 0, merchantUSD = 0, deadUSD = 0, consumption, costMissing = 0, consumptionMissing = 0, refundMissing = 0, estimated = false }) {
-  // Refund fees are disclosed with recovered principal only. They are excluded
-  // from the configured operating cost and profit, including historical periods.
-  const usdCosts = [openingUSD, reversalUSD, rechargeUSD, clearingUSD, merchantUSD, deadUSD].map(units)
+export function financeProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUSD = 0, refundUSD = 0, merchantUSD = 0, deadUSD = 0, consumption, costMissing = 0, consumptionMissing = 0, refundMissing = 0, rechargeMissing = 0, estimated = false }) {
+  // Recharge and refund fees remain disclosed separately, outside operating
+  // cost and profit for every period, including historical records.
+  const usdCosts = [openingUSD, reversalUSD, clearingUSD, merchantUSD, deadUSD].map(units)
   const costs = usdCosts.map(n => {
     return n === null ? null : rounded(n * 67n, 1000n)
   })
@@ -37,7 +37,7 @@ export function financeProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUS
   const revenue = rawRevenue === null ? null : rounded(rawRevenue, 100n)
   const incomplete = partial || !!consumptionMissing || revenue === null
   return {
-    openingR: format(costs[0]), reversalR: format(costs[1]), rechargeR: format(costs[2]), clearingR: format(costs[3]), refundR: refundMissing ? null : usdToR(refundUSD), merchantR: format(costs[4]), deadR: format(costs[5]),
+    openingR: format(costs[0]), reversalR: format(costs[1]), rechargeR: rechargeMissing ? null : usdToR(rechargeUSD), clearingR: format(costs[2]), refundR: refundMissing ? null : usdToR(refundUSD), merchantR: format(costs[3]), deadR: format(costs[4]),
     costR: partial ? null : format(cost), knownCostR: known.length ? format(cost) : null,
     costUSD: partial ? null : usdText, knownCostUSD: known.length ? usdText : null,
     consumptionR: format(revenue), profitR: incomplete ? null : format(revenue - cost),

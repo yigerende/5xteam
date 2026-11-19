@@ -95,7 +95,8 @@ export function financeOverview(data={}) {
   const reconciliation=authorizationDiscrepancies(cases,(data.trades||[]).filter(t=>!paymentOnly.rows.some(p=>p.card_id===t.card_id)),cards,operations,inFlight.authorizationKeys)
   // Cash reconciliation still accounts for disclosed refund fees; excluding
   // them from operating profit must not manufacture an unexplained cash gap.
-  const gap=loss===null||earnings.costUSD===null||refundFees.missing?null:money(loss-(cents(earnings.costUSD)+(cents(refundFees.amount)||0n)-deposit-(cents(merchantFee)||0n)))
+  // Recharge fees are already deducted in net receipts, so do not deduct again.
+  const gap=loss===null||earnings.costUSD===null||refundFees.missing?null:money(loss-(cents(earnings.costUSD)+(cents(refundFees.amount)||0n)-(cents(merchantFee)||0n)))
   const closurePending=reconciliation.unaccountedUSD.missing?null:reconciliation.unaccountedUSD.amount??'0.00'
   const unexplained=gap===null||closurePending===null?null:money(cents(gap)-cents(closurePending))
   const assets=reasons.length?null:money(account+(cents(cardUSD.amount)||0n)+(cents(inFlight.paymentUSD.amount)||0n)+(cents(refundSettlement.amount)||0n))
@@ -246,7 +247,7 @@ export function eventAmountR(event) {
   return usdToR(event.kind==='opening'?event.amount:event.usd)
 }
 function summarizeEvents(events) {
-  let usd=0n,usdt=0n,reversalUSD=0n,rechargeUSD=0n,clearingUSD=0n,externalTransferUSD=0n,refundUSD=0n,refundMissing=0,merchantUSD=0n,deadUSD=0n,refundPrincipalUSD=0n,refundPrincipalMissing=0,r=0,missing=0,consumptionMissing=0,opening=0
+  let usd=0n,usdt=0n,reversalUSD=0n,rechargeUSD=0n,rechargeMissing=0,clearingUSD=0n,externalTransferUSD=0n,refundUSD=0n,refundMissing=0,merchantUSD=0n,deadUSD=0n,refundPrincipalUSD=0n,refundPrincipalMissing=0,r=0,missing=0,consumptionMissing=0,opening=0
   const original=new Map()
   for(const e of events){
     if(e.kind==='consumption'){
@@ -262,6 +263,11 @@ function summarizeEvents(events) {
     if(e.kind==='reversal'&&e.amount!==null){const n=cents(e.amount);if(n!==null)original.set(e.currency,(original.get(e.currency)||0n)+n)}
     const raw=e.usd_precise??e.usd
     const n=cents(raw)===null?null:BigInt(String(raw).replace('-','').split('.')[0])*1000000n+BigInt((String(raw).split('.')[1]||'').padEnd(6,'0'))
+    if(e.kind==='recharge'){
+      if(n===null||e.incomplete)rechargeMissing++
+      else rechargeUSD+=String(raw).startsWith('-')?-n:n
+      continue
+    }
     if(e.kind==='refund'){
       if(n===null||e.incomplete)refundMissing++
       else refundUSD+=String(raw).startsWith('-')?-n:n
@@ -271,15 +277,14 @@ function summarizeEvents(events) {
     const signed=String(raw).startsWith('-')?-n:n
     usd+=signed
     if(e.kind==='reversal')reversalUSD+=signed
-    if(e.kind==='recharge')rechargeUSD+=signed
     if(e.kind==='clearing')clearingUSD+=signed
     if(e.externalTransfer)externalTransferUSD-=signed
     if(e.kind==='merchant')merchantUSD+=signed
  if(e.kind==='dead')deadUSD+=signed
   }
   const rounded=n=>money(((n<0n?-n:n)+5000n)/10000n*(n<0n?-1n:1n))
-  const earnings=financeProfit({openingUSD:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),consumption:r,costMissing:missing,consumptionMissing,refundMissing,estimated:events.some(e=>e.kind!=='refund'&&(e.kind==='reversal'||e.estimated))})
-  return {refundPrincipalUSD:refundPrincipalMissing?null:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:refundMissing?null:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),r,missing:missing+consumptionMissing+refundMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
+  const earnings=financeProfit({openingUSD:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),consumption:r,costMissing:missing,consumptionMissing,refundMissing,rechargeMissing,estimated:events.some(e=>!['refund','recharge'].includes(e.kind)&&(e.kind==='reversal'||e.estimated))})
+  return {refundPrincipalUSD:refundPrincipalMissing?null:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rechargeMissing?null:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:refundMissing?null:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),r,missing:missing+consumptionMissing+refundMissing+rechargeMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
 }
 export function prepareFinanceReport(data,history={}) {
   return {all:financeEvents(data,history),overview:financeOverview({...data,consumption_history:history.consumption||data.consumption_history})}
@@ -326,7 +331,7 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
     summary.rechargeUSD=overview.depositFee
     summary.externalTransferUSD=overview.externalTransfer
     summary.clearingUSD=overview.platformClearingUSD
-    summary.usd=overview.depositFee===null?null:money((cents(summary.reversalUSD)||0n)+(cents(summary.clearingUSD)||0n)+(cents(summary.merchantUSD)||0n)+BigInt(overview.dead.amount)+cents(overview.depositFee))
+    summary.usd=money((cents(summary.reversalUSD)||0n)+(cents(summary.clearingUSD)||0n)+(cents(summary.merchantUSD)||0n)+BigInt(overview.dead.amount))
     summary.missing+=overview.consumption.missing
     summary.earnings=overview.earnings
   }
@@ -337,10 +342,10 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
     groups.get(key).push(e)
   }
   const rows=[...groups].map(([day,list])=>({day,...summarizeEvents(list)})).sort((a,b)=>b.day.localeCompare(a.day))
-  // If the current ledger or an account's consumption is unknown, recorded
-  // period entries are still useful but cannot establish a complete profit.
+  // Unknown recharge fees affect disclosure only. Unknown consumption or
+  // payment principal still prevents a complete operating profit.
   for(const row of [summary,...rows]){
-    if(overview.depositFee===null){row.missing++;row.earnings={...row.earnings,costR:null,costUSD:null,costIncomplete:true,profitR:null,incomplete:true}}
+    if(overview.depositFee===null){row.missing++;row.rechargeUSD=null;row.earnings={...row.earnings,rechargeR:null}}
     if(overview.consumption.missing||overview.paymentOnly.missing||mode!=='all'&&all.some(e=>e.paymentOnlyUndated))row.earnings={...row.earnings,profitR:null,incomplete:true}
   }
   const baseline=all.filter(e=>e.kind==='consumption'&&e.at===null).reduce((n,r)=>n+Number(r.amount),0)
@@ -362,8 +367,7 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
   const refundUnallocated=all.filter(e=>e.refundUnallocated&&!e.refundExclusion).length
   const incompleteFor=period=>refundUnallocated>0||unscopedBaseline||usage.some(row=>consumptionOverlaps(row,period)&&pending(row))||
     all.some(e=>e.externalTransfer&&e.at===null&&(e.recordedAt==null||e.recordedAt>=period.start))||
-    days.some(row=>row.source!=='sub2_daily'&&financeTime(row.day+'T12:00:00+08:00')>=period.start&&financeTime(row.day+'T12:00:00+08:00')<period.end)||
-    (['day','week'].includes(mode)&&monthlyUndated>0)
+    days.some(row=>row.source!=='sub2_daily'&&financeTime(row.day+'T12:00:00+08:00')>=period.start&&financeTime(row.day+'T12:00:00+08:00')<period.end)
   const periodIncomplete=mode!=='all'&&incompleteFor(range)
   if(periodIncomplete)summary.earnings={...summary.earnings,profitR:null,incomplete:true}
   for(const row of rows)if(row.day!=='未分期历史'&&incompleteFor(periodRange(mode==='all'?'month':'day',mode==='all'?row.day+'-01':row.day)))row.earnings={...row.earnings,profitR:null,incomplete:true}
@@ -387,8 +391,7 @@ export function dailyFinanceCost(data, date=beijingDay()) {
   const earnings=cashflowSummary(summarizeEvents(events)).earnings
   if(all.some(e=>e.refundUnallocated)){earnings.costUSD=null;earnings.costR=null;earnings.costIncomplete=true;earnings.profitR=null;earnings.incomplete=true}
   if(cents(data.recharge_ledger?.amount)===null){
-    earnings.costUSD=null;earnings.costR=null;earnings.costIncomplete=true
-    earnings.profitR=null;earnings.incomplete=true
+    earnings.rechargeR=null
   }
   return {date,earnings,undated:all.filter(e=>e.at===null&&(!e.month||e.month===date.slice(0,7))).length}
 }

@@ -16,7 +16,7 @@ let x=financeOverview(base)
 assert.equal(x.platformClearingUSD,'0.00','full clearing with a refund request is recoverable principal')
 assert.equal(x.inFlight.paymentUSD.amount,'141.00','use actual settlement, not opening FX')
 assert.equal(x.inFlight.count,1)
-assert.equal(x.earnings.costUSD,'10.50')
+assert.equal(x.earnings.costUSD,'0.50')
 assert.equal(x.gap,'0.00')
 assert.equal(financeReport(base,{},'day','2026-10-26').summary.clearingUSD,'0.00')
 const complete={...base,cases:[{...row,state:'returned',returns:[refund]}],trades:[auth,clear,refund]}
