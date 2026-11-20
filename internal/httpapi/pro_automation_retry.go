@@ -99,7 +99,8 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 			return errProAccountDead
 		}
 		if p.ProAuto.OrderID != "" {
-			if order, _, e := s.store.GPTPayOrder(p.ProAuto.OrderID); e == nil && order.PaymentReviewRequired() {
+			order, _, lookupErr := s.store.GPTPayOrder(p.ProAuto.OrderID)
+			if lookupErr == nil && order.PaymentReviewRequired() {
 				_, saveErr := s.store.UpdateProAccount(email, func(current *model.MailAccountProfile) {
 					if current.ProAuto.ID == p.ProAuto.ID && current.ProAuto.OrderID == order.ID {
 						current.ProAuto.PaymentReviewRequired = true
@@ -110,8 +111,16 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 				}
 				return fmt.Errorf("%s：%w", gptpay.PaymentReviewMessage, err)
 			}
+			if lookupErr == nil && cfg.Provider == gptpay.XUPay && p.ProAuto.Stage == "recharge" && p.ProAuto.SessionRecoveryOrderID == "" && order.CanReloginXUPaySession() {
+				const message = "序付确认 Session 已失效、原单未提交付款，使用一次重新登录机会，不计入普通重试"
+				recovered, claimErr := s.store.PrepareProSessionRecovery(email, p.ProAuto, message)
+				if claimErr != nil {
+					return fmt.Errorf("%w；重新登录未执行：%v", err, claimErr)
+				}
+				s.auditProEvent(recovered, "login", "pending", "pro_auto", message, map[string]any{"automation_id": p.ProAuto.ID, "previous_order_id": order.ID, "supplier_order_id": order.Remote.ID})
+				continue
+			}
 		}
-		// Step two never retries this account; the outer worker queues a successor.
 		if p.ProAuto.Stage == "recharge" {
 			return err
 		}

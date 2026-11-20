@@ -135,9 +135,20 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			}
 			if lookupErr == nil {
 				t.OrderID = order.ID
-				_, err = s.store.UpdateProAccount(t.Email, func(p *model.MailAccountProfile) { p.ProAuto.OrderID = order.ID })
-				if err != nil {
-					return nil, 0, err
+				// A live payment worker attaches its own order after admission.
+				// A late monitor read must not restore the failed pre-relogin order.
+				if !s.proAutomationRunning(t.Email) {
+					current, saveErr := s.store.UpdateProAccount(t.Email, func(p *model.MailAccountProfile) {
+						if p.ProAuto.OrderID == "" && p.ProAuto.PaymentOrderID() == order.ID && p.ProAuto.StopVersion == profile.ProAuto.StopVersion {
+							p.ProAuto.OrderID = order.ID
+						}
+					})
+					if saveErr != nil {
+						return nil, 0, saveErr
+					}
+					if current.ProAuto.OrderID != order.ID {
+						continue
+					}
 				}
 			}
 		}

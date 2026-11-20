@@ -1,12 +1,63 @@
 package store
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"chatgpt-space-merge/internal/gptpay"
 	"chatgpt-space-merge/internal/model"
 )
+
+func TestProSessionRecoveryClaimSurvivesRestart(t *testing.T) {
+	s := transferStore(t)
+	email := "session@example.com"
+	transferSource(t, s, email)
+	now := time.Now()
+	a := model.ProAutoState{ID: "original-flow", Status: "running", Stage: "recharge", Steps: map[string]string{"login": "completed", "recharge": "running"}, PlanCode: "pro20", CardID: "same-card", RetryAttempts: 2, ProxyRetryAttempts: 1, StartedAt: now}
+	a.OrderID = a.PaymentOrderID()
+	o := transferOrder(email, a.OrderID, "failed")
+	o.Order.Provider, o.Order.CardID, o.Order.LastStatusCheckAt = gptpay.XUPay, a.CardID, &now
+	r := &o.Order.Remote
+	r.TargetEmail, r.PlanCode, r.FailureCategory = email, a.PlanCode, "unpaid_session_expired"
+	r.PaymentState, r.SettlementStatus = "failed", "released"
+	if err := s.CreateGPTPayOrder(o.Order, o.Snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.ProAuto = a }); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var wins atomic.Int32
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.PrepareProSessionRecovery(email, a, "session expired"); err == nil {
+				wins.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if wins.Load() != 1 {
+		t.Fatalf("%d claims succeeded", wins.Load())
+	}
+	if err := s.RecoverProAutomations(); err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := s.MailAccountCredential(email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.ProAuto
+	if got.Status != "interrupted" || got.SessionRecoveryOrderID != a.OrderID || got.OrderID != "" || got.PaymentOrderID() != a.OrderID+"-session-1" || got.RetryAttempts != 2 || got.ProxyRetryAttempts != 1 || !got.StartedAt.Equal(now) {
+		t.Fatal("restart changed recovered flow", got)
+	}
+	if _, err = s.PrepareProSessionRecovery(email, got, "duplicate"); err == nil {
+		t.Fatal("restart granted another claim")
+	}
+}
 
 func TestProAutoRetryPaymentAndStateGuards(t *testing.T) {
 	for _, scenario := range []string{"no_order", "failed", "success", "processing", "submission_unknown", "manual_review", "missing_order", "unlinked_success", "once_successful", "provider_blocked", "payment_risk", "stopped", "stale_flow", "stale_attempt", "exhausted", "paid_stage"} {

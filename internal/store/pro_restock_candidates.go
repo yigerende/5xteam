@@ -18,7 +18,9 @@ LEFT JOIN gptpay_orders AS payment ON payment.id=coalesce(
  CASE WHEN coalesce(json_extract(a.profile,'$.pro_auto.id'),'')!='' THEN
   'pro-auto-' || json_extract(a.profile,'$.pro_auto.id') ||
   CASE WHEN coalesce(json_extract(a.profile,'$.pro_auto.retry_attempts'),0)>0
-   THEN '-retry-' || json_extract(a.profile,'$.pro_auto.retry_attempts') ELSE '' END
+   THEN '-retry-' || json_extract(a.profile,'$.pro_auto.retry_attempts') ELSE '' END ||
+  CASE WHEN coalesce(json_extract(a.profile,'$.pro_auto.session_recovery_order_id'),'')!=''
+   THEN '-session-1' ELSE '' END
  END)
 WHERE json_extract(a.profile,'$.management_scope')='pro'
  AND coalesce(json_extract(a.profile,'$.pro_restock_task_id'),'')=''

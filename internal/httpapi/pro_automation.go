@@ -233,6 +233,7 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resume := p.ProAuto.Steps["oauth"] == "completed" || p.ProAuto.SIWCConsentFinal()
+	resumeSessionLogin := p.ProAuto.SessionRecoveryOrderID != "" && p.ProAuto.Status == "interrupted" && p.ProAuto.OrderID == "" && !p.ProAuto.StopRequested && !resume
 	paidRecovery := input.RetryCurrent && p.ProAuto.OrderID != "" && !resume
 	restartFailed := false
 	recoveryOrderID := p.ProAuto.OrderID
@@ -358,6 +359,30 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if order.Status == "failed" {
+			// A restart may interrupt the worker between recording the second
+			// terminal response and handing the task to the replacement policy.
+			if latest.ProAuto.Status == "interrupted" && latest.ProAuto.SessionRecoveryOrderID != "" && order.ID == latest.ProAuto.PaymentOrderID() && order.CanReloginXUPaySession() {
+				s.proAutoMu.Lock()
+				current, _, checkErr := s.store.MailAccountCredential(email)
+				if checkErr == nil && (current.ProAuto.ID != recoveryFlowID || current.ProAuto.OrderID != order.ID || current.ProAuto.StopVersion != stopVersion || current.ProAuto.StopRequested) {
+					checkErr = errors.New("账号流程已停止或变化")
+				}
+				const message = "序付重新登录后 Session 再次失效，按第二步失败规则处理"
+				if checkErr == nil {
+					checkErr = s.autoProUpdate(email, "recharge", "failed", message)
+				}
+				if checkErr == nil {
+					checkErr = s.store.QueueProRechargeReplacement(email, recoveryFlowID)
+				}
+				s.proAutoMu.Unlock()
+				lock.Unlock()
+				if checkErr != nil {
+					writeAPI(w, 409, nil, checkErr.Error())
+				} else {
+					writeAPI(w, 409, nil, message)
+				}
+				return
+			}
 			paidRecovery, restartFailed = false, true
 			if input.CardID == "" && !pro.AutoCardEnabled() {
 				input.CardID = order.CardID
@@ -365,6 +390,9 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !resume && !paidRecovery {
+		if resumeSessionLogin {
+			input.CardID = p.ProAuto.CardID
+		}
 		if input.RetryCurrent {
 			if input.PlanCode == "" {
 				input.PlanCode = cfg.PlanCode
@@ -571,7 +599,7 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 			if detachStopped {
 				p.ProRestockTaskID = ""
 			}
-			if !resume && !paidRecovery {
+			if !resume && !paidRecovery && !resumeSessionLogin {
 				if p.ProPushStartedAt == nil && p.ProAuto.ID == "" {
 					p.CaptureProPushTimeout(pro)
 				}
@@ -792,6 +820,7 @@ func (s *Server) proAutoRPC(ctx context.Context, email string, cfg gptpay.Settin
 			return nil, err
 		}
 		order := gptpay.Order{Provider: cfg.Provider, Country: cfg.Country, CreditQuantity: cfg.CreditQuantity, ID: p.ProAuto.PaymentOrderID(), Email: email, CardID: card.ID, CardName: card.Name, CardLast4: card.Last4, PlanCode: cfg.PlanCode, Status: "submitting", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+		order.ProAutomationID = p.ProAuto.ID
 		snap := gptpay.NewSnapshot(cfg, key, secret, session)
 		order, err = s.submitProAutoPayment(ctx, p.ProAuto, order, snap)
 		if err != nil {

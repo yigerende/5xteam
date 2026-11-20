@@ -65,6 +65,36 @@ func reconcileDeliveries(t *testing.T, s *Store) []restock.Task {
 	return tasks
 }
 
+func TestRestockDeliveryAfterSessionRecoveryAccountRemoved(t *testing.T) {
+	s := transferStore(t)
+	tasks := restockDeliveryFixture(t, s, 2)
+	parent := tasks[0]
+	first, _, err := s.GPTPayOrder(parent.OrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Status = "failed"
+	if err = s.UpdateGPTPayOrder(first); err != nil {
+		t.Fatal(err)
+	}
+	a := model.ProAutoState{ID: "flow-0", RetryAttempts: 1, SessionRecoveryOrderID: first.ID}
+	parent.OrderID = a.PaymentOrderID()
+	o := gptpay.Order{ID: parent.OrderID, ProAutomationID: a.ID, Email: parent.Email, CardID: parent.CardID, Status: "manual_review", CreatedAt: time.Now()}
+	if err := s.CreateGPTPayOrder(o, gptpay.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("UPDATE pro_restock_tasks SET payload=? WHERE id=?", mustJSON(parent), parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("DELETE FROM mail_accounts WHERE email=?", parent.Email); err != nil {
+		t.Fatal(err)
+	}
+	got := reconcileDeliveries(t, s)
+	if got[0].Active() || got[0].FulfilledByTaskID != tasks[1].ID {
+		t.Fatal("lost replacement link after session recovery", got)
+	}
+}
+
 func TestRestockDeliveryPreservesFinanceAndReleasesOnlyInflight(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)

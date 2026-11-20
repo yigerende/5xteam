@@ -254,6 +254,37 @@ func (c *Client) createXUPay(ctx context.Context, s Snapshot, id string) (Remote
 
 var xupayOrderID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
+// StarBridge 2.9.1 publishes this decision in the order detail, without a
+// machine-readable cause. Unknown wording must leave the original order alone.
+const xupayExpiredSessionGuidance = "当前 Session 已失效或无法刷新。请重新登录该账号，获取新的完整 Session 后重新提交。本单未提交付款，"
+const xupayUnpaidSessionFailure = "unpaid_session_expired"
+
+func (v xupayDetail) unpaidSessionExpired() bool {
+	p, o := v.Payment, v.Order
+	if o.Status != "failed" || p.State != "failed" || p.FeeState != "released" || p.AutomaticRunning ||
+		(p.CanCheck != nil && *p.CanCheck) || p.ChargedAmount != nil || o.Activation == "active" {
+		return false
+	}
+	message := strings.TrimSpace(p.Message)
+	if message == "" && len(v.Events) != 0 {
+		last := v.Events[len(v.Events)-1]
+		if last.Stage == "failed" {
+			message = strings.TrimSpace(last.Message)
+		}
+	}
+	return (o.Fee > 0 && message == xupayExpiredSessionGuidance+"冻结服务费已释放。") ||
+		(o.Fee == 0 && message == xupayExpiredSessionGuidance+"无需服务费。")
+}
+
+func (o Order) CanReloginXUPaySession() bool {
+	r := o.Remote
+	return o.Provider == XUPay && o.Status == "failed" && o.SucceededAt == nil && o.OccupancyResolution == nil &&
+		o.LastStatusCheckAt != nil && o.StatusCheckError == "" && !o.CheckPending && !o.SubmissionUncertain && !o.RateLimited &&
+		r.ID != "" && r.Status == "failed" && r.PaymentState == "failed" && r.SettlementStatus == "released" &&
+		r.FailureCategory == xupayUnpaidSessionFailure && o.Email != "" && strings.EqualFold(o.Email, r.TargetEmail) &&
+		o.PlanCode == r.PlanCode && !o.PaymentReviewRequired()
+}
+
 func xupayProductPlan(product string) string {
 	// The old alias remains readable for historical orders, never new catalog entries.
 	return map[string]string{"pro5x": "pro5", "pro20x": "pro20", "pro": "pro20"}[product]
@@ -373,6 +404,8 @@ func (v xupayDetail) remote(id string) (RemoteOrder, error) {
 	r.Retryable = &retry
 	if p.State == "succeeded" || r.Status == "manual_review" {
 		r.FailureCategory = "payment_confirmation"
+	} else if v.unpaidSessionExpired() {
+		r.FailureCategory = xupayUnpaidSessionFailure
 	}
 	return r, nil
 }

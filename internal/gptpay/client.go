@@ -173,6 +173,7 @@ type OccupancyResolution struct {
 }
 
 type Order struct {
+	ProAutomationID     string               `json:"pro_automation_id,omitempty"`
 	CheckPending        bool                 `json:"check_pending,omitempty"`
 	RateLimited         bool                 `json:"rate_limited,omitempty"`
 	RateLimitRetries    int                  `json:"rate_limit_retries,omitempty"`

@@ -6,10 +6,12 @@ import (
 )
 
 type ProAutoState struct {
-	SIWCConsentFailure    *ProSIWCConsentFailure  `json:"siwc_consent_failure,omitempty"`
-	OAuthSource           string                  `json:"oauth_source,omitempty"`
-	Replacement           *ProRechargeReplacement `json:"replacement,omitempty"`
-	PaymentReviewRequired bool                    `json:"payment_review_required,omitempty"`
+	// The failed order is also the durable claim for this workflow's single re-login.
+	SessionRecoveryOrderID string                  `json:"session_recovery_order_id,omitempty"`
+	SIWCConsentFailure     *ProSIWCConsentFailure  `json:"siwc_consent_failure,omitempty"`
+	OAuthSource            string                  `json:"oauth_source,omitempty"`
+	Replacement            *ProRechargeReplacement `json:"replacement,omitempty"`
+	PaymentReviewRequired  bool                    `json:"payment_review_required,omitempty"`
 	// Base connection and effective groups are separate so extra memberships
 	// do not change the restock pool's identity or hide in-flight work.
 	Sub2PushGroupIDs     []int64              `json:"sub2_push_group_ids,omitempty"`
@@ -65,6 +67,9 @@ func (s ProAutoState) PaymentOrderID() string {
 	id := "pro-auto-" + s.ID
 	if s.RetryAttempts > 0 {
 		id += fmt.Sprintf("-retry-%d", s.RetryAttempts)
+	}
+	if s.SessionRecoveryOrderID != "" {
+		id += "-session-1"
 	}
 	return id
 }

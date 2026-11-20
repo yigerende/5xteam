@@ -110,7 +110,13 @@ func replacementDelivery(tx *sql.Tx, source restock.Task) (restock.Task, bool, e
 			if order.Email != current.Email || order.ID != current.OrderID || !strings.HasPrefix(order.ID, "pro-auto-") || len(order.ID) <= len("pro-auto-") {
 				return restock.Task{}, false, nil
 			}
-			nextID = "recharge:" + strings.TrimPrefix(order.ID, "pro-auto-")
+			flowID := order.ProAutomationID
+			if flowID == "" {
+				flowID = strings.TrimPrefix(order.ID, "pro-auto-")
+			} else if base := "pro-auto-" + flowID; order.ID != base && !strings.HasPrefix(order.ID, base+"-") {
+				return restock.Task{}, false, nil
+			}
+			nextID = "recharge:" + flowID
 		} else {
 			r := p.ProAuto.Replacement
 			if p.ProRestockTaskID != current.ID || p.ProAuto.ID == "" || r == nil || r.NextEmail == "" || r.RootEmail == "" {
