@@ -17,6 +17,7 @@ TOKEN = ISSUER + "/api/accounts/oauth/token"
 RESOURCE = "https://api.openai.com/v1"
 SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 REDIRECT = "http://127.0.0.1:1456/auth/callback"
+MANIFEST_SYNC = ("https", "chatgpt.com", "/api/auth/session-manifest-sync")
 
 
 class SIWCProtocolLogin(ProjectProtocolLogin):
@@ -110,19 +111,37 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
         current = self.normalize_auth_url(start_url)
         previous = self.auth_url
         chose_account = False
+        synced_urls = set()
         for _ in range(max_hops):
             parsed = urlsplit(current)
+            if parsed.fragment:
+                raise RuntimeError("SIWC 授权跳转地址无效")
             if (parsed.scheme, parsed.netloc, parsed.path) == ("http", "127.0.0.1:1456", "/auth/callback"):
                 # Capture even an error callback without connecting to loopback.
                 return current, current
-            if parsed.scheme != "https" or parsed.netloc != "auth.openai.com":
+            manifest_sync = (parsed.scheme, parsed.netloc, parsed.path) == MANIFEST_SYNC
+            if not manifest_sync and (parsed.scheme, parsed.netloc) != ("https", "auth.openai.com"):
                 raise RuntimeError("SIWC 授权跳转地址无效")
+            if manifest_sync:
+                if current in synced_urls or len(synced_urls) >= 3:
+                    raise RuntimeError("SIWC 会话同步中转循环或次数超限")
+                synced_urls.add(current)
+                # Some grants sync the ChatGPT session before issuing the code.
+                # Use the same live client, cookies, device and sticky proxy.
+                bridge.emit("siwc_manifest_sync", "start", "沿用登录客户端完成 ChatGPT 会话同步中转")
             response = self.request(current, headers=self.headers(current, {
-                "Accept": "text/html,application/xhtml+xml", "Referer": previous,
+                "Accept": "text/html,application/xhtml+xml,application/json" if manifest_sync else "text/html,application/xhtml+xml",
+                "Referer": previous,
             }), timeout=45)
             next_url = response.location() if response.status in {301, 302, 303, 307, 308} else ""
             if response.status == 200:
-                if parsed.path == "/choose-an-account" and not chose_account:
+                if manifest_sync:
+                    try:
+                        data = response.json()
+                    except (ValueError, TypeError):
+                        data = {}
+                    next_url = self.extract_continue_url(data) if isinstance(data, dict) else ""
+                elif parsed.path == "/choose-an-account" and not chose_account:
                     chose_account = True
                     next_url = self.choose_account_from_html(response.text, current)
                 elif parsed.path == "/sign-in-with-chatgpt/consent":
@@ -135,6 +154,10 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
                     code="siwc_consent_failed", status=response.status,
                     retryable=response.status == 429 or response.status >= 500,
                 )
+            if manifest_sync:
+                bridge.emit("siwc_manifest_sync", "complete", "ChatGPT 会话同步已返回下一跳",
+                            http_status=response.status,
+                            details={"next_url": bridge.safe_url(urljoin(current, next_url))})
             previous, current = current, urljoin(current, next_url)
         raise RuntimeError("SIWC 授权跳转次数超限")
 

@@ -86,7 +86,19 @@ class SIWCScenario(Scenario):
             q.update(self.o.get("callback", {}))
             callback = "http://127.0.0.1:1456/auth/callback?" + urlencode(q)
             callback += "&state=duplicate" if self.o.get("duplicate_state") else ""
+            self.siwc_callback = callback
+            if self.o.get("manifest"):
+                callback = self.o.get("manifest_url", "https://chatgpt.com/api/auth/session-manifest-sync?ticket=private-sync-ticket")
             return Response(url, body={"continue_url": callback, "page": {"type": "external_url"}})
+        if path == "/api/auth/session-manifest-sync":
+            assert urlsplit(url).netloc == "chatgpt.com"
+            assert "private-web-cookie" in [cookie.value for cookie in self.clients[0].cookies.jar]
+            self.calls.append({"path": path, **kw})
+            next_url = self.o.get("manifest_next", self.siwc_callback)
+            status = self.o.get("manifest_status", 303)
+            if status == 200:
+                return Response(url, body=self.o.get("manifest_body", {"continue_url": next_url}))
+            return Response(url, status, location=next_url)
         if path == "/api/accounts/oauth/token":
             assert kw["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
             self.tokens += 1
@@ -202,19 +214,67 @@ class SIWCFlowTests(unittest.TestCase):
                 return {"access_token": "remote-at", "refresh_token": "remote-rt", "id_token": "remote-id",
                         "auth_mode": "siwc", "email": "fixture@example.com", "client_id": "oaiapp_fixture"}
             raise AssertionError(method)
-        with patch.object(bridge, "call", rpc):
-            scenario = SIWCScenario(password=True, totp=True, choose=True)
-            result = scenario.run(siwc_authorization_source="sub2api", login_mode="password_totp",
-                                  gpt_password="private-password", totp_secret="JBSWY3DPEHPK3PXP")
-        self.assertTrue(result["success"], result)
-        self.assertEqual(calls, ["siwc_generate", "siwc_callback"])
+        for manifest in (False, True):
+            calls.clear()
+            with self.subTest(manifest=manifest), patch.object(bridge, "call", rpc):
+                scenario = SIWCScenario(password=True, totp=True, choose=True, manifest=manifest)
+                result = scenario.run(siwc_authorization_source="sub2api", login_mode="password_totp",
+                                      gpt_password="private-password", totp_secret="JBSWY3DPEHPK3PXP")
+                self.assertTrue(result["success"], result)
+                self.assertEqual(calls, ["siwc_generate", "siwc_callback"])
+                self.assertEqual(scenario.tokens, 0)
+                self.assertEqual(len(scenario.clients), 1)
+                self.assertEqual(len(scenario.authorization_sentinels), 3)
+                self.assertEqual([r["flow"] for r in scenario.sentinel_requests],
+                                 ["authorize_continue", "password_verify"] + ["authorize_continue"] * 3)
+                for secret in ("remote-at", "remote-rt", "remote-state", "private-siwc-code", "private-sync-ticket"):
+                    self.assertNotIn(secret, scenario.logs.getvalue())
+
+    def test_optional_manifest_sync_preserves_session_and_callback_validation(self):
+        for status in (200, 301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                scenario = SIWCScenario(manifest=True, manifest_status=status)
+                result = scenario.run()
+                self.assertTrue(result["success"], result)
+                self.assertEqual(scenario.tokens, 1)
+                self.assertEqual(scenario.identifiers, 1)
+                self.assertEqual(len(scenario.clients), 1)
+                self.assertEqual(sum(c["path"] == "/api/auth/session-manifest-sync" for c in scenario.calls), 1)
+                self.assertTrue(all("proxy.example" in str(c.get("proxies")) for c in scenario.calls))
+                self.assertNotIn("private-sync-ticket", scenario.logs.getvalue())
+        scenario = SIWCScenario(manifest=True, callback={"state": "wrong"})
+        self.assertFalse(scenario.run()["success"])
         self.assertEqual(scenario.tokens, 0)
-        self.assertEqual(len(scenario.clients), 1)
-        self.assertEqual(len(scenario.authorization_sentinels), 3)
-        self.assertEqual([r["flow"] for r in scenario.sentinel_requests],
-                         ["authorize_continue", "password_verify"] + ["authorize_continue"] * 3)
-        for secret in ("remote-at", "remote-rt", "remote-state", "private-siwc-code"):
-            self.assertNotIn(secret, scenario.logs.getvalue())
+
+    def test_manifest_sync_rejects_untrusted_urls_and_stops_loops(self):
+        for target in ("https://other.example/", "http://chatgpt.com/api/auth/session-manifest-sync",
+                       "https://chatgpt.com/other", "https://chatgpt.com.evil.example/api/auth/session-manifest-sync",
+                       "https://user@chatgpt.com/api/auth/session-manifest-sync",
+                       "https://chatgpt.com/api/auth/session-manifest-sync#fragment"):
+            for option in ("manifest_url", "manifest_next"):
+                with self.subTest(target=target, option=option):
+                    scenario = SIWCScenario(manifest=True, **{option: target})
+                    result = scenario.run()
+                    self.assertFalse(result["success"], result)
+                    self.assertIn("SIWC 授权跳转地址无效", result["error"])
+                    self.assertEqual(scenario.tokens, 0)
+        scenario = SIWCScenario(manifest=True, manifest_next="https://chatgpt.com/api/auth/session-manifest-sync?ticket=private-sync-ticket")
+        result = scenario.run()
+        self.assertFalse(result["success"])
+        self.assertIn("中转循环", result["error"])
+        self.assertEqual(sum(c["path"] == "/api/auth/session-manifest-sync" for c in scenario.calls), 1)
+
+    def test_manifest_sync_missing_redirect_and_transient_failures(self):
+        for options, retryable in [({"manifest_status": 200, "manifest_body": "<html>no redirect</html>"}, False),
+                                   ({"manifest_status": 200, "manifest_body": []}, False),
+                                   ({"manifest_status": 429}, False), ({"manifest_status": 503}, True)]:
+            with self.subTest(options=options):
+                scenario = SIWCScenario(manifest=True, **options)
+                result = scenario.run()
+                self.assertFalse(result["success"], result)
+                self.assertEqual(result["error_code"], "chatgpt_rate_limited" if options.get("manifest_status") == 429 else "siwc_consent_failed")
+                self.assertEqual(result["retryable"], retryable)
+                self.assertEqual(scenario.tokens, 0)
 
     def test_missing_authorization_sentinel_stops_before_request_without_using_login_token(self):
         from manager_oauth import upstream
