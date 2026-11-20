@@ -91,6 +91,7 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	}
 	d.Capacity = c.EffectiveCapacity(d.ReportedCapacity)
 	d.Trace.ConcurrencyTrigger = c.ConcurrencyTrigger(d.ReportedCapacity)
+	d.Trace.ConcurrencyTriggerPercent, d.Trace.ConcurrencyTargetPercent = c.CapacityThresholds(d.ReportedCapacity)
 	timely, groupInflight := 0, 0
 	for _, t := range tasks {
 		if t.Active() {

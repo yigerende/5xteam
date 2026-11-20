@@ -18,24 +18,35 @@ type ExitDemand struct {
 	Held       bool      `json:"held"`
 }
 
+type ExitEvidence struct {
+	Source        string    `json:"source"`
+	SampleAt      time.Time `json:"sample_at,omitempty"`
+	WindowSeconds int64     `json:"window_seconds,omitempty"`
+	Rate          *float64  `json:"rate,omitempty"`
+	SampleSeconds float64   `json:"sample_seconds,omitempty"`
+	Samples       int       `json:"samples,omitempty"`
+}
+
 type ExitRow struct {
-	ID               int64    `json:"id"`
-	Name             string   `json:"name"`
-	Capacity         float64  `json:"capacity"`
-	DepletionMinutes *float64 `json:"depletion_minutes,omitempty"`
-	ExitMinutes      *float64 `json:"exit_minutes,omitempty"`
-	Reason           string   `json:"reason"`
-	Threshold        *float64 `json:"threshold,omitempty"`
-	UsedPercent      *float64 `json:"used_percent,omitempty"`
-	Risk             bool     `json:"risk"`
-	WarningOnly      bool     `json:"warning_only"`
-	Known            bool     `json:"known"`
+	Evidence         *ExitEvidence `json:"evidence,omitempty"`
+	ID               int64         `json:"id"`
+	Name             string        `json:"name"`
+	Capacity         float64       `json:"capacity"`
+	DepletionMinutes *float64      `json:"depletion_minutes,omitempty"`
+	ExitMinutes      *float64      `json:"exit_minutes,omitempty"`
+	Reason           string        `json:"reason"`
+	Threshold        *float64      `json:"threshold,omitempty"`
+	UsedPercent      *float64      `json:"used_percent,omitempty"`
+	Risk             bool          `json:"risk"`
+	WarningOnly      bool          `json:"warning_only"`
+	Known            bool          `json:"known"`
 	// Internal timeline, never reconstructed from rounded UI values.
 	exitAt           *time.Time
 	reportedCapacity int
 }
 
 type ExitPoint struct {
+	TargetPercent   int     `json:"target_percent,omitempty"`
 	Minutes         float64 `json:"minutes"`
 	Capacity        float64 `json:"capacity"`
 	Pending         int     `json:"pending"`
@@ -125,12 +136,13 @@ func ObserveExitDemand(c Config, current, previous Snapshot, now time.Time) *Exi
 
 func exitRow(c Config, a Account, now time.Time) ExitRow {
 	r := ExitRow{ID: a.ID, Name: a.Name, Capacity: c.EffectiveCapacity(a.Capacity), reportedCapacity: a.Capacity, Reason: "额度样本不足", Threshold: a.QuotaMergeThreshold}
-	setExit := func(at time.Time, reason string, warning bool) {
+	setExit := func(at time.Time, reason string, warning bool, evidence *ExitEvidence) {
 		if r.exitAt == nil || at.Before(*r.exitAt) || (at.Equal(*r.exitAt) && !warning) {
 			r.exitAt = &at
 			r.ExitMinutes = moneyPtr(math.Max(0, at.Sub(now).Minutes()))
 			r.Reason = reason
 			r.WarningOnly = warning
+			r.Evidence = evidence
 		}
 	}
 	// Dollars and utilization are paired within a single account/window, as in
@@ -143,6 +155,11 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 			copyAccount := a
 			copyAccount.Money = &copyMoney
 			row := accountMoneyRow(copyAccount, now, moneyWindowMinutes(c.MoneyWindowMinutes))
+			sampleAt := a.Money.BudgetAt
+			if sampleAt.IsZero() {
+				sampleAt = a.Money.At
+			}
+			evidence := &ExitEvidence{Source: "money", SampleAt: sampleAt, WindowSeconds: w.Seconds, Rate: row.RateUSD, SampleSeconds: float64(moneyWindowMinutes(c.MoneyWindowMinutes)) * 60, Samples: len(a.Money.Samples)}
 			// Fresh usage can prove a reached threshold even before a rate exists.
 			if row.Reason == "采样中" && row.TotalUSD != nil {
 				at := a.Money.BudgetAt
@@ -161,9 +178,9 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 				}
 				if w.UsedPercent >= threshold {
 					r.Known = true
-					setExit(now, reason, false)
+					setExit(now, reason, false, evidence)
 				} else if c.ExitWarningPercent > 0 && threshold-w.UsedPercent <= float64(c.ExitWarningPercent) && now.Add(time.Duration(c.ExitMinutes)*time.Minute).Before(w.ResetAt) {
-					setExit(now.Add(time.Duration(c.ExitMinutes)*time.Minute), "接近额度阈值，退出时间暂不可估", true)
+					setExit(now.Add(time.Duration(c.ExitMinutes)*time.Minute), "接近额度阈值，退出时间暂不可估", true, evidence)
 				}
 				// A newer budget/reset sample supersedes an older percent reading.
 				for _, old := range a.Windows {
@@ -205,13 +222,13 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 			}
 			gap := math.Max(0, *row.TotalUSD*threshold/100-*row.UsedUSD)
 			if gap == 0 {
-				setExit(now, reason, false)
+				setExit(now, reason, false, evidence)
 			} else if *row.RateUSD > 0 {
 				minutes := gap / *row.RateUSD
 				if moneyNumber(minutes) && minutes < 525600 {
 					exit := at.Add(time.Duration(minutes * float64(time.Minute)))
 					if exit.Before(w.ResetAt) {
-						setExit(exit, reason, false)
+						setExit(exit, reason, false, evidence)
 					}
 				}
 			} else if r.exitAt == nil {
@@ -223,6 +240,10 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 	for _, w := range a.Windows {
 		if seen[w.Seconds] || !w.Fresh(now, c.QuotaFreshness()) {
 			continue
+		}
+		evidence := &ExitEvidence{Source: "quota_percent", SampleAt: w.At, WindowSeconds: w.Seconds, SampleSeconds: w.SampleSeconds, Samples: w.Samples}
+		if w.Samples > 0 {
+			evidence.Rate = moneyPtr(w.Rate)
 		}
 		threshold := 100.
 		if w.Seconds == 18000 && a.Quota5HThreshold != nil {
@@ -237,14 +258,14 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 		gap := math.Max(0, threshold-w.Used)
 		if gap == 0 {
 			r.Known = true
-			setExit(now, reason, false)
+			setExit(now, reason, false, evidence)
 		} else if w.Samples > 0 && w.Rate > 0 {
 			r.Known = true
 			minutes := gap / w.Rate
 			if moneyNumber(minutes) && minutes < 525600 {
 				at := w.At.Add(time.Duration(minutes * float64(time.Minute)))
 				if at.Unix() < w.ResetAt {
-					setExit(at, reason, false)
+					setExit(at, reason, false, evidence)
 				}
 			}
 			minutes = (100 - w.Used) / w.Rate
@@ -263,15 +284,15 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 				r.Reason = "近期无消耗"
 			}
 		} else if c.ExitWarningPercent > 0 && gap <= float64(c.ExitWarningPercent) && now.Add(time.Duration(c.ExitMinutes)*time.Minute).Unix() < w.ResetAt {
-			setExit(now.Add(time.Duration(c.ExitMinutes)*time.Minute), "接近额度阈值，退出时间暂不可估", true)
+			setExit(now.Add(time.Duration(c.ExitMinutes)*time.Minute), "接近额度阈值，退出时间暂不可估", true, evidence)
 		}
 	}
 	if a.ExitDeadline != nil {
-		setExit(*a.ExitDeadline, "推送等待时限到达", false)
+		setExit(*a.ExitDeadline, "推送等待时限到达", false, &ExitEvidence{Source: "deadline"})
 	}
 	if a.Leaving {
 		r.Known = true
-		setExit(now, "已进入合并移出流程", false)
+		setExit(now, "已进入合并移出流程", false, &ExitEvidence{Source: "leaving"})
 	}
 	if r.exitAt != nil {
 		r.Risk = !r.exitAt.After(now.Add(time.Duration(c.ExitMinutes) * time.Minute))
@@ -373,6 +394,7 @@ func ForecastExits(c Config, s Snapshot, tasks []Task, newSlots int, lead float6
 		if f.Demand > 0 && f.Demand >= c.ConcurrencyTrigger(base) {
 			f.Pressure = true
 			_, targetPercent := c.CapacityThresholds(base)
+			point.TargetPercent = targetPercent
 			point.Need = max(0, int(math.Ceil((float64(f.Demand)*100/float64(max(1, targetPercent))-point.SizingCapacity)/c.EffectiveCapacity(newSlots))))
 			point.Gap = float64(f.Demand) > c.EffectiveCapacity(base+slots)
 			f.TransientGap = f.TransientGap || point.Gap

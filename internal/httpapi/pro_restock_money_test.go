@@ -81,6 +81,7 @@ func TestRestockMoneySamplesBetweenLongConcurrencyChecks(t *testing.T) {
 	s.proRestock.quotaBinding = restockBinding(p)
 	s.proRestock.quotaNext = now.Add(time.Hour)
 	s.proRestock.lastSnapshot = restock.Snapshot{Binding: restockBinding(p), GroupID: 1, At: now.Add(-time.Minute), Valid: true, LoadValid: true, Accounts: []restock.Account{{ID: 1, Ready: true}}}
+	s.prepareRestockMoney("fixture", &s.proRestock.lastSnapshot)
 	s.sampleRestockMoneyBetweenChecks(c, now)
 	awaitMoneyWorker(t, s)
 	if calls.Load() != 1 {
@@ -137,6 +138,9 @@ func TestRestockMoneyRefreshCadenceFailureAndRecovery(t *testing.T) {
 	snap := restock.Snapshot{Binding: restockBinding(p), Accounts: []restock.Account{{ID: 1, Ready: true, Shared: true, Money: previous}, {ID: 2, Ready: false}}}
 	c := restock.DefaultConfig()
 	c.MoneyWindowMinutes = 1
+	s.prepareRestockMoney("fixture", &snap)
+	s.proRestock.money[1] = previous
+	snap.Accounts[0].Money = previous
 	s.refreshRestockMoney(c, p, "fixture", snap)
 	awaitMoneyWorker(t, s)
 	m := s.proRestock.money[1]
@@ -236,7 +240,9 @@ func TestRestockMoneyOldGroupResponseDiscarded(t *testing.T) {
 	p := model.ProSettings{Sub2: model.Sub2Settings{URL: upstream.URL, Email: "fixture@example.com"}}
 	s := &Server{sub2: sub2.New()}
 	s.proRestock.quotaBinding = restockBinding(p)
-	s.refreshRestockMoney(restock.DefaultConfig(), p, "fixture", restock.Snapshot{Binding: restockBinding(p), Accounts: []restock.Account{{ID: 1, Ready: true}}})
+	snap := restock.Snapshot{Binding: restockBinding(p), Accounts: []restock.Account{{ID: 1, Ready: true}}}
+	s.prepareRestockMoney("fixture", &snap)
+	s.refreshRestockMoney(restock.DefaultConfig(), p, "fixture", snap)
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):

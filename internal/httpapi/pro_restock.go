@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +22,8 @@ type proRestockRuntime struct {
 	moneyBusy        bool
 	moneyScope       string
 	moneyGeneration  uint64
+	moneyAccounts    map[int64]restockMoneyAccount
+	moneySequence    uint64
 	tasks            []restock.Task
 	tick             sync.Mutex
 	mu               sync.Mutex
@@ -228,18 +229,6 @@ func (s *Server) collectProRestock(ctx context.Context, c restock.Config, p mode
 		s.proRestock.quotaBinding = snap.Binding
 		s.proRestock.quotaNext = time.Time{}
 	}
-	members := make([]string, 0, len(accounts))
-	for _, a := range accounts {
-		members = append(members, fmt.Sprintf("%d:%s:%t", a.ID, a.Credentials.Plan, a.Ready(now)))
-	}
-	sort.Strings(members)
-	moneyScope := fmt.Sprintf("%s:%v:%t:%s:%v", snap.Binding, snap.MonitorGroups, scoped, tc.Role, members)
-	if moneyScope != s.proRestock.moneyScope {
-		s.proRestock.moneyScope = moneyScope
-		s.proRestock.money = map[int64]*restock.AccountMoney{}
-		s.proRestock.moneyNext = time.Time{}
-		s.proRestock.moneyGeneration++
-	}
 	for _, a := range accounts {
 		v := restock.Account{Fault: a.Status == "error" || (a.OverloadUntil != nil && a.OverloadUntil.After(now)) || (a.TempUntil != nil && a.TempUntil.After(now)), ID: a.ID, Name: a.Name, Plan: a.Credentials.Plan, Ready: a.Ready(now), Shared: len(a.GroupIDs) > 1, Capacity: a.Concurrency, Windows: append([]restock.Window{}, s.proRestock.quota[a.ID]...)}
 		v.Money = s.proRestock.money[a.ID]
@@ -312,6 +301,9 @@ func (s *Server) collectProRestock(ctx context.Context, c restock.Config, p mode
 		snap.Valid = false
 		snap.LoadValid = false
 		snap.Error = e.Error()
+	}
+	if snap.Valid && snap.LoadValid {
+		s.prepareRestockMoney(fmt.Sprintf("%s:%v:%t:%s", snap.Binding, snap.MonitorGroups, scoped, tc.Role), &snap)
 	}
 	s.refreshRestockQuota(c, p, password, snap)
 	if snap.Valid && snap.LoadValid {

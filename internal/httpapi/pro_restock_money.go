@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"sync"
 	"time"
@@ -10,6 +11,46 @@ import (
 	"chatgpt-space-merge/internal/restock"
 	"chatgpt-space-merge/internal/sub2"
 )
+
+type restockMoneyAccount struct {
+	identity string
+	epoch    uint64
+}
+
+// A roster change invalidates only that account. A whole-target/group change
+// still starts a new scope. Epochs also reject a late read after leave/rejoin.
+func (s *Server) prepareRestockMoney(scope string, snap *restock.Snapshot) {
+	s.proRestock.mu.Lock()
+	defer s.proRestock.mu.Unlock()
+	r := &s.proRestock
+	if r.moneyScope != scope || r.moneyAccounts == nil {
+		r.moneyScope = scope
+		r.money = map[int64]*restock.AccountMoney{}
+		r.moneyAccounts = map[int64]restockMoneyAccount{}
+		r.moneyNext = time.Time{}
+		r.moneyGeneration++
+	}
+	seen := make(map[int64]bool, len(snap.Accounts))
+	for i := range snap.Accounts {
+		a := &snap.Accounts[i]
+		seen[a.ID] = true
+		key, _ := json.Marshal([]any{a.Plan, a.PurchasePlan, a.Ready, a.TargetID, demandServerKey(a.SourceURL), a.RemoteID})
+		entry, exists := r.moneyAccounts[a.ID]
+		if !exists || entry.identity != string(key) {
+			r.moneySequence++
+			entry = restockMoneyAccount{identity: string(key), epoch: r.moneySequence}
+			r.moneyAccounts[a.ID] = entry
+			delete(r.money, a.ID)
+		}
+		a.MoneyEpoch, a.Money = entry.epoch, r.money[a.ID]
+	}
+	for id := range r.moneyAccounts {
+		if !seen[id] {
+			delete(r.moneyAccounts, id)
+			delete(r.money, id)
+		}
+	}
+}
 
 func restockMoneyUsage(u sub2.MoneyUsage, now time.Time) restock.AccountMoney {
 	m := restock.AccountMoney{At: now, Day: u.Day}
@@ -113,7 +154,8 @@ func (s *Server) refreshRestockMoney(c restock.Config, p model.ProSettings, pass
 						m = restock.ObserveMoney(m, a.Money, u.DailyCost, c.MoneyWindowMinutes)
 					}
 					s.proRestock.mu.Lock()
-					if generation == s.proRestock.moneyGeneration && s.proRestock.quotaBinding == snap.Binding {
+					entry, present := s.proRestock.moneyAccounts[a.ID]
+					if generation == s.proRestock.moneyGeneration && s.proRestock.quotaBinding == snap.Binding && present && entry.epoch == a.MoneyEpoch {
 						if s.proRestock.money == nil {
 							s.proRestock.money = map[int64]*restock.AccountMoney{}
 						}

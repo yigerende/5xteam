@@ -1,5 +1,28 @@
 const finite=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0
 export const exitMinutes=n=>finite(n)?n.toFixed(1)+' 分钟':'暂不可估'
+const numberLabel=n=>finite(n)?Number(n.toFixed(3)).toLocaleString('zh-CN',{maximumFractionDigits:3}):'未记录'
+export function exitEvidence(row={}) {
+ const e=row.evidence
+ if(!e)return {basis:'旧记录未保存预测来源',sample:'',detail:''}
+ const names={money:'费用消耗预测',quota_percent:'额度百分比预测',deadline:'推送等待时限',leaving:'已进入移出流程'}
+ const at=Date.parse(e.sample_at)
+ const sample=Number.isFinite(at)&&at>0?new Date(at).toLocaleString('zh-CN',{hour12:false,timeZone:'Asia/Shanghai'}):''
+ const window=e.window_seconds===604800?'7 天窗口':e.window_seconds===18000?'5 小时窗口':'额度窗口'
+ let detail=''
+ if(e.source==='money')detail=`${window}；近 ${numberLabel(e.sample_seconds/60)} 分钟消耗 ${numberLabel(e.rate)} USD/分钟`
+ if(e.source==='quota_percent')detail=`${window}；平滑速率 ${numberLabel(e.rate)} 个百分点/分钟；最近样本间隔 ${numberLabel(e.sample_seconds)} 秒`
+ return {basis:names[e.source]||'未记录',sample,detail}
+}
+export function exitSizing(decision={}) {
+ const f=decision.exit,c=decision.config||{},tr=decision.trace||{}
+ const point=f?.points?.find(p=>p.need===f.need&&p.need>0)
+ const newCapacity=tr.effective_new_account_capacity??tr.new_account_capacity
+ if(!point||!finite(newCapacity)||newCapacity<=0||!finite(f.demand)||!finite(point.sizing_capacity))return ''
+ const tier=c.capacity_tiers_enabled?[...(c.capacity_tiers||[])].filter(t=>t.min_capacity<=point.capacity).sort((a,b)=>b.min_capacity-a.min_capacity)[0]:null
+ const target=point.target_percent||tier?.target_percent||c.target_percent
+ if(!finite(target)||target<=0)return ''
+ return `（需求 ${f.demand} ÷ 目标利用率 ${target}% − 到位时容量 ${numberLabel(point.sizing_capacity)}）÷ 每新号容量 ${numberLabel(newCapacity)}，向上取整 = ${point.need} 个。到位时容量已包含 ${numberLabel(point.pending+point.later_pending)} 个可及时到位的在途账号。`
+}
 export function exitReport(decision={},config=decision.config||{},unavailable=false){
  const f=decision.exit
  const sameVersion=decision.version==null||config.version==null||decision.version===config.version

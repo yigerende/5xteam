@@ -85,6 +85,36 @@ func TestExitThresholdDeadlineResetAndUnknown(t *testing.T) {
 	}
 }
 
+func TestExitEvidenceTracksTheWinningPrediction(t *testing.T) {
+	c, s, now := exitFixture()
+	a := s.Accounts[0]
+	r := exitRow(c, a, now)
+	if r.Evidence == nil || r.Evidence.Source != "money" || *r.Evidence.Rate != 1 || !r.Evidence.SampleAt.Equal(now) {
+		t.Fatal("money forecast evidence missing", r)
+	}
+	deadline := now.Add(time.Minute)
+	a.ExitDeadline = &deadline
+	if r = exitRow(c, a, now); r.Evidence.Source != "deadline" || *r.ExitMinutes != 1 {
+		t.Fatal("earlier deadline retained a different prediction's evidence", r)
+	}
+	a.ExitDeadline, a.Money = nil, nil
+	a.Windows = []Window{{Seconds: 604800, ResetAt: now.Add(time.Hour).Unix(), Used: 80, Rate: 4, Samples: 3, SampleSeconds: 12, At: now}}
+	r = exitRow(c, a, now)
+	if r.Evidence.Source != "quota_percent" || *r.Evidence.Rate != 4 || r.Evidence.SampleSeconds != 12 {
+		t.Fatal("percent fallback not distinguished", r)
+	}
+	a.Leaving = true
+	if exitRow(c, a, now).Evidence.Source != "leaving" {
+		t.Fatal("actual departure did not replace forecast evidence")
+	}
+	d := Evaluate(c, s, nil, Limits{}, 2, 50, 2, now)
+	raw, err := json.Marshal(d)
+	var saved Decision
+	if err != nil || json.Unmarshal(raw, &saved) != nil || saved.Exit.Rows[0].Evidence.Source != "money" || len(saved.Exit.Points) == 0 || saved.Exit.Points[0].TargetPercent == 0 {
+		t.Fatal("decision persistence lost historical calculation inputs", err)
+	}
+}
+
 func TestExitTimelinesDeduplicateInflightAndLateArrival(t *testing.T) {
 	c, s, now := exitFixture()
 	s.Accounts[0].Money = testMoney(now, 99, 99, 1) // leaves in one minute

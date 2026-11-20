@@ -4,6 +4,8 @@ package restock
 // from current settings or task states when reviewing a historical decision.
 // A missing trace means an older record, not zero demand or zero capacity.
 type DecisionTrace struct {
+	ConcurrencyTargetPercent    int           `json:"concurrency_target_percent,omitempty"`
+	ConcurrencyTriggerPercent   int           `json:"concurrency_trigger_percent,omitempty"`
 	ConcurrencyTrigger          int           `json:"concurrency_trigger"`
 	Version                     int           `json:"version"`
 	NewAccountCapacity          int           `json:"new_account_capacity"` // raw, persisted on tasks

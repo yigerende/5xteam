@@ -1,6 +1,6 @@
 <script setup>
 import {computed} from 'vue'
-import {exitReport,exitMinutes} from '../restockExit'
+import {exitReport,exitMinutes,exitEvidence,exitSizing} from '../restockExit'
 const props=defineProps({decision:{type:Object,default:()=>({})},config:{type:Object,default:()=>({})},unavailable:Boolean,compact:Boolean})
 defineEmits(['details'])
 const report=computed(()=>exitReport(props.decision,props.config,props.unavailable))
@@ -19,10 +19,12 @@ const n=v=>v??'—'
   <template v-else>
    <p v-if="report.unknown" class="hint">{{report.unknown}} 个账号的额度预测数据不足；有效的截止时间和其他账号数据仍独立参与判断。</p>
    <div class="scroll"><table><thead><tr><th>账号</th><th>预计耗完</th><th>预计退出</th><th>退出依据</th><th>容量</th></tr></thead><tbody>
-    <tr v-for="r in report.rows" :key="r.id"><td>{{r.name||'#'+r.id}}</td><td>{{exitMinutes(r.depletion_minutes)}}</td><td>{{r.warning_only?'接近阈值，时间未知':exitMinutes(r.exit_minutes)}}</td><td>{{r.reason}}<small v-if="r.threshold!=null">额度 {{r.used_percent??'未知'}}% / 合并阈值 {{r.threshold}}%</small></td><td>{{r.capacity}}</td></tr>
+    <tr v-for="r in report.rows" :key="r.id"><td>{{r.name||'#'+r.id}}</td><td>{{exitMinutes(r.depletion_minutes)}}</td><td>{{r.warning_only?'接近阈值，时间未知':exitMinutes(r.exit_minutes)}}</td><td>{{r.reason}}<small>{{exitEvidence(r).basis}}</small><small v-if="exitEvidence(r).sample">样本时间 {{exitEvidence(r).sample}}</small><small v-if="exitEvidence(r).detail">{{exitEvidence(r).detail}}</small><small v-if="r.threshold!=null">额度 {{r.used_percent??'未知'}}% / 合并阈值 {{r.threshold}}%</small></td><td>{{r.capacity}}</td></tr>
     <tr v-if="!report.rows.length"><td colspan="5">暂无有效逐账号预测</td></tr>
    </tbody></table></div>
    <div v-if="report.points.length" class="scroll"><table><thead><tr><th>预计退出时点</th><th>剩余容量</th><th>及时在途容量</th><th>新号预计可用时容量</th><th>净缺口</th></tr></thead><tbody><tr v-for="(p,i) in report.points" :key="i"><td>{{exitMinutes(p.minutes)}}</td><td>{{p.capacity}}</td><td>{{p.pending_capacity}}（{{p.pending}} 个）</td><td>{{p.sizing_capacity}}<small>{{exitMinutes(p.sizing_minutes)}}后 · 另有 {{p.later_pending}} 个在途到位</small></td><td>{{p.need}} 个<small v-if="p.gap">存在短时容量缺口</small></td></tr></tbody></table></div>
+   <p v-if="exitSizing(decision)" class="calculation">{{exitSizing(decision)}}</p>
+   <p class="hint">退出压力确认 {{decision.exit?.confirmations??'未记录'}} / {{decision.config?.confirmations??'未记录'}} 次：按整体退出压力检查累计，不代表每个风险账号都有同等次数的新额度样本。</p>
    <p class="hint">按退出后的需求与容量判断，按新增任务预计到位时的缺口定数量。晚到但能先于新增任务补齐的在途，不重复开通。</p>
   </template>
  </div>

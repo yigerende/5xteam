@@ -155,6 +155,7 @@ func (w Window) Fresh(now time.Time, maxAge time.Duration) bool {
 }
 
 type Account struct {
+	MoneyEpoch          uint64        `json:"-"` // Runtime ownership of an account's cost samples.
 	TargetID            string        `json:"target_id,omitempty"`
 	RemoteID            int64         `json:"remote_id,omitempty"`
 	SourceURL           string        `json:"source_url,omitempty"`
