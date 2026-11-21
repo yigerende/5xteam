@@ -31,6 +31,14 @@ func (s *Server) merchantProAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) performProMerchant(ctx context.Context, email string) (out model.MailAccountProfile, runErr error) {
+	return s.performProMerchantWithAutoReissue(ctx, email, false)
+}
+
+func (s *Server) performProAutomaticMerchant(ctx context.Context, email string) (model.MailAccountProfile, error) {
+	return s.performProMerchantWithAutoReissue(ctx, email, true)
+}
+
+func (s *Server) performProMerchantWithAutoReissue(ctx context.Context, email string, automatic bool) (out model.MailAccountProfile, runErr error) {
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}
@@ -71,7 +79,11 @@ func (s *Server) performProMerchant(ctx context.Context, email string) (out mode
 			}
 		}
 	}
-	p, submission, err := s.store.PrepareProMerchant(email)
+	prepare := s.store.PrepareProMerchant
+	if automatic {
+		prepare = s.store.PrepareProAutomaticMerchant
+	}
+	p, submission, err := prepare(email)
 	if err != nil {
 		return p, err
 	}
@@ -165,6 +177,14 @@ func (s *Server) performProMerchant(ctx context.Context, email string) (out mode
 		}
 	}
 	job, queryErr := client.Progress(ctx, submission.APIKey, p.ProMerchant.JobID, p.Email)
+	if queryErr == nil && submission.Provider == refundmerchant.ProviderStarBridge && job.Status == "failed" && p.ProMerchant.AutoReissueEnabled && p.ProMerchant.AutoReissues == 0 {
+		if err := ctx.Err(); err != nil {
+			return p, err
+		}
+		// Persist the failed attempt, new identity and consumed allowance in one
+		// transaction. The merchant scheduler submits that new order next tick.
+		return s.store.AutoReissueProMerchant(email, p.ProMerchant.RequestID, p.ProAuto.StopVersion, job)
+	}
 	p, err = s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
 		m := p.ProMerchant
 		now := time.Now().UTC()

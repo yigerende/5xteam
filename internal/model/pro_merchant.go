@@ -24,6 +24,9 @@ type ProMerchant struct {
 	RetiredAt     *time.Time `json:"retired_at,omitempty"`
 	CheckedAt     *time.Time `json:"checked_at,omitempty"`
 	NextCheckAt   *time.Time `json:"next_check_at,omitempty"`
+
+	AutoReissueEnabled bool `json:"auto_reissue_enabled,omitempty"`
+	AutoReissues       int  `json:"auto_reissues,omitempty"`
 }
 
 func (p MailAccountProfile) MerchantStarted() bool {

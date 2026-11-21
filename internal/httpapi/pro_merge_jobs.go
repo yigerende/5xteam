@@ -55,6 +55,7 @@ func (s *Server) startProEndJob(email string, unlock func(), quality *proQuality
 		return p, errors.New("账号不在 Pro 管理中")
 	}
 	restart := action == "restart_merge_v2"
+	automaticMerchant := action == "automatic"
 	manual := action == "manual_deactivate" || action == "manual_merge" || action == "manual_merchant" || action == "manual_merge_v2" || restart
 	if !manual && (p.ProAuto.StopRequested || p.ProAuto.Status == "stopped") && !p.MergeV2DeadCleanupAllowed() {
 		return p, errors.New("用户已停止该账号流程，请手动续跑")
@@ -192,7 +193,7 @@ func (s *Server) startProEndJob(email string, unlock func(), quality *proQuality
 			if action == "merge_v2" {
 				_, runErr = s.performProMergeV2(ctx, email)
 			} else if action == "merchant" {
-				_, runErr = s.performProMerchant(ctx, email)
+				_, runErr = s.performProMerchantWithAutoReissue(ctx, email, automaticMerchant)
 			} else if action == "deactivate" {
 				_, runErr = s.performProDeactivation(ctx, email)
 			} else {

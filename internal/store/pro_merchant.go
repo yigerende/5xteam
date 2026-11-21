@@ -49,6 +49,14 @@ func (s *Store) ProMerchantSubmission(email, expectedRequestID string) (string, 
 // Pin the endpoint, key and exact payload before sending anything. Retrying a lost POST
 // response uses the original idempotency key even after credentials are edited.
 func (s *Store) PrepareProMerchant(email string) (model.MailAccountProfile, ProMerchantSubmission, error) {
+	return s.prepareProMerchant(email, false)
+}
+
+func (s *Store) PrepareProAutomaticMerchant(email string) (model.MailAccountProfile, ProMerchantSubmission, error) {
+	return s.prepareProMerchant(email, true)
+}
+
+func (s *Store) prepareProMerchant(email string, automatic bool) (model.MailAccountProfile, ProMerchantSubmission, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var p model.MailAccountProfile
@@ -145,6 +153,9 @@ func (s *Store) PrepareProMerchant(email string) (model.MailAccountProfile, ProM
 	now := time.Now().UTC()
 	next := now.Add(15 * time.Second)
 	p.ProMerchant = &model.ProMerchant{Provider: submission.Provider, RequestID: "space-" + rand.Text(), Status: "pending", Message: "准备提交商户", StartedAt: now, UpdatedAt: now, NextCheckAt: &next}
+	// Pin eligibility with the first request. Polling or manually reissuing an
+	// existing request must never grant another automatic reissue.
+	p.ProMerchant.AutoReissueEnabled = automatic && p.ManagementScope == "pro" && submission.Provider == refundmerchant.ProviderStarBridge
 	if err = s.pinProMerchantFee(p.ProMerchant, p); err != nil {
 		return p, submission, err
 	}

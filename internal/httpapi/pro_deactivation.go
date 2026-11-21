@@ -35,7 +35,7 @@ func (s *Server) performProDispositionUnchecked(ctx context.Context, email strin
 		return s.performProMergeV2(ctx, email)
 	}
 	if p.MerchantStarted() {
-		return s.performProMerchant(ctx, email)
+		return s.performProAutomaticMerchant(ctx, email)
 	}
 	if p.DeletionConfirmed() {
 		return p, nil
@@ -52,7 +52,7 @@ func (s *Server) performProDispositionUnchecked(ctx context.Context, email strin
 		return s.performProMergeV2(ctx, email)
 	}
 	if c.AutoMerchantEnabled {
-		return s.performProMerchant(ctx, email)
+		return s.performProAutomaticMerchant(ctx, email)
 	}
 	return s.performProMerge(ctx, email)
 }

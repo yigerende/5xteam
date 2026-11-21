@@ -1249,7 +1249,7 @@ func (s *Server) runProFinalAction(ctx context.Context, email string, forceSetti
 	if action == "merge_v2" {
 		merge = s.performProMergeV2
 	} else if action == "merchant" {
-		merge = s.performProMerchant
+		merge = s.performProAutomaticMerchant
 	} else if action == "deactivate" {
 		merge = s.performProDeactivation
 	} else if s.proAutoHooks != nil && s.proAutoHooks.Merge != nil {
