@@ -68,7 +68,7 @@ assert.match(exitEvidence({}).basis,/旧记录未保存/)
 assert.equal(exitEvidence({evidence:{source:'deadline'}}).sample,'')
 const percent=exitEvidence({evidence:{source:'quota_percent',sample_at:'2026-11-20T03:31:03Z',rate:16.4468,sample_seconds:10.944,window_seconds:604800}})
 assert.equal(percent.basis,'额度百分比预测')
-assert.match(percent.detail,/16.447 个百分点\/分钟；最近样本间隔 10.944 秒/)
+assert.match(percent.detail,/16.447 个百分点\/分钟；样本覆盖 10.944 秒/)
 assert.match(percent.sample,/11:31:03/)
 const money=exitEvidence({evidence:{source:'money',sample_at:'2026-11-20T03:31:03Z',rate:0,sample_seconds:180,window_seconds:604800}})
 assert.match(money.detail,/近 3 分钟消耗 0 USD\/分钟/)
@@ -97,6 +97,12 @@ for(const name of ['ProExitStatus','ProRestockDecisionDetails']) {
 }
 exitDecision.exit.rows=[{id:1,name:'fixture@example.com',capacity:60,exit_minutes:4.44,reason:'达到额度合并阈值',risk:true,evidence:{source:'quota_percent',sample_at:'2026-11-20T03:31:03Z',rate:16.4468,sample_seconds:10.944,window_seconds:604800}}]
 const html=await renderToString(Vue.createSSRApp(components.ProRestockDecisionDetails,{decision:exitDecision}))
-for(const text of ['退出前补货缺 2 个','已预留 2 个','fixture@example.com','额度百分比预测','样本时间','10.944 秒','需求 71','每新号容量 60','向上取整 = 2 个','不代表每个风险账号'])assert.ok(html.includes(text),text)
+for(const text of ['退出前补货缺 2 个','已预留 2 个','fixture@example.com','额度百分比预测','样本时间','10.944 秒','需求 71','每新号容量 60','向上取整 = 2 个','旧记录未保存逐数量确认'])assert.ok(html.includes(text),text)
 assert.doesNotMatch(html,/undefined|NaN/)
 console.log('Passed: actual Vue decision and exit templates render the complete saved explanation')
+const confirmed={raw_need:2,confirmed_need:1,levels:[{quantity:1,count:3},{quantity:2,count:1}]}
+const current={...exitDecision,exit_need:1,started:1,suggested:1,trace:{...exitDecision.trace,version:2,net_need:1},exit:{...exitDecision.exit,confirmation:confirmed}}
+const newHtml=await renderToString(Vue.createSSRApp(components.ProRestockDecisionDetails,{decision:current}))
+for(const text of ['计算缺 2 个，已确认 1 个','缺至少1个：3/3次','缺至少2个：1/3次','重复缓存不累计'])assert.ok(newHtml.includes(text),text)
+assert.doesNotMatch(newHtml,/undefined|NaN|旧记录未保存逐数量确认/)
+console.log('Passed: actual Vue per-quantity confirmation, partial approval and cache explanation')

@@ -202,8 +202,9 @@ func TestProRestockBatchDrainsBeforeNewDemand(t *testing.T) {
 				t.Fatal("failed final refresh admitted a new batch")
 			}
 			monitorErr, frozen = nil, time.Time{}
-			busy(tc.concurrency)                // Inspect next reservation without starting payment.
-			time.Sleep(1100 * time.Millisecond) // Expire the independently enforced cooldown.
+			load = (10 + tc.size*p.Sub2.AccountConcurrency) * 9 / 10 // Soft pressure after the completed batch.
+			busy(tc.concurrency)                                     // Inspect next reservation without starting payment.
+			time.Sleep(1100 * time.Millisecond)                      // Expire the independently enforced cooldown.
 			for i := 1; i <= c.Confirmations; i++ {
 				tick()
 				if s.proRestock.decision.Confirmations != i || (i < c.Confirmations && s.proRestock.decision.Started != 0) {

@@ -1,6 +1,7 @@
 <script setup>
 import {computed} from 'vue'
 import {exitReport,exitMinutes,exitEvidence,exitSizing} from '../restockExit'
+import {confirmationText} from '../restockDecision'
 const props=defineProps({decision:{type:Object,default:()=>({})},config:{type:Object,default:()=>({})},unavailable:Boolean,compact:Boolean})
 defineEmits(['details'])
 const report=computed(()=>exitReport(props.decision,props.config,props.unavailable))
@@ -24,7 +25,8 @@ const n=v=>v??'—'
    </tbody></table></div>
    <div v-if="report.points.length" class="scroll"><table><thead><tr><th>预计退出时点</th><th>剩余容量</th><th>及时在途容量</th><th>新号预计可用时容量</th><th>净缺口</th></tr></thead><tbody><tr v-for="(p,i) in report.points" :key="i"><td>{{exitMinutes(p.minutes)}}</td><td>{{p.capacity}}</td><td>{{p.pending_capacity}}（{{p.pending}} 个）</td><td>{{p.sizing_capacity}}<small>{{exitMinutes(p.sizing_minutes)}}后 · 另有 {{p.later_pending}} 个在途到位</small></td><td>{{p.need}} 个<small v-if="p.gap">存在短时容量缺口</small></td></tr></tbody></table></div>
    <p v-if="exitSizing(decision)" class="calculation">{{exitSizing(decision)}}</p>
-   <p class="hint">退出压力确认 {{decision.exit?.confirmations??'未记录'}} / {{decision.config?.confirmations??'未记录'}} 次：按整体退出压力检查累计，不代表每个风险账号都有同等次数的新额度样本。</p>
+   <p v-if="decision.exit?.confirmation" class="hint">{{confirmationText(decision.exit.confirmation,decision.config?.confirmations)}} 预测按相关账号的新消耗证据确认，重复缓存不累计。</p>
+   <p v-else class="hint">历史退出压力确认 {{decision.exit?.confirmations??'未记录'}} / {{decision.config?.confirmations??'未记录'}} 次；旧记录未保存逐数量确认。</p>
    <p class="hint">按退出后的需求与容量判断，按新增任务预计到位时的缺口定数量。晚到但能先于新增任务补齐的在途，不重复开通。</p>
   </template>
  </div>

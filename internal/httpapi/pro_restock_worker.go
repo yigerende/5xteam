@@ -508,7 +508,7 @@ func (s *Server) tickProRestock(ctx context.Context, force bool) (resultErr erro
 	// Inactive rounds and preparation errors still honor the configured cadence.
 	// Active collections replace this deadline with their measured completion.
 	s.proRestock.next = now.Add(time.Duration(c.CheckSeconds) * time.Second)
-	tasks, e := s.store.ProRestockTasks()
+	tasks, e := s.store.ProRestockActiveTasks()
 	if e != nil {
 		return e
 	}
@@ -606,31 +606,15 @@ func (s *Server) tickProRestock(ctx context.Context, force bool) (resultErr erro
 		return e
 	}
 	s.setRestockMonitorPhase("evaluating")
-	batchWaiting := restock.WaitForBatch(snap, tasks) != nil
-	sampleFresh := restockSnapshotFresh(c, snap, time.Now())
 	s.proRestock.mu.Lock()
-	if batchWaiting || c.Version != s.proRestock.lastVersion || snap.Binding != s.proRestock.lastSnapshot.Binding || snap.TakeoverToken != s.proRestock.lastSnapshot.TakeoverToken || !sampleFresh {
-		s.proRestock.confirmation = 0
-		s.proRestock.exitConfirmation = 0
-	}
-	snap.ExitDemand = restock.ObserveExitDemand(c, snap, s.proRestock.lastSnapshot, time.Now())
 	fresh := snap.At.After(s.proRestock.lastSample)
+	snap.ExitDemand = restock.ObserveExitDemand(c, snap, s.proRestock.lastSnapshot, time.Now())
+	snap = restock.ObserveAdmission(c, snap, s.proRestock.lastSnapshot, tasks, p.Sub2.AccountConcurrency, lead, time.Now())
+	confirm := snap.ConcurrencyConfirmations()
+	s.proRestock.confirmation, s.proRestock.exitConfirmation = confirm, snap.ExitConfirmations
 	if fresh {
-		if sampleFresh && !batchWaiting && restock.Pressure(c, snap) {
-			s.proRestock.confirmation++
-		} else {
-			s.proRestock.confirmation = 0
-		}
-		exit := restock.ForecastExits(c, snap, tasks, p.Sub2.AccountConcurrency, lead, time.Now())
-		if sampleFresh && !batchWaiting && c.ExitEnabled && exit.Valid && exit.Pressure {
-			s.proRestock.exitConfirmation++
-		} else {
-			s.proRestock.exitConfirmation = 0
-		}
 		s.proRestock.lastSample = snap.At
 	}
-	snap.ExitConfirmations = s.proRestock.exitConfirmation
-	confirm := s.proRestock.confirmation
 	s.proRestock.lastVersion = c.Version
 	s.proRestock.mu.Unlock()
 	// Collection and reconciliation can outlive the snapshot's freshness window.
@@ -759,7 +743,7 @@ func (s *Server) tickProRestock(ctx context.Context, force bool) (resultErr erro
 	return nil
 }
 func (s *Server) dispatchProRestock(ctx context.Context, c restock.Config, p model.ProSettings, snap restock.Snapshot) {
-	tasks, e := s.store.ProRestockTasks()
+	tasks, e := s.store.ProRestockActiveTasks()
 	if e != nil {
 		return
 	}

@@ -10,20 +10,37 @@ func ObserveWindows(current, previous []Window, samePlan bool, maxAge time.Durat
 	for i := range current {
 		w := &current[i]
 		w.Rate, w.Samples = 0, 0
+		w.History, w.RateStartAt = []QuotaSample{{At: w.At, Used: w.Used}}, time.Time{}
 		w.ObservedRate, w.SampleSeconds = nil, 0
 		if !samePlan {
 			continue
 		}
 		for _, p := range previous {
 			elapsed := w.At.Sub(p.At)
+			if p.Seconds == w.Seconds && !w.At.After(p.At) {
+				*w = p // A cached/late response is not a new observation.
+				break
+			}
 			if p.Seconds != w.Seconds || p.ResetAt != w.ResetAt || elapsed < time.Second || elapsed > maxAge || !validWindow(w.Used, 0) || !validWindow(p.Used, p.Rate) || w.Used < p.Used {
 				continue
 			}
-			rate := (w.Used - p.Used) / elapsed.Minutes()
-			w.ObservedRate, w.SampleSeconds = &rate, elapsed.Seconds()
-			// React to rising consumption immediately; decay more slowly after a fall.
-			w.Rate = math.Max(rate, p.Rate*.6+rate*.4)
-			w.Samples = p.Samples + 1
+			w.History = append([]QuotaSample(nil), p.History...)
+			if len(w.History) == 0 {
+				w.History = []QuotaSample{{At: p.At, Used: p.Used}}
+			}
+			w.History = append(w.History, QuotaSample{At: w.At, Used: w.Used})
+			cut := w.At.Add(-time.Minute)
+			for len(w.History) > 2 && !w.History[1].At.After(cut) {
+				w.History = w.History[1:]
+			}
+			first := w.History[0]
+			span := w.At.Sub(first.At)
+			if span >= 30*time.Second {
+				rate := (w.Used - first.Used) / span.Minutes()
+				w.ObservedRate, w.SampleSeconds = &rate, span.Seconds()
+				w.Rate, w.RateStartAt = rate, first.At
+				w.Samples = p.Samples + 1
+			}
 			break
 		}
 	}
@@ -56,7 +73,10 @@ func pressureAt(c Config, s Snapshot, now time.Time) bool {
 
 func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, newSlots int, lead float64, now time.Time) (d Decision) {
 	d = Decision{At: now, Version: c.Version, Snapshot: s, Config: c, Limits: limits, Confirmations: confirmations, LeadMinutes: lead, TriggerMinutes: float64(c.TriggerMinutes), TargetMinutes: float64(c.TargetMinutes), Warnings: []string{}}
-	d.Trace = &DecisionTrace{Version: 1, NewAccountCapacity: newSlots, EffectiveNewAccountCapacity: c.EffectiveCapacity(newSlots), StopStage: "data"}
+	d.Trace = &DecisionTrace{Version: 2, NewAccountCapacity: newSlots, EffectiveNewAccountCapacity: c.EffectiveCapacity(newSlots), StopStage: "data"}
+	if s.Admission != nil {
+		d.Trace.ConcurrencyConfirmation = &s.Admission.Concurrency
+	}
 	// Keep forecasts, demand and collection errors visible while suppressing
 	// every trigger, including startup, replacement and emergency demand.
 	defer func() {
@@ -93,14 +113,26 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	d.Trace.ConcurrencyTrigger = c.ConcurrencyTrigger(d.ReportedCapacity)
 	d.Trace.ConcurrencyTriggerPercent, d.Trace.ConcurrencyTargetPercent = c.CapacityThresholds(d.ReportedCapacity)
 	timely, groupInflight := 0, 0
+	seenTasks, seenSupply := map[string]bool{}, map[int64]bool{}
+	readyIDs := map[int64]bool{}
+	for _, a := range s.Accounts {
+		if availableAccount(a, now) {
+			readyIDs[a.ID] = true
+		}
+	}
 	for _, t := range tasks {
 		if t.Active() {
+			if t.ID != "" && seenTasks[t.ID] {
+				continue
+			}
+			seenTasks[t.ID] = true
 			d.Inflight++
 			if t.Binding == s.Binding && t.GroupID == s.GroupID {
 				groupInflight++
 			}
-			if t.Predictable() && t.Binding == s.Binding && t.GroupID == s.GroupID && !t.ETA.After(now.Add(time.Duration(lead*float64(time.Minute)))) {
+			if t.Predictable() && t.Binding == s.Binding && t.GroupID == s.GroupID && !readyIDs[t.AccountID] && (t.AccountID == 0 || !seenSupply[t.AccountID]) && !t.ETA.After(now.Add(time.Duration(lead*float64(time.Minute)))) {
 				timely++
+				seenSupply[t.AccountID] = true
 			}
 		}
 	}
@@ -129,6 +161,9 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	d.Exit = &exit
 	if c.ExitEnabled && exit.Confirmed {
 		d.ExitNeed = exit.Need
+		if s.Admission != nil {
+			d.ExitNeed = min(exit.Need, s.Admission.Exit.ConfirmedNeed)
+		}
 	}
 	if c.ExitEnabled && float64(c.ExitMinutes) < lead+float64(c.MarginMinutes) {
 		d.Warnings = append(d.Warnings, "退出前补货提前时间小于预计就绪耗时＋安全余量，可能来不及接替；仍采用手动配置时间")
@@ -144,17 +179,13 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	if d.ForceMerge.Unknown > 0 {
 		d.Warnings = append(d.Warnings, "部分 EJH 账号时限或首次推送记录不明，已排除，不按 0 分钟触发")
 	}
-	arrival := now.Add(time.Duration(lead * float64(time.Minute)))
-	futureCapacity := 0
-	for _, a := range s.Accounts {
-		if usableAt(a, arrival, now, c.QuotaFreshness()) {
-			futureCapacity += a.Capacity
-		}
-	}
-	if c.ConcurrencyEnabled && confirmations >= c.Confirmations && pressureAt(c, s, now) {
+	futureCapacity := d.ReportedCapacity
+	if c.ConcurrencyEnabled && pressureAt(c, s, now) && (confirmations >= c.Confirmations || s.Admission != nil && s.Admission.Concurrency.ConfirmedNeed > 0) {
 		d.Trace.ConcurrencyTriggered = true
-		_, targetPercent := c.CapacityThresholds(d.ReportedCapacity)
-		d.ConcurrencyNeed = max(0, int(math.Ceil((float64(d.Used+d.Waiting)*100/float64(targetPercent)-c.EffectiveCapacity(futureCapacity+timely*newSlots))/c.EffectiveCapacity(newSlots))))
+		d.ConcurrencyNeed = concurrencyNeed(c, s, tasks, newSlots, lead, now)
+		if s.Admission != nil {
+			d.ConcurrencyNeed = min(d.ConcurrencyNeed, s.Admission.Concurrency.ConfirmedNeed)
+		}
 	}
 	d.Trace.FutureCapacity = c.EffectiveCapacity(futureCapacity)
 	timeWithinHorizon := lead < float64(c.ForecastMinutes) && d.TargetMinutes <= float64(c.ForecastMinutes)
@@ -211,10 +242,7 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 		d.Trace.StopStage = "breaker"
 		return block("连续失败已达熔断阈值，处理原因后在配置页重置熔断")
 	}
-	cooldown := c.CooldownSeconds
-	if d.Waiting >= c.EmergencyQueue || (c.ExitEnabled && d.ExitNeed > 0 && d.Exit != nil && d.Exit.Emergency) {
-		cooldown = c.EmergencyCooldownSeconds
-	}
+	cooldown := d.Cooldown(c)
 	d.Trace.CooldownSeconds = &cooldown
 	if limits.LastBatch != nil && now.Sub(*limits.LastBatch) < time.Duration(cooldown)*time.Second {
 		d.Trace.StopStage = "cooldown"

@@ -30,8 +30,8 @@ func TestObservedRateRetainsZeroAndResets(t *testing.T) {
 	w := p
 	w.At = n
 	got := ObserveWindows([]Window{w}, []Window{p}, true, 2*time.Minute)[0]
-	if got.ObservedRate == nil || *got.ObservedRate != 0 || got.Rate != 3 || got.SampleSeconds != 60 {
-		t.Fatalf("raw zero hidden by smoothing: %+v", got)
+	if got.ObservedRate == nil || *got.ObservedRate != 0 || got.Rate != 0 || got.SampleSeconds != 60 {
+		t.Fatalf("full zero-consumption window retained an obsolete burn rate: %+v", got)
 	}
 	w.ResetAt++
 	got = ObserveWindows([]Window{w}, []Window{p}, true, 2*time.Minute)[0]

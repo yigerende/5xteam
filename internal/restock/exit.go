@@ -19,6 +19,9 @@ type ExitDemand struct {
 }
 
 type ExitEvidence struct {
+	RateAt        time.Time `json:"rate_at,omitempty"`
+	ResetAt       int64     `json:"reset_at,omitempty"`
+	Certain       bool      `json:"certain,omitempty"`
 	Source        string    `json:"source"`
 	SampleAt      time.Time `json:"sample_at,omitempty"`
 	WindowSeconds int64     `json:"window_seconds,omitempty"`
@@ -28,24 +31,26 @@ type ExitEvidence struct {
 }
 
 type ExitRow struct {
-	Evidence         *ExitEvidence `json:"evidence,omitempty"`
-	ID               int64         `json:"id"`
-	Name             string        `json:"name"`
-	Capacity         float64       `json:"capacity"`
-	DepletionMinutes *float64      `json:"depletion_minutes,omitempty"`
-	ExitMinutes      *float64      `json:"exit_minutes,omitempty"`
-	Reason           string        `json:"reason"`
-	Threshold        *float64      `json:"threshold,omitempty"`
-	UsedPercent      *float64      `json:"used_percent,omitempty"`
-	Risk             bool          `json:"risk"`
-	WarningOnly      bool          `json:"warning_only"`
-	Known            bool          `json:"known"`
+	PredictionPending bool          `json:"prediction_pending,omitempty"`
+	Evidence          *ExitEvidence `json:"evidence,omitempty"`
+	ID                int64         `json:"id"`
+	Name              string        `json:"name"`
+	Capacity          float64       `json:"capacity"`
+	DepletionMinutes  *float64      `json:"depletion_minutes,omitempty"`
+	ExitMinutes       *float64      `json:"exit_minutes,omitempty"`
+	Reason            string        `json:"reason"`
+	Threshold         *float64      `json:"threshold,omitempty"`
+	UsedPercent       *float64      `json:"used_percent,omitempty"`
+	Risk              bool          `json:"risk"`
+	WarningOnly       bool          `json:"warning_only"`
+	Known             bool          `json:"known"`
 	// Internal timeline, never reconstructed from rounded UI values.
 	exitAt           *time.Time
 	reportedCapacity int
 }
 
 type ExitPoint struct {
+	sizingAt        time.Time
 	TargetPercent   int     `json:"target_percent,omitempty"`
 	Minutes         float64 `json:"minutes"`
 	Capacity        float64 `json:"capacity"`
@@ -59,24 +64,26 @@ type ExitPoint struct {
 }
 
 type ExitForecast struct {
-	Rows            []ExitRow   `json:"rows"`
-	Points          []ExitPoint `json:"points"`
-	Valid           bool        `json:"valid"`
-	Complete        bool        `json:"complete"`
-	Demand          int         `json:"demand"`
-	ObservedDemand  int         `json:"observed_demand"`
-	DemandHeld      bool        `json:"demand_held"`
-	CurrentCapacity float64     `json:"current_capacity"`
-	AfterCapacity   float64     `json:"after_capacity"`
-	AtRisk          int         `json:"at_risk"`
-	Unknown         int         `json:"unknown"`
-	Pressure        bool        `json:"pressure"`
-	Emergency       bool        `json:"emergency"`
-	Confirmed       bool        `json:"confirmed"`
-	Confirmations   int         `json:"confirmations"`
-	Need            int         `json:"need"`
-	TransientGap    bool        `json:"transient_gap"`
-	EarliestMinutes *float64    `json:"earliest_minutes,omitempty"`
+	UrgentNeed      int               `json:"urgent_need,omitempty"`
+	Confirmation    *NeedConfirmation `json:"confirmation,omitempty"`
+	Rows            []ExitRow         `json:"rows"`
+	Points          []ExitPoint       `json:"points"`
+	Valid           bool              `json:"valid"`
+	Complete        bool              `json:"complete"`
+	Demand          int               `json:"demand"`
+	ObservedDemand  int               `json:"observed_demand"`
+	DemandHeld      bool              `json:"demand_held"`
+	CurrentCapacity float64           `json:"current_capacity"`
+	AfterCapacity   float64           `json:"after_capacity"`
+	AtRisk          int               `json:"at_risk"`
+	Unknown         int               `json:"unknown"`
+	Pressure        bool              `json:"pressure"`
+	Emergency       bool              `json:"emergency"`
+	Confirmed       bool              `json:"confirmed"`
+	Confirmations   int               `json:"confirmations"`
+	Need            int               `json:"need"`
+	TransientGap    bool              `json:"transient_gap"`
+	EarliestMinutes *float64          `json:"earliest_minutes,omitempty"`
 }
 
 func exitLoad(s Snapshot, now time.Time) (used, capacity, waiting int) {
@@ -159,7 +166,10 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 			if sampleAt.IsZero() {
 				sampleAt = a.Money.At
 			}
-			evidence := &ExitEvidence{Source: "money", SampleAt: sampleAt, WindowSeconds: w.Seconds, Rate: row.RateUSD, SampleSeconds: float64(moneyWindowMinutes(c.MoneyWindowMinutes)) * 60, Samples: len(a.Money.Samples)}
+			evidence := &ExitEvidence{Source: "money", SampleAt: sampleAt, RateAt: a.Money.At, ResetAt: w.ResetAt.Unix(), WindowSeconds: w.Seconds, Rate: row.RateUSD, SampleSeconds: float64(moneyWindowMinutes(c.MoneyWindowMinutes)) * 60, Samples: len(a.Money.Samples)}
+			if a.Money.RateSeconds > 0 {
+				evidence.SampleSeconds = a.Money.RateSeconds
+			}
 			// Fresh usage can prove a reached threshold even before a rate exists.
 			if row.Reason == "采样中" && row.TotalUSD != nil {
 				at := a.Money.BudgetAt
@@ -177,6 +187,7 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 					r.UsedPercent = moneyPtr(w.UsedPercent)
 				}
 				if w.UsedPercent >= threshold {
+					evidence.Certain = true
 					r.Known = true
 					setExit(now, reason, false, evidence)
 				} else if c.ExitWarningPercent > 0 && threshold-w.UsedPercent <= float64(c.ExitWarningPercent) && now.Add(time.Duration(c.ExitMinutes)*time.Minute).Before(w.ResetAt) {
@@ -222,6 +233,7 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 			}
 			gap := math.Max(0, *row.TotalUSD*threshold/100-*row.UsedUSD)
 			if gap == 0 {
+				evidence.Certain = true
 				setExit(now, reason, false, evidence)
 			} else if *row.RateUSD > 0 {
 				minutes := gap / *row.RateUSD
@@ -241,7 +253,7 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 		if seen[w.Seconds] || !w.Fresh(now, c.QuotaFreshness()) {
 			continue
 		}
-		evidence := &ExitEvidence{Source: "quota_percent", SampleAt: w.At, WindowSeconds: w.Seconds, SampleSeconds: w.SampleSeconds, Samples: w.Samples}
+		evidence := &ExitEvidence{Source: "quota_percent", SampleAt: w.At, ResetAt: w.ResetAt, WindowSeconds: w.Seconds, SampleSeconds: w.SampleSeconds, Samples: w.Samples}
 		if w.Samples > 0 {
 			evidence.Rate = moneyPtr(w.Rate)
 		}
@@ -257,6 +269,7 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 		}
 		gap := math.Max(0, threshold-w.Used)
 		if gap == 0 {
+			evidence.Certain = true
 			r.Known = true
 			setExit(now, reason, false, evidence)
 		} else if w.Samples > 0 && w.Rate > 0 {
@@ -288,11 +301,11 @@ func exitRow(c Config, a Account, now time.Time) ExitRow {
 		}
 	}
 	if a.ExitDeadline != nil {
-		setExit(*a.ExitDeadline, "推送等待时限到达", false, &ExitEvidence{Source: "deadline"})
+		setExit(*a.ExitDeadline, "推送等待时限到达", false, &ExitEvidence{Source: "deadline", Certain: true})
 	}
 	if a.Leaving {
 		r.Known = true
-		setExit(now, "已进入合并移出流程", false, &ExitEvidence{Source: "leaving"})
+		setExit(now, "已进入合并移出流程", false, &ExitEvidence{Source: "leaving", Certain: true})
 	}
 	if r.exitAt != nil {
 		r.Risk = !r.exitAt.After(now.Add(time.Duration(c.ExitMinutes) * time.Minute))
@@ -326,7 +339,16 @@ func ForecastExits(c Config, s Snapshot, tasks []Task, newSlots int, lead float6
 			continue
 		}
 		readyIDs[a.ID] = true
-		r := exitRow(c, a, now)
+		prepared, pending := postSupplyAccount(c, a, s.SupplyChangedAt)
+		rowConfig := c
+		if pending {
+			rowConfig.ExitWarningPercent = 0
+		}
+		r := exitRow(rowConfig, prepared, now)
+		r.PredictionPending = pending
+		if pending && r.exitAt == nil {
+			r.Reason = "新号入组，等待分流后的消耗样本"
+		}
 		if !r.Known {
 			f.Unknown++
 			f.Complete = false
@@ -361,7 +383,7 @@ func ForecastExits(c Config, s Snapshot, tasks []Task, newSlots int, lead float6
 		ids := map[string]bool{}
 		accounts := map[int64]bool{}
 		for _, t := range tasks {
-			if !t.Predictable() || t.Binding != s.Binding || t.GroupID != s.GroupID || readyIDs[t.AccountID] || t.ETA.Before(now) || t.ETA.After(at) || ids[t.ID] || (t.AccountID > 0 && accounts[t.AccountID]) {
+			if !t.Predictable() || t.Binding != s.Binding || t.GroupID != s.GroupID || readyIDs[t.AccountID] || t.ETA.Before(now) || t.ETA.After(at) || (t.ID != "" && ids[t.ID]) || (t.AccountID > 0 && accounts[t.AccountID]) {
 				continue
 			}
 			ids[t.ID] = true
@@ -389,6 +411,7 @@ func ForecastExits(c Config, s Snapshot, tasks []Task, newSlots int, lead float6
 		sizingBase, _ := baseAt(sizingAt)
 		later, laterSlots := pendingAt(sizingAt)
 		point.SizingMinutes = sizingAt.Sub(now).Minutes()
+		point.sizingAt = sizingAt
 		point.SizingCapacity = c.EffectiveCapacity(sizingBase + laterSlots)
 		point.LaterPending = later - pending
 		if f.Demand > 0 && f.Demand >= c.ConcurrencyTrigger(base) {
@@ -402,10 +425,30 @@ func ForecastExits(c Config, s Snapshot, tasks []Task, newSlots int, lead float6
 			f.Need = max(f.Need, point.Need)
 		}
 		f.Points = append(f.Points, point)
+		// A fixed deadline/reached threshold is not a burn-rate prediction.
+		// If only those certain exits cause a real shortage inside the delivery
+		// lead plus margin, waiting for three quota samples would be too late.
+		if !at.After(arrival.Add(time.Duration(c.MarginMinutes) * time.Minute)) {
+			hardBase := capacity
+			for _, r := range f.Rows {
+				if r.Risk && r.Evidence != nil && r.Evidence.Certain && !r.exitAt.After(at) {
+					hardBase -= r.reportedCapacity
+				}
+			}
+			if float64(f.Demand) > c.EffectiveCapacity(hardBase+slots) {
+				_, target := c.CapacityThresholds(hardBase)
+				n := max(0, int(math.Ceil((float64(f.Demand)*100/float64(max(1, target))-c.EffectiveCapacity(hardBase+laterSlots))/c.EffectiveCapacity(newSlots))))
+				f.UrgentNeed = max(f.UrgentNeed, n)
+			}
+		}
 	}
 	// Future shortage is still a prediction: a single demand spike must not
 	// order a batch. Only actual account-side emergency queues skip confirmation.
 	f.Confirmed = f.Pressure && (waiting >= c.EmergencyQueue || s.ExitConfirmations >= c.Confirmations)
+	if s.Admission != nil {
+		f.Confirmation = &s.Admission.Exit
+		f.Confirmed = s.Admission.Exit.ConfirmedNeed > 0
+	}
 	return f
 }
 

@@ -23,7 +23,7 @@ func (s *Server) queueRestockPreparation(parent context.Context, c restock.Confi
 	}
 	// Do not create idle workers: they must not defer reconciliation of an
 	// account that has already completed its preparation and push.
-	tasks, err := s.store.ProRestockTasks()
+	tasks, err := s.store.ProRestockActiveTasks()
 	if err != nil {
 		return
 	}

@@ -31,5 +31,5 @@ func (c Config) QuotaFreshness() time.Duration {
 }
 
 func (c Config) QuotaObservationAge() time.Duration {
-	return max(time.Duration(c.QuotaSeconds)*3*time.Second, c.QuotaFreshness())
+	return max(time.Duration(c.QuotaSeconds)*3*time.Second, c.QuotaFreshness(), 3*time.Minute)
 }

@@ -344,6 +344,11 @@ func (s *Server) refreshRestockQuota(c restock.Config, p model.ProSettings, pass
 					target, secret, id, e := s.restockAccountTarget(a, p, password)
 					var q sub2.QuotaUsage
 					if e == nil {
+						// Honor this monitor's configured freshness, rather than the
+						// unrelated account-tail interval (often 120 seconds).
+						if target.AuthMode == "siwc" {
+							target.QuotaCheckIntervalSeconds = max(10, c.QuotaSeconds)
+						}
 						q, e = s.sub2.QueryQuota(ctx, target, secret, id)
 					}
 					cancel()
@@ -354,7 +359,10 @@ func (s *Server) refreshRestockQuota(c restock.Config, p model.ProSettings, pass
 					windows := []restock.Window{}
 					for _, w := range []*model.FreeQuotaWindow{f, se} {
 						if w != nil {
-							at := time.Now()
+							at := q.CheckedAt
+							if at.IsZero() {
+								at = time.Now()
+							}
 							reset := w.ResetAt
 							if reset == 0 && w.ResetAfterSeconds > 0 {
 								reset = at.Unix() + w.ResetAfterSeconds
@@ -364,7 +372,8 @@ func (s *Server) refreshRestockQuota(c restock.Config, p model.ProSettings, pass
 					}
 					windows = restock.ObserveWindows(windows, a.Windows, true, c.QuotaObservationAge())
 					s.proRestock.mu.Lock()
-					if s.proRestock.quotaBinding == snap.Binding {
+					entry, present := s.proRestock.moneyAccounts[a.ID]
+					if s.proRestock.quotaBinding == snap.Binding && (a.MoneyEpoch == 0 || present && entry.epoch == a.MoneyEpoch) {
 						s.proRestock.quota[a.ID] = windows
 						s.proRestock.quotaPlans[a.ID] = a.Plan
 					}

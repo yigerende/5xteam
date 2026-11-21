@@ -44,6 +44,7 @@ type RateLimitWindow struct {
 }
 
 type QuotaUsage struct {
+	CheckedAt time.Time `json:"checked_at,omitempty"`
 	RateLimit *struct {
 		PrimaryWindow   *RateLimitWindow `json:"primary_window,omitempty"`
 		SecondaryWindow *RateLimitWindow `json:"secondary_window,omitempty"`

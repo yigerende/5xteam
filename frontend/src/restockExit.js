@@ -10,7 +10,7 @@ export function exitEvidence(row={}) {
  const window=e.window_seconds===604800?'7 天窗口':e.window_seconds===18000?'5 小时窗口':'额度窗口'
  let detail=''
  if(e.source==='money')detail=`${window}；近 ${numberLabel(e.sample_seconds/60)} 分钟消耗 ${numberLabel(e.rate)} USD/分钟`
- if(e.source==='quota_percent')detail=`${window}；平滑速率 ${numberLabel(e.rate)} 个百分点/分钟；最近样本间隔 ${numberLabel(e.sample_seconds)} 秒`
+ if(e.source==='quota_percent')detail=`${window}；采样速率 ${numberLabel(e.rate)} 个百分点/分钟；样本覆盖 ${numberLabel(e.sample_seconds)} 秒`
  return {basis:names[e.source]||'未记录',sample,detail}
 }
 export function exitSizing(decision={}) {

@@ -20,6 +20,7 @@ type MoneyWindow struct {
 	UsedUSD     float64   `json:"used_usd"`
 }
 type AccountMoney struct {
+	RateSeconds   float64       `json:"rate_seconds,omitempty"`
 	WindowMinutes int           `json:"window_minutes"`
 	At            time.Time     `json:"at"`
 	BudgetAt      time.Time     `json:"budget_at"`
@@ -86,6 +87,9 @@ func ObserveMoney(current AccountMoney, previous *AccountMoney, cost float64, mi
 		current.Samples = current.Samples[1:]
 	}
 	current.RateUSD = sampledMoneyRate(current.Samples, current.At, current.WindowMinutes)
+	if current.RateUSD != nil {
+		current.RateSeconds = float64(current.WindowMinutes) * 60
+	}
 	return current
 }
 
@@ -271,9 +275,11 @@ func moneyTimeNeed(c Config, s Snapshot, f MoneyForecast, tasks []Task, target, 
 		return 0, "新开通套餐缺少美元额度样本，暂停时间侧新增", nil
 	}
 	pending := 0
+	seenTasks, seenAccounts := map[string]bool{}, map[int64]bool{}
 	for _, t := range tasks {
-		if t.Predictable() && t.Binding == s.Binding && t.GroupID == s.GroupID && t.Plan == s.NewPlan && !readyIDs[t.AccountID] && !t.ETA.After(now.Add(time.Duration(math.Max(lead, target)*float64(time.Minute)))) {
+		if t.Predictable() && t.Binding == s.Binding && t.GroupID == s.GroupID && t.Plan == s.NewPlan && !readyIDs[t.AccountID] && (t.ID == "" || !seenTasks[t.ID]) && (t.AccountID == 0 || !seenAccounts[t.AccountID]) && !t.ETA.After(now.Add(time.Duration(math.Max(lead, target)*float64(time.Minute)))) {
 			pending++
+			seenTasks[t.ID], seenAccounts[t.AccountID] = true, true
 		}
 	}
 	gap := *f.RateUSD*target - *f.RemainingUSD - float64(pending)*newBudget

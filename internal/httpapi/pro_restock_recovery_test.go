@@ -27,6 +27,7 @@ func TestProRestockCollectionRecovery(t *testing.T) {
 			c := restock.DefaultConfig()
 			c.Enabled, c.Mode, c.GroupID = true, "auto", 1
 			c.TimeEnabled, c.Confirmations, c.MinBatch, c.MaxBatch = false, 2, 1, 1
+			c.CapacityPercent = 100 // Exercise soft pressure; real overload now has a separate fast path.
 			c.CheckSeconds = 30
 			c.FreshSeconds = 60
 			c, err := st.SaveProRestockConfig(c)

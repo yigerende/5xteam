@@ -139,14 +139,16 @@ func (c Config) Validate() error {
 }
 
 type Window struct {
-	Seconds       int64     `json:"seconds"`
-	ResetAt       int64     `json:"reset_at"`
-	Used          float64   `json:"used"`
-	Rate          float64   `json:"rate"`                    // percentage points/minute, same plan/window only
-	ObservedRate  *float64  `json:"observed_rate,omitempty"` // latest interval, before conservative smoothing
-	SampleSeconds float64   `json:"sample_seconds,omitempty"`
-	Samples       int       `json:"samples"`
-	At            time.Time `json:"at"`
+	History       []QuotaSample `json:"history,omitempty"`
+	RateStartAt   time.Time     `json:"rate_start_at,omitempty"`
+	Seconds       int64         `json:"seconds"`
+	ResetAt       int64         `json:"reset_at"`
+	Used          float64       `json:"used"`
+	Rate          float64       `json:"rate"`                    // percentage points/minute, same plan/window only
+	ObservedRate  *float64      `json:"observed_rate,omitempty"` // latest interval, before conservative smoothing
+	SampleSeconds float64       `json:"sample_seconds,omitempty"`
+	Samples       int           `json:"samples"`
+	At            time.Time     `json:"at"`
 }
 
 // Fresh prevents old quota samples from reducing current or future capacity.
@@ -186,24 +188,26 @@ type Account struct {
 	Windows             []Window      `json:"windows"`
 }
 type Snapshot struct {
-	MonitorOAuthCount   *int        `json:"monitor_oauth_count,omitempty"`
-	MonitorOAuthError   string      `json:"monitor_oauth_error,omitempty"`
-	DemandGate          *DemandGate `json:"no_restock_demand,omitempty"`
-	TakeoverToken       string      `json:"takeover_token,omitempty"`
-	MonitorGroups       []int64     `json:"monitor_groups,omitempty"`
-	CollectionStartedAt time.Time   `json:"collection_started_at,omitempty"`
-	ExitConfirmations   int         `json:"exit_confirmations"`
-	ExitDemand          *ExitDemand `json:"exit_demand,omitempty"`
-	NewPlan             string      `json:"new_plan"`
-	LifetimeMinutes     int         `json:"lifetime_minutes"`
-	ID                  string      `json:"id"`
-	At                  time.Time   `json:"at"`
-	GroupID             int64       `json:"group_id"`
-	Binding             string      `json:"binding"`
-	Valid               bool        `json:"valid"`
-	LoadValid           bool        `json:"load_valid"`
-	Error               string      `json:"error"`
-	Accounts            []Account   `json:"accounts"`
+	Admission           *AdmissionState `json:"admission,omitempty"`
+	SupplyChangedAt     time.Time       `json:"supply_changed_at,omitempty"`
+	MonitorOAuthCount   *int            `json:"monitor_oauth_count,omitempty"`
+	MonitorOAuthError   string          `json:"monitor_oauth_error,omitempty"`
+	DemandGate          *DemandGate     `json:"no_restock_demand,omitempty"`
+	TakeoverToken       string          `json:"takeover_token,omitempty"`
+	MonitorGroups       []int64         `json:"monitor_groups,omitempty"`
+	CollectionStartedAt time.Time       `json:"collection_started_at,omitempty"`
+	ExitConfirmations   int             `json:"exit_confirmations"`
+	ExitDemand          *ExitDemand     `json:"exit_demand,omitempty"`
+	NewPlan             string          `json:"new_plan"`
+	LifetimeMinutes     int             `json:"lifetime_minutes"`
+	ID                  string          `json:"id"`
+	At                  time.Time       `json:"at"`
+	GroupID             int64           `json:"group_id"`
+	Binding             string          `json:"binding"`
+	Valid               bool            `json:"valid"`
+	LoadValid           bool            `json:"load_valid"`
+	Error               string          `json:"error"`
+	Accounts            []Account       `json:"accounts"`
 }
 type Task struct {
 	// Opaque read version used only for monitoring compare-and-swap. Never exposed.

@@ -16,6 +16,13 @@ func (s *Store) initializeProRestock() error {
  DELETE FROM pro_restock_demand_gate;
  CREATE TABLE IF NOT EXISTS pro_restock_tasks(id TEXT PRIMARY KEY,email TEXT NOT NULL COLLATE NOCASE,status TEXT NOT NULL,created_at TEXT NOT NULL,cost INTEGER NOT NULL,payload TEXT NOT NULL);
  CREATE UNIQUE INDEX IF NOT EXISTS pro_restock_account ON pro_restock_tasks(email) WHERE status NOT IN ('ready','failed','cancelled');
+ CREATE INDEX IF NOT EXISTS pro_restock_created ON pro_restock_tasks(created_at);
+ CREATE INDEX IF NOT EXISTS pro_restock_status_created ON pro_restock_tasks(status,created_at);
+ CREATE INDEX IF NOT EXISTS pro_restock_active_created ON pro_restock_tasks(created_at) WHERE status NOT IN ('ready','failed','cancelled');
+ CREATE INDEX IF NOT EXISTS pro_restock_decision_tasks ON pro_restock_tasks(json_extract(payload,'$.decision_id'));
+ CREATE INDEX IF NOT EXISTS pro_restock_updated ON pro_restock_tasks(json_extract(payload,'$.updated_at'));
+ CREATE INDEX IF NOT EXISTS pro_restock_ready_scope_account ON pro_restock_tasks(json_extract(payload,'$.binding'),json_extract(payload,'$.group_id'),json_extract(payload,'$.account_id')) WHERE status='ready';
+ CREATE INDEX IF NOT EXISTS pro_restock_finished_scope ON pro_restock_tasks(json_extract(payload,'$.binding'),json_extract(payload,'$.group_id'),julianday(coalesce(json_extract(payload,'$.ready_at'),json_extract(payload,'$.updated_at'))));
  CREATE TABLE IF NOT EXISTS pro_restock_progress(task_id TEXT PRIMARY KEY REFERENCES pro_restock_tasks(id) ON DELETE CASCADE,payload TEXT NOT NULL,checked_at INTEGER NOT NULL);
  CREATE TRIGGER IF NOT EXISTS pro_restock_progress_finished AFTER UPDATE OF status ON pro_restock_tasks WHEN NEW.status IN ('ready','failed','cancelled') BEGIN DELETE FROM pro_restock_progress WHERE task_id=NEW.id; END;
  CREATE TABLE IF NOT EXISTS pro_restock_replacements(source TEXT PRIMARY KEY,task_id TEXT NOT NULL UNIQUE);
@@ -70,7 +77,18 @@ func (s *Store) SaveProRestockConfig(c restock.Config) (restock.Config, error) {
 	return c, err
 }
 func (s *Store) ProRestockTasks() ([]restock.Task, error) {
-	return s.proRestockTasksWhere("(status NOT IN ('ready','failed','cancelled') AND NOT "+restockReplacementDeliveredSQL+") OR created_at>?1 OR json_extract(payload,'$.updated_at')>?1 OR EXISTS(SELECT 1 FROM pro_restock_replacements WHERE task_id=pro_restock_tasks.id) OR EXISTS(SELECT 1 FROM pro_restock_payment_risk WHERE task_id=pro_restock_tasks.id AND replacement_id IS NULL)", formatTime(time.Now().Add(-48*time.Hour)))
+	// Each branch uses its own index before decoding payloads. A single OR
+	// with correlated EXISTS forced a scan of every archived task on each tick.
+	return s.proRestockTasksWhere(`id IN (
+ SELECT id FROM pro_restock_tasks WHERE status NOT IN ('ready','failed','cancelled') AND NOT `+restockReplacementDeliveredSQL+`
+ UNION SELECT id FROM pro_restock_tasks WHERE created_at>?1
+ UNION SELECT id FROM pro_restock_tasks WHERE json_extract(payload,'$.updated_at')>?1
+ UNION SELECT task_id FROM pro_restock_replacements
+ UNION SELECT task_id FROM pro_restock_payment_risk WHERE replacement_id IS NULL
+ )`, formatTime(time.Now().Add(-48*time.Hour)))
+}
+func (s *Store) ProRestockActiveTasks() ([]restock.Task, error) {
+	return s.proRestockTasksWhere("status NOT IN ('ready','failed','cancelled') AND NOT "+restockReplacementDeliveredSQL+" AND ?=1", 1)
 }
 func (s *Store) ProRestockDecisionTasks(id string) ([]restock.Task, error) {
 	return s.proRestockTasksWhere("json_extract(payload,'$.decision_id')=?", id)
@@ -175,7 +193,11 @@ func restockLimits(q proCapacityQuery, now time.Time) (restock.Limits, error) {
 	var l restock.Limits
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	hour := now.Add(-time.Hour)
-	err := q.QueryRow(`SELECT coalesce(sum(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0),coalesce(sum(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0),coalesce(sum(CASE WHEN created_at>=? OR status NOT IN ('ready','failed','cancelled') THEN cost ELSE 0 END),0),coalesce(sum(CASE WHEN created_at>=? OR status NOT IN ('ready','failed','cancelled') THEN cost ELSE 0 END),0) FROM pro_restock_tasks WHERE (status!='cancelled' OR (json_extract(payload,'$.stopped_at') IS NOT NULL AND json_extract(payload,'$.submitted_at') IS NOT NULL)) AND coalesce(json_extract(payload,'$.managed_externally'),0)=0`, formatTime(hour), formatTime(day), formatTime(hour), formatTime(day)).Scan(&l.HourCount, &l.DayCount, &l.HourCost, &l.DayCost)
+	since := day
+	if hour.Before(since) {
+		since = hour
+	}
+	err := q.QueryRow(`SELECT coalesce(sum(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0),coalesce(sum(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0),coalesce(sum(CASE WHEN created_at>=? OR status NOT IN ('ready','failed','cancelled') THEN cost ELSE 0 END),0),coalesce(sum(CASE WHEN created_at>=? OR status NOT IN ('ready','failed','cancelled') THEN cost ELSE 0 END),0) FROM pro_restock_tasks WHERE id IN (SELECT id FROM pro_restock_tasks WHERE created_at>=? UNION SELECT id FROM pro_restock_tasks WHERE status NOT IN ('ready','failed','cancelled')) AND (status!='cancelled' OR (json_extract(payload,'$.stopped_at') IS NOT NULL AND json_extract(payload,'$.submitted_at') IS NOT NULL)) AND coalesce(json_extract(payload,'$.managed_externally'),0)=0`, formatTime(hour), formatTime(day), formatTime(hour), formatTime(day), formatTime(since)).Scan(&l.HourCount, &l.DayCount, &l.HourCost, &l.DayCost)
 	if err != nil {
 		return l, err
 	}
@@ -280,7 +302,13 @@ func (s *Store) ReserveProRestock(d restock.Decision, target string, existingInf
 	// confirmed failures and cancellations. Restart or an obsolete decision
 	// must not bypass the final monitoring round.
 	var completedJSON string
-	if err = tx.QueryRow(`SELECT coalesce(json_group_array(json(payload)),'[]') FROM pro_restock_tasks WHERE (status IN ('ready','failed','cancelled') OR `+restockReplacementDeliveredSQL+`) AND json_extract(payload,'$.binding')=? AND json_extract(payload,'$.group_id')=?`, d.Snapshot.Binding, d.Snapshot.GroupID).Scan(&completedJSON); err != nil {
+	barrier := d.Snapshot.At
+	if !d.Snapshot.CollectionStartedAt.IsZero() && d.Snapshot.CollectionStartedAt.Before(barrier) {
+		barrier = d.Snapshot.CollectionStartedAt
+	}
+	// SQLite rounds fractional seconds. Read a one-second overlap and let
+	// WaitForBatch perform the exact nanosecond comparison in Go.
+	if err = tx.QueryRow(`SELECT coalesce(json_group_array(json(payload)),'[]') FROM pro_restock_tasks WHERE (status IN ('ready','failed','cancelled') OR `+restockReplacementDeliveredSQL+`) AND json_extract(payload,'$.binding')=? AND json_extract(payload,'$.group_id')=? AND julianday(coalesce(json_extract(payload,'$.ready_at'),json_extract(payload,'$.updated_at')))>=julianday(?)`, d.Snapshot.Binding, d.Snapshot.GroupID, formatTime(barrier.Add(-time.Second))).Scan(&completedJSON); err != nil {
 		return nil, err
 	}
 	var completed []restock.Task
@@ -290,7 +318,7 @@ func (s *Store) ReserveProRestock(d restock.Decision, target string, existingInf
 	if wait := restock.WaitForBatch(d.Snapshot, completed); wait != nil {
 		return nil, errors.New(wait.Message)
 	}
-	persisted, err := replacementTasks(tx)
+	persisted, err := replacementTasks(tx, d.Snapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -319,10 +347,7 @@ func (s *Store) ReserveProRestock(d restock.Decision, target string, existingInf
 	if c.DayBudget > 0 {
 		n = min(n, int(max(int64(0), c.DayBudget-l.DayCost)/max(int64(1), c.UnitCost)))
 	}
-	cooldown := c.CooldownSeconds
-	if d.Waiting >= c.EmergencyQueue || (c.ExitEnabled && d.ExitNeed > 0 && d.Exit != nil && d.Exit.Emergency) {
-		cooldown = c.EmergencyCooldownSeconds
-	}
+	cooldown := d.Cooldown(c)
 	if l.Failures >= c.FailureLimit || (l.LastBatch != nil && d.At.Sub(*l.LastBatch) < time.Duration(cooldown)*time.Second) {
 		n = 0
 	}

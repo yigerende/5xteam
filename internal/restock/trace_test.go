@@ -19,7 +19,7 @@ func TestDecisionTracePreservesSizingEvidence(t *testing.T) {
 	}
 	d := Evaluate(c, s, tasks, Limits{}, 2, 20, 2, now)
 	tr := d.Trace
-	if tr == nil || tr.Version != 1 || !tr.TimeTriggered || !tr.ConcurrencyTriggered {
+	if tr == nil || tr.Version != 2 || !tr.TimeTriggered || !tr.ConcurrencyTriggered {
 		t.Fatalf("missing dual trigger evidence: %+v", tr)
 	}
 	if d.Inflight != 3 || tr.GroupInflight != 2 || tr.TimelyInflight != 1 || tr.NewAccountCapacity != 20 || tr.FutureCapacity != 20 {

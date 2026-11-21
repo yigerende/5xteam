@@ -64,6 +64,7 @@ func TestProRestockExitReservationDispatchDespiteDemandDrop(t *testing.T) {
 			pay, _, _ := st.GPTPaySettings()
 			load := 22
 			fixedAt := time.Now()
+			resetAt := fixedAt.Add(time.Hour)
 			s.proRestock.monitor = func(context.Context, restock.Config, model.ProSettings, string) (restock.Snapshot, error) {
 				now := time.Now()
 				if !fixedAt.IsZero() {
@@ -71,7 +72,7 @@ func TestProRestockExitReservationDispatchDespiteDemandDrop(t *testing.T) {
 				}
 				rate := 1.
 				money := func(used float64) *restock.AccountMoney {
-					return &restock.AccountMoney{At: now, RateUSD: &rate, Windows: []restock.MoneyWindow{{Seconds: 604800, ResetAt: now.Add(time.Hour), UsedPercent: used, UsedUSD: used}}}
+					return &restock.AccountMoney{At: now, RateUSD: &rate, Windows: []restock.MoneyWindow{{Seconds: 604800, ResetAt: resetAt, UsedPercent: used, UsedUSD: used}}}
 				}
 				return restock.Snapshot{ID: "exit-sample", At: now, Valid: true, LoadValid: true, GroupID: 1, Binding: restockBinding(p), NewPlan: restockPlan(pay.Provider, pay.PlanCode, pay.Country, pay.CreditQuantity), Accounts: []restock.Account{{ID: 101, Ready: true, Capacity: 50, Used: load, Money: money(96)}, {ID: 102, Ready: true, Capacity: 50, Used: load, Money: money(20)}}}, nil
 			}

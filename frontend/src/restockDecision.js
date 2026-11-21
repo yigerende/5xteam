@@ -4,6 +4,12 @@ const minutes = n => value(n, ' 分钟')
 const capNames = {batch:'每批上限',inflight:'在途余量',pool:'账号池余量',hour:'每小时数量余量',day:'每日数量余量',hour_budget:'每小时预算可补',day_budget:'每日预算可补'}
 const needNames = {time_need:'预计供给不足',concurrency_need:'并发压力',exit_need:'退出前补货',reserve_need:'最低备用',empty_group_need:'空分组启动',force_merge_need:'强制合并接替'}
 
+export function confirmationText(state, required) {
+ if(!state)return ''
+ const levels=(state.levels||[]).slice(0,5).map(x=>`缺至少${x.quantity}个：${x.count}/${required}次`)
+ return `计算缺 ${state.raw_need??0} 个，已确认 ${state.confirmed_need??0} 个。${state.fast_reason?`快速判定：${state.fast_reason}。`:''}${levels.join('；')}${(state.levels||[]).length>5?'；其余数量详见原始记录':''}`
+}
+
 export function decisionSummary(d = {}) {
  if(!d.snapshot?.id&&!d.trace)return d.reason||'等待第一轮评估'
  const needs=Object.entries(needNames).filter(([key])=>number(d[key])&&d[key]>0).map(([key,name])=>`${name}缺 ${d[key]} 个`)
@@ -15,7 +21,7 @@ export function decisionSummary(d = {}) {
 // Only use the decision's saved inputs. Live configuration and current task
 // statuses must never be used to reconstruct a historical trigger.
 export function decisionReport(d = {}) {
- const c=d.config||{}, s=d.snapshot||{}, tr=d.trace?.version===1?d.trace:null, limits=d.limits||{}
+ const c=d.config||{}, s=d.snapshot||{}, tr=[1,2].includes(d.trace?.version)?d.trace:null, limits=d.limits||{}
  const evaluation=!!(d.trace||s.id)
  const known=d.demand_known===true
  const age=(Date.parse(d.at)-Date.parse(s.at))/1000
@@ -42,10 +48,10 @@ export function decisionReport(d = {}) {
    `配置水位 ${minutes(c.trigger_minutes)}，预计就绪 ${minutes(d.lead_minutes)}，${c.early?'已开启按就绪耗时提前补货':'未开启按就绪耗时提前补货'}。`+(sizing?` 目标消耗 ${value(d.money?.rate_usd)} USD/分钟 × ${value(d.target_minutes)} 分钟 − 剩余 ${value(d.money?.remaining_usd)} USD − ${sizing.pending} 个在途 × 每号 ${value(sizing.new_budget_usd)} USD = ${value(sizing.gap_usd)} USD 缺口；按每号额度向上取整，并受最大在途 ${value(c.max_inflight)} 个限制。`:'')),
   rule('concurrency','持续并发压力',c.concurrency_enabled,d.concurrency_need,concurrencyTriggered,
    capacityBasis+`占用 ${value(d.used)} / 容量 ${value(d.capacity)}（${utilization===null?'无有效容量':value(utilization,'%')}），触发 ≥ ${scaled?value(trigger)+' 并发（'+value(triggerPercent,'%')+' 向下取整）':value(triggerPercent,'%')}；账号侧等待 ${value(d.waiting)}，有等待也参与触发；连续确认 ${value(d.confirmations)} / ${value(c.confirmations)} 次。`,
-   `补后目标利用率 ${value(targetPercent,'%')}。`+(tr&&known?` 需求槽位按（占用 ${value(d.used)} + 等待 ${value(d.waiting)}）÷ ${value(targetPercent,'%')} 计算，扣除预计到货时有效容量 ${tr.future_capacity} 及 ${tr.timely_inflight} 个及时在途 × 每号 ${value(newCapacity)} 有效槽位，再按每号容量向上取整。`:'')),
+   `补后目标利用率 ${value(targetPercent,'%')}。`+(tr&&known?` 需求槽位按（占用 ${value(d.used)} + 等待 ${value(d.waiting)}）÷ ${value(targetPercent,'%')} 计算，扣除${tr.version>=2?'当前实际有效容量':'预计到货时有效容量'} ${tr.future_capacity} 及 ${tr.timely_inflight} 个及时在途 × 每号 ${value(newCapacity)} 有效槽位，再按每号容量向上取整。`:'')+confirmationText(tr?.concurrency_confirmation,c.confirmations)),
   rule('exit','账号退出前补货',c.exit_enabled,d.exit_need,d.exit?.pressure,
    `手动提前 ${minutes(c.exit_minutes)}；临期 ${value(d.exit?.at_risk)} 个，当前容量 ${value(d.exit?.current_capacity)}，退出后容量 ${value(d.exit?.after_capacity)}，采用需求 ${value(d.exit?.demand)}。`,
-   (c.capacity_tiers_enabled?'按每个退出时点的剩余容量选择触发和目标档位':`沿用并发触发 ${value(c.trigger_percent,'%')}、目标 ${value(c.target_percent,'%')}`)+`；退出压力确认 ${value(d.exit?.confirmations)} / ${value(c.confirmations)} 次${d.exit?.emergency?'，预测存在容量不足，确认后采用紧急冷却':''}。`+(d.exit?.demand_held?' 当前占用受容量下降限制，暂保留退出前的近期需求。':'')+(d.exit?.transient_gap?' 存在短时衔接缺口，按新增任务到位时的容量计算，避免重复开通。':'')),
+   (c.capacity_tiers_enabled?'按每个退出时点的剩余容量选择触发和目标档位':`沿用并发触发 ${value(c.trigger_percent,'%')}、目标 ${value(c.target_percent,'%')}`)+(d.exit?.confirmation?'；'+confirmationText(d.exit.confirmation,c.confirmations):`；退出压力确认 ${value(d.exit?.confirmations)} / ${value(c.confirmations)} 次${d.exit?.emergency?'，预测存在容量不足，确认后采用紧急冷却':''}。`)+(d.exit?.demand_held?' 当前占用受容量下降限制，暂保留退出前的近期需求。':'')+(d.exit?.rows?.some(r=>r.prediction_pending)?' 新号入组，部分账号等待分流后的消耗样本；确定的截止时间仍参与。':'')+(d.exit?.transient_gap?' 存在短时衔接缺口，按新增任务到位时的容量计算，避免重复开通。':'')),
   rule('reserve','最低备用',c.reserve>0,d.reserve_need,d.reserve_need>0,
    `目标 ${value(c.reserve)} 个 − 当前可用 ${value(d.usable)} 个${tr?` − 预计及时就绪在途 ${tr.timely_inflight} 个`:''}。`),
   rule('empty','空分组启动',c.empty_group_count>0,d.empty_group_need,known&&!s.monitor_oauth_error&&(number(s.monitor_oauth_count)?s.monitor_oauth_count===0:Array.isArray(s.accounts)&&s.accounts.length===0),

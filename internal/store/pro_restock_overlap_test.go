@@ -250,48 +250,56 @@ func TestRestockOverlapReadyAssignmentSurvivesRestartAndCannotBeReused(t *testin
 }
 
 func TestRestockOverlapReadyBeforeForceThreshold(t *testing.T) {
-	s := transferStore(t)
-	c, snap := forceRestockFixture(t, s)
-	c.CapacityPercent, c.MinBatch = 100, 1
-	c.TimeEnabled, c.ExitEnabled = true, true
-	c.ForceMergeMinutes, c.ExitMinutes = 5, 5
-	var err error
-	c, err = s.SaveProRestockConfig(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	deadline := now.Add(6 * time.Minute)
-	snap.At, snap.ExitConfirmations = now, c.Confirmations
-	a := &snap.Accounts[0]
-	a.ForceMergeDeadline, a.ExitDeadline = &deadline, &deadline
-	a.Capacity, a.Used, a.Plan, a.Money = 50, 30, snap.NewPlan, overlapMoney(now, 96, 1)
-	d := restock.Evaluate(c, snap, nil, restock.Limits{}, c.Confirmations, 50, 2, now)
-	d.ID = "earlier-time-and-exit"
-	if d.TimeNeed != 1 || d.ExitNeed != 1 || d.ForceMergeNeed != 0 || d.Suggested != 1 {
-		t.Fatal(d)
-	}
-	tasks, err := s.ReserveProRestock(d, "", 0)
-	if err != nil || len(tasks) != 1 {
-		t.Fatal(tasks, err)
-	}
-	// The earlier replenishment has arrived before the average-deadline rule
-	// starts. Its timeout is disabled, so it is genuine surviving capacity.
-	tasks[0].Status, tasks[0].AccountID, tasks[0].ReadyAt = "ready", 2, &now
-	if err = s.SaveProRestockTask(tasks[0]); err != nil {
-		t.Fatal(err)
-	}
-	off := false
-	snap.Accounts = append(snap.Accounts, restock.Account{ID: 2, Ready: true, Capacity: 50, Plan: snap.NewPlan,
-		Money: overlapMoney(now, 1, 0), EJH: true, PushTimeoutEnabled: &off})
-	deadline = now.Add(4 * time.Minute)
-	tasks, err = s.ReconcileForceMerge(c, snap, tasks)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d = restock.Evaluate(c, snap, tasks, restock.Limits{}, c.Confirmations, 50, 2, now)
-	if d.Suggested != 0 {
-		t.Fatalf("ready account from prior time/exit trigger not reused: time=%d force=%d exit=%d suggested=%d", d.TimeNeed, d.ForceMergeNeed, d.ExitNeed, d.Suggested)
+	for _, tc := range []struct {
+		name, provider string
+		shared         bool
+	}{{"ejh", "ejh", false}, {"ejh_multi_group", "ejh", true}, {"nexovcc_multi_group", "nexovcc", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := transferStore(t)
+			c, snap := forceRestockFixture(t, s)
+			c.CapacityPercent, c.MinBatch = 100, 1
+			c.TimeEnabled, c.ExitEnabled = true, true
+			c.ForceMergeMinutes, c.ExitMinutes = 5, 5
+			var err error
+			c, err = s.SaveProRestockConfig(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			deadline := now.Add(6 * time.Minute)
+			snap.At, snap.ExitConfirmations = now, c.Confirmations
+			a := &snap.Accounts[0]
+			a.EJH, a.CardProvider, a.Shared = tc.provider == "ejh", tc.provider, tc.shared
+			a.ForceMergeDeadline, a.ExitDeadline = &deadline, &deadline
+			a.Capacity, a.Used, a.Plan, a.Money = 50, 30, snap.NewPlan, overlapMoney(now, 96, 1)
+			d := restock.Evaluate(c, snap, nil, restock.Limits{}, c.Confirmations, 50, 2, now)
+			d.ID = "earlier-time-and-exit"
+			if d.TimeNeed != 1 || d.ExitNeed != 1 || d.ForceMergeNeed != 0 || d.Suggested != 1 {
+				t.Fatal(d)
+			}
+			tasks, err := s.ReserveProRestock(d, "", 0)
+			if err != nil || len(tasks) != 1 {
+				t.Fatal(tasks, err)
+			}
+			// The earlier replenishment has arrived before the average-deadline rule
+			// starts. Its timeout is disabled, so it is genuine surviving capacity.
+			tasks[0].Status, tasks[0].AccountID, tasks[0].ReadyAt = "ready", 2, &now
+			if err = s.SaveProRestockTask(tasks[0]); err != nil {
+				t.Fatal(err)
+			}
+			off := false
+			snap.Accounts = append(snap.Accounts, restock.Account{ID: 2, Ready: true, Capacity: 50, Plan: snap.NewPlan,
+				Money: overlapMoney(now, 1, 0), EJH: tc.provider == "ejh", CardProvider: tc.provider, Shared: tc.shared, PushTimeoutEnabled: &off})
+			deadline = now.Add(4 * time.Minute)
+			tasks, err = s.ReconcileForceMerge(c, snap, tasks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d = restock.Evaluate(c, snap, tasks, restock.Limits{}, c.Confirmations, 50, 2, now)
+			if d.Suggested != 0 {
+				t.Fatalf("ready account from prior time/exit trigger not reused: time=%d force=%d exit=%d suggested=%d", d.TimeNeed, d.ForceMergeNeed, d.ExitNeed, d.Suggested)
+			}
+		})
 	}
 }
 

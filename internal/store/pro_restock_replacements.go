@@ -8,8 +8,18 @@ import (
 	"time"
 )
 
-func replacementTasks(tx *sql.Tx) ([]restock.Task, error) {
-	rows, err := tx.Query(`SELECT t.payload,coalesce(r.source,'') FROM pro_restock_tasks t LEFT JOIN pro_restock_replacements r ON r.task_id=t.id WHERE t.status NOT IN ('failed','cancelled') OR r.source IS NOT NULL ORDER BY t.created_at,t.id`)
+func replacementTasks(tx *sql.Tx, snap restock.Snapshot) ([]restock.Task, error) {
+	ids := make([]int64, 0, len(snap.Accounts))
+	for _, a := range snap.Accounts {
+		ids = append(ids, a.ID)
+	}
+	// Historical ready tasks matter only if their account is still in this
+	// snapshot. Explicit coverage links and unresolved tasks remain unbounded.
+	rows, err := tx.Query(`SELECT t.payload,coalesce(r.source,'') FROM pro_restock_tasks t LEFT JOIN pro_restock_replacements r ON r.task_id=t.id WHERE t.id IN (
+ SELECT id FROM pro_restock_tasks WHERE status NOT IN ('ready','failed','cancelled')
+ UNION SELECT task_id FROM pro_restock_replacements
+ UNION SELECT id FROM pro_restock_tasks WHERE status='ready' AND json_extract(payload,'$.account_id') IN (SELECT value FROM json_each(?)) AND json_extract(payload,'$.binding')=? AND json_extract(payload,'$.group_id')=?
+ ) ORDER BY t.created_at,t.id`, mustJSON(ids), snap.Binding, snap.GroupID)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +66,7 @@ func (s *Store) ReconcileForceMerge(c restock.Config, snap restock.Snapshot, tas
 	if currentConfig.Version != c.Version {
 		return tasks, nil
 	}
-	persisted, err := replacementTasks(tx)
+	persisted, err := replacementTasks(tx, snap)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +199,7 @@ func linkReadyForceMergeReplacements(tx *sql.Tx, c restock.Config, snap restock.
 	}
 	ready := map[int64]bool{}
 	for _, a := range snap.Accounts {
-		ready[a.ID] = a.Ready && !a.Shared && !a.Leaving && a.Capacity > 0 && (a.ExpiresAt == nil || a.ExpiresAt.After(snap.At.Add(time.Duration(c.ForceMergeMinutes)*time.Minute)))
+		ready[a.ID] = a.Ready && !a.SupplyExcluded && !a.Leaving && a.Capacity > 0 && (a.ExpiresAt == nil || a.ExpiresAt.After(snap.At.Add(time.Duration(c.ForceMergeMinutes)*time.Minute)))
 	}
 	forecastConfig := c
 	forecastConfig.ExitMinutes = max(c.ExitMinutes, c.ForceMergeMinutes)
@@ -241,7 +251,7 @@ func linkReadyForceMergeReplacements(tx *sql.Tx, c restock.Config, snap restock.
 		wasPresent := false
 		for _, a := range d.Snapshot.Accounts {
 			wasPresent = wasPresent || a.ID == t.AccountID
-			if a.Ready && a.EJH && a.ForceMergeKey != "" {
+			if a.Ready && !a.SupplyExcluded && (a.EJH || a.CardProvider == "nexovcc") && a.ForceMergeKey != "" {
 				original[a.ForceMergeKey] = true
 			}
 		}

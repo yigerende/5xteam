@@ -17,9 +17,9 @@ import (
 )
 
 func TestRestockQuotaConfiguredConcurrency(t *testing.T) {
-	for _, workers := range []int{1, 2, 7, 1000} {
+	for _, workers := range []int{1, 2, 7, 20, 1000} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
-			const accounts = 9
+			const accounts = 64
 			entered := make(chan struct{}, accounts*2)
 			release := make(chan struct{})
 			var once sync.Once
@@ -59,8 +59,10 @@ func TestRestockQuotaConfiguredConcurrency(t *testing.T) {
 			}
 			c := restock.DefaultConfig()
 			c.QuotaConcurrency = workers
-			c.QuotaSeconds = 10
-			s.refreshRestockQuota(c, p, "fixture", snap)
+			c.CheckSeconds, c.QuotaSeconds = 5, 5
+			for round := 0; round < 12; round++ {
+				s.refreshRestockQuota(c, p, "fixture", snap)
+			}
 			for i := 0; i < min(workers, accounts); i++ {
 				select {
 				case <-entered:
@@ -70,10 +72,17 @@ func TestRestockQuotaConfiguredConcurrency(t *testing.T) {
 			}
 			// Saving a new cadence can make the next run due, but cannot overlap
 			// a batch still executing with the previous settings.
+			if workers == 20 {
+				// Also cross a real five-second wall-clock boundary with the
+				// production worker count while upstream requests remain blocked.
+				time.Sleep(5100 * time.Millisecond)
+			}
 			s.proRestock.mu.Lock()
 			s.proRestock.quotaNext = time.Time{}
 			s.proRestock.mu.Unlock()
-			s.refreshRestockQuota(c, p, "fixture", snap)
+			for round := 0; round < 12; round++ {
+				s.refreshRestockQuota(c, p, "fixture", snap)
+			}
 			select {
 			case <-entered:
 				t.Fatal("exceeded concurrency or overlapped batch")
