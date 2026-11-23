@@ -6,6 +6,7 @@ import (
 )
 
 type ProAutoState struct {
+	SIWCImportRecoveries int `json:"siwc_import_recoveries,omitempty"`
 	// The failed order is also the durable claim for this workflow's single re-login.
 	SessionRecoveryOrderID string                  `json:"session_recovery_order_id,omitempty"`
 	SIWCConsentFailure     *ProSIWCConsentFailure  `json:"siwc_consent_failure,omitempty"`

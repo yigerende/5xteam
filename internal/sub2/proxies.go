@@ -150,6 +150,8 @@ func EndpointKey(raw string) (string, error) {
 type HTTPError struct {
 	Status        int
 	Path, Message string
+	Reason        string
+	Metadata      map[string]string
 }
 
 func (e *HTTPError) Error() string {

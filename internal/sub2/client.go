@@ -82,10 +82,11 @@ type CreateAccountInput struct {
 }
 
 type apiEnvelope struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Reason  string          `json:"reason"`
-	Data    json.RawMessage `json:"data"`
+	Code     int               `json:"code"`
+	Message  string            `json:"message"`
+	Reason   string            `json:"reason"`
+	Metadata map[string]string `json:"metadata"`
+	Data     json.RawMessage   `json:"data"`
 }
 
 // ErrAccountUnauthorized identifies an OpenAI account 401, not an admin API login failure.
@@ -535,7 +536,8 @@ func (c *Client) doJSON(ctx context.Context, settings model.Sub2Settings, passwo
 			json.Unmarshal(data, &envelope) == nil && envelope.Reason == "OPENAI_QUOTA_UPSTREAM_ERROR" {
 			return nil, fmt.Errorf("%w: %s", ErrAccountUnauthorized, envelope.Message)
 		}
-		return nil, &HTTPError{Status: response.StatusCode, Path: path, Message: compact(data)}
+		_ = json.Unmarshal(data, &envelope)
+		return nil, &HTTPError{Status: response.StatusCode, Path: path, Message: compact(data), Reason: envelope.Reason, Metadata: envelope.Metadata}
 	}
 	var envelope apiEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {

@@ -78,6 +78,14 @@ func (b *siwcBroker) call(method string, args map[string]any) (any, error) {
 		SIWCImport: &sub2.SIWCImportInput{SessionID: b.generated.SessionID, CallbackURL: callback, Email: b.email, HostID: b.hostID, WebAccessToken: at, WebAccountID: info.AccountID}}
 	created, err := b.s.createSub2WithProxy(b.ctx, b.settings.Sub2, b.password, input, "pro-siwc:"+p.ID, "pro-siwc-"+p.ID, nil)
 	if err != nil {
+		if b.paid {
+			if renewed, recoveryErr := b.s.prepareSIWCImportRecovery(b.ctx, p, b.settings, err); recoveryErr != nil {
+				return nil, recoveryErr
+			} else if renewed {
+				b.generated = nil
+				return map[string]any{"reauthorize": true}, nil
+			}
+		}
 		return nil, err
 	}
 	if _, err = b.s.commitSIWCImport(p, b.settings, created); err != nil {
@@ -150,8 +158,50 @@ func (s *Server) recoverSIWCImport(ctx context.Context, p model.MailAccountProfi
 	}
 	created, err := s.createSub2WithProxy(ctx, v.Sub2, password, attempt.Input, "pro-siwc:"+p.ID, "pro-siwc-"+p.ID, nil)
 	if err != nil {
+		if renewed, recoveryErr := s.prepareSIWCImportRecovery(ctx, p, v, err); recoveryErr != nil {
+			return p, true, recoveryErr
+		} else if renewed {
+			return p, false, nil
+		}
 		return p, true, err
 	}
 	p, err = s.commitSIWCImport(p, v, created)
 	return p, true, err
+}
+
+func (s *Server) prepareSIWCImportRecovery(ctx context.Context, p model.MailAccountProfile, v model.ProSettings, cause error) (bool, error) {
+	var failure *sub2.SIWCImportUnconfirmedError
+	if !errors.As(cause, &failure) || !failure.CanReauthorize {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	endpoint, err := sub2.EndpointKey(v.Sub2.URL)
+	if err != nil {
+		return false, err
+	}
+	unlock, err := s.lockSub2Push(ctx, endpoint)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	id := sub2PushAttemptID(endpoint, "pro-siwc:"+p.ID)
+	raw, err := s.store.Sub2PushAttempt(id)
+	if err != nil {
+		return false, err
+	}
+	var attempt sub2PushAttempt
+	if json.Unmarshal([]byte(raw), &attempt) != nil || attempt.Created != nil || attempt.Input.SIWCImport == nil || !strings.EqualFold(attempt.Input.SIWCImport.Email, p.Email) {
+		return false, errors.New("SIWC 失败请求已变化，未清理或重新授权")
+	}
+	if err = ctx.Err(); err != nil {
+		return false, err
+	}
+	p, err = s.store.PrepareProSIWCImportRecovery(p.Email, p.ProAuto, id, raw, attempt.Key)
+	if err != nil {
+		return false, err
+	}
+	s.auditProEvent(p, "oauth", "running", "sub2", "SIWC 返回409且确认未创建账号，已清理旧失败请求，重新授权一次；保留原付款及补货任务", map[string]any{"automation_id": p.ProAuto.ID, "order_id": p.ProAuto.OrderID, "recovery_attempt": p.ProAuto.SIWCImportRecoveries})
+	return true, nil
 }

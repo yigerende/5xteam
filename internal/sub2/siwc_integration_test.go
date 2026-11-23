@@ -4,12 +4,47 @@ import (
 	"chatgpt-space-merge/internal/model"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestSIWCConflictRecoveryRequiresExplicitNoCreateEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		reason, stage, allowed string
+		status                 int
+		want                   bool
+	}{
+		{"SIWC_CALLBACK_UNCONFIRMED", "exchange", "true", 409, true},
+		{"SIWC_CALLBACK_UNCONFIRMED", "create_account", "false", 409, false},
+		{"SIWC_CALLBACK_UNCONFIRMED", "", "", 409, false},
+		{"SIWC_CALLBACK_IN_PROGRESS", "exchange", "true", 409, false},
+		{"IDEMPOTENCY_KEY_CONFLICT", "exchange", "true", 409, false},
+		{"SIWC_CALLBACK_UNCONFIRMED", "exchange", "true", 502, false},
+	} {
+		t.Run(tc.reason+tc.stage+fmt.Sprint(tc.status), func(t *testing.T) {
+			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/auth/login" {
+					fmt.Fprint(w, `{"code":0,"data":{"access_token":"test"}}`)
+					return
+				}
+				w.WriteHeader(tc.status)
+				json.NewEncoder(w).Encode(map[string]any{"code": tc.status, "reason": tc.reason, "message": "private callback code and token", "metadata": map[string]string{"failure_stage": tc.stage, "reauthorize_allowed": tc.allowed}})
+			}))
+			defer remote.Close()
+			_, err := New().ImportSIWCCallback(context.Background(), model.Sub2Settings{URL: remote.URL, Email: "admin@test.invalid"}, "test", CreateAccountInput{GroupIDs: []int64{1}, SIWCImport: &SIWCImportInput{}}, "key")
+			var failure *SIWCImportUnconfirmedError
+			got := errors.As(err, &failure) && failure.CanReauthorize
+			if got != tc.want || strings.Contains(err.Error(), "private") {
+				t.Fatal(got, err)
+			}
+		})
+	}
+}
 
 func TestSIWCMarkerCreateAndReauthorization(t *testing.T) {
 	for _, siwc := range []bool{false, true} {

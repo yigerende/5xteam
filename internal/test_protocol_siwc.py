@@ -199,6 +199,7 @@ class SIWCFlowTests(unittest.TestCase):
         from manager_oauth import bridge
         from urllib.parse import urlencode
         calls = []
+        recovery = False
         def rpc(method, **params):
             calls.append(method)
             if method == "siwc_generate":
@@ -206,27 +207,29 @@ class SIWCFlowTests(unittest.TestCase):
                     "client_id": "dynamic_agent_client", "response_type": "code",
                     "redirect_uri": "http://127.0.0.1:1456/auth/callback", "resource": "https://api.openai.com/v1",
                     "scope": "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
-                    "state": "remote-state", "nonce": "remote-nonce", "code_challenge": "remote-pkce",
+                    "state": "remote-state-" + str(calls.count("siwc_generate")), "nonce": "remote-nonce", "code_challenge": "remote-pkce",
                     "code_challenge_method": "S256", "ext_agent_host_id": "urn:uuid:fixture-host"})}
             if method == "siwc_callback":
                 self.assertIn("private-siwc-code", params["callback_url"])
                 self.assertTrue(params["web_session"].get("access_token"))
+                if recovery and calls.count("siwc_callback") == 1:
+                    return {"reauthorize": True}
                 return {"access_token": "remote-at", "refresh_token": "remote-rt", "id_token": "remote-id",
                         "auth_mode": "siwc", "email": "fixture@example.com", "client_id": "oaiapp_fixture"}
             raise AssertionError(method)
-        for manifest in (False, True):
+        for manifest, recovery in ((False, False), (True, False), (False, True), (True, True)):
             calls.clear()
             with self.subTest(manifest=manifest), patch.object(bridge, "call", rpc):
                 scenario = SIWCScenario(password=True, totp=True, choose=True, manifest=manifest)
                 result = scenario.run(siwc_authorization_source="sub2api", login_mode="password_totp",
                                       gpt_password="private-password", totp_secret="JBSWY3DPEHPK3PXP")
                 self.assertTrue(result["success"], result)
-                self.assertEqual(calls, ["siwc_generate", "siwc_callback"])
+                self.assertEqual(calls, ["siwc_generate", "siwc_callback"] * (2 if recovery else 1))
                 self.assertEqual(scenario.tokens, 0)
                 self.assertEqual(len(scenario.clients), 1)
-                self.assertEqual(len(scenario.authorization_sentinels), 3)
+                self.assertEqual(len(scenario.authorization_sentinels), 6 if recovery else 3)
                 self.assertEqual([r["flow"] for r in scenario.sentinel_requests],
-                                 ["authorize_continue", "password_verify"] + ["authorize_continue"] * 3)
+                                 ["authorize_continue", "password_verify"] + ["authorize_continue"] * (6 if recovery else 3))
                 for secret in ("remote-at", "remote-rt", "remote-state", "private-siwc-code", "private-sync-ticket"):
                     self.assertNotIn(secret, scenario.logs.getvalue())
 

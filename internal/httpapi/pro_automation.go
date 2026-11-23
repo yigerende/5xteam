@@ -634,6 +634,11 @@ func (s *Server) startProAutomation(w http.ResponseWriter, r *http.Request) {
 				p.ProAuto.Steps = map[string]string{}
 			}
 			if paidRecovery {
+				if input.RetryCurrent && !automatic {
+					// Explicit operator retry starts a new recovery run; ordinary
+					// scheduling/restarts never reset the durable automatic budget.
+					p.ProAuto.SIWCImportRecoveries = 0
+				}
 				p.ProAuto.Steps["login"] = "completed"
 				p.ProAuto.Steps["recharge"] = "completed"
 				p.ProAuto.Stage, p.ProAuto.Steps["oauth"] = "oauth", "pending"

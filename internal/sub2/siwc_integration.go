@@ -34,9 +34,23 @@ type SIWCImportInput struct {
 	WebAccountID   string `json:"web_account_id"`
 }
 
+// This is not a generic HTTP conflict: only the integration's explicit terminal
+// exchange failure proves that no downstream account creation was attempted.
+type SIWCImportUnconfirmedError struct{ CanReauthorize bool }
+
+func (e *SIWCImportUnconfirmedError) Error() string {
+	if e.CanReauthorize {
+		return "SIWC s2接口换凭证失败（HTTP 409），下游确认未创建账号，需要重新授权"
+	}
+	return "SIWC s2接口导入结果待核实（HTTP 409），保留原请求核对账号，不能直接重复导入"
+}
+
 func safeSIWCError(err error) error {
 	var response *HTTPError
 	if errors.As(err, &response) {
+		if response.Status == http.StatusConflict && response.Path == "/api/v1/admin/openai/siwc/integration/callback" && response.Reason == "SIWC_CALLBACK_UNCONFIRMED" {
+			return &SIWCImportUnconfirmedError{CanReauthorize: response.Metadata["reauthorize_allowed"] == "true" && response.Metadata["failure_stage"] == "exchange"}
+		}
 		return fmt.Errorf("SIWC s2接口请求失败（HTTP %d），请检查目标站授权接口和导入状态", response.Status)
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

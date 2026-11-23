@@ -27,11 +27,18 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
         adapter = object.__new__(cls)
         adapter.__dict__ = flow.__dict__
         adapter.siwc_web_session = web_session or {}
-        adapter.auth_url = adapter.prepare_oauth_authorize_url()
-        callback, _ = adapter.capture_oauth_callback(adapter.auth_url)
-        if not callback:
-            raise RuntimeError("原登录会话未返回 SIWC 授权码")
-        return adapter.exchange_oauth_callback(callback)
+        for attempt in range(2):
+            adapter.auth_url = adapter.prepare_oauth_authorize_url()
+            callback, _ = adapter.capture_oauth_callback(adapter.auth_url)
+            if not callback:
+                raise RuntimeError("原登录会话未返回 SIWC 授权码")
+            result = adapter.exchange_oauth_callback(callback)
+            if result.get("reauthorize") is not True:
+                return result
+            if adapter.payload.get("siwc_authorization_source") != "sub2api" or attempt:
+                raise RuntimeError("SIWC 重新授权一次后仍失败")
+            adapter.log("siwc_recovery", "下游确认未创建账号，沿用当前登录会话重新获取授权链接并授权一次")
+        raise RuntimeError("SIWC 授权恢复未完成")
 
     def request(self, url, **kwargs):
         parsed = urlsplit(url)
