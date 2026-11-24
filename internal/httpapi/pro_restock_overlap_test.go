@@ -53,8 +53,15 @@ func TestProRestockOverlapStartsOneWorkflowAcrossTicks(t *testing.T) {
 	// One earlier qualifying sample already exists. All three rules must then
 	// trigger in the first tick, with enough spare accounts/slots to expose duplicates.
 	s.proRestock.lastVersion = c.Version
-	s.proRestock.lastSnapshot = restock.Snapshot{Binding: restockBinding(p), GroupID: 1}
-	s.proRestock.exitConfirmation = c.Confirmations - 1
+	previous, err := s.proRestock.monitor(context.Background(), c, p, password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous.At = previous.At.Add(-time.Second)
+	s.proRestock.lastSnapshot = restock.ObserveAdmission(c, previous, restock.Snapshot{}, nil, p.Sub2.AccountConcurrency, 5, time.Now())
+	if s.proRestock.lastSnapshot.ExitConfirmations != c.Confirmations-1 {
+		t.Fatal("fixture did not preserve the earlier independent exit sample")
+	}
 	started := make(chan string, 4)
 	release := make(chan struct{})
 	s.proAutoHooks = &proAutomationHooks{Session: func(_ context.Context, e string, _ func(string, map[string]any) (any, error)) error {

@@ -52,7 +52,16 @@ func TestProRestockProduction64ConcurrentReservations(t *testing.T) {
 	}
 	now := time.Now()
 	snap := restock.Snapshot{At: now, CollectionStartedAt: now, Binding: "parallel", GroupID: c.GroupID, Valid: true, LoadValid: true, Accounts: []restock.Account{{ID: 1, Ready: true, Capacity: 60, Used: 60}, {ID: 2, Ready: true, Capacity: 60, Used: 60, Waiting: 20}}}
-	snap = restock.ObserveAdmission(c, snap, restock.Snapshot{}, nil, 60, 5, now)
+	var previous restock.Snapshot
+	for i := 0; i < c.Confirmations; i++ {
+		snap.At = now.Add(-time.Duration(c.Confirmations-1-i) * 5 * time.Second)
+		snap.CollectionStartedAt = snap.At
+		snap = restock.ObserveAdmission(c, snap, previous, nil, 60, 5, snap.At)
+		previous = snap
+		if i < c.Confirmations-1 && restock.Evaluate(c, snap, nil, restock.Limits{}, 0, 60, 5, snap.At).Suggested != 0 {
+			t.Fatal("production high load bypassed confirmation")
+		}
+	}
 	d := restock.Evaluate(c, snap, nil, restock.Limits{}, 0, 60, 5, now)
 	if d.Suggested != 2 {
 		t.Fatal("production high load must reserve two", d)

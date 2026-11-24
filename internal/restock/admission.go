@@ -27,8 +27,23 @@ type NeedConfirmation struct {
 	RawNeed       int         `json:"raw_need"`
 	ConfirmedNeed int         `json:"confirmed_need"`
 	Levels        []NeedLevel `json:"levels"`
-	FastReason    string      `json:"fast_reason,omitempty"`
+	FastReason    string      `json:"fast_reason,omitempty"` // Historical fast-path records only.
 }
+
+// Old snapshots may claim a confirmed quantity after only one emergency
+// sample. Validate the per-quantity counts when reusing those snapshots.
+func (n NeedConfirmation) requireConfirmations(required int) NeedConfirmation {
+	confirmed := 0
+	for _, level := range n.Levels {
+		if level.Count >= max(1, required) && len(level.Proof) > 0 {
+			confirmed = max(confirmed, level.Quantity)
+		}
+	}
+	n.ConfirmedNeed = min(n.ConfirmedNeed, n.RawNeed, confirmed)
+	n.FastReason = ""
+	return n
+}
+
 type AdmissionState struct {
 	Version     int              `json:"version"`
 	At          time.Time        `json:"at"`
@@ -158,8 +173,11 @@ func ObserveAdmission(c Config, s, previous Snapshot, tasks []Task, slots int, l
 		return s
 	}
 	if same && !s.At.After(old.At) {
-		s.Admission = old
-		s.ExitConfirmations = firstCount(old.Exit)
+		copy := *old
+		copy.Concurrency = copy.Concurrency.requireConfirmations(c.Confirmations)
+		copy.Exit = copy.Exit.requireConfirmations(c.Confirmations)
+		s.Admission = &copy
+		s.ExitConfirmations = firstCount(copy.Exit)
 		s.SupplyChangedAt = previous.SupplyChangedAt
 		return s
 	}
@@ -169,24 +187,10 @@ func ObserveAdmission(c Config, s, previous Snapshot, tasks []Task, slots int, l
 	if c.ConcurrencyEnabled {
 		raw := concurrencyNeed(c, s, tasks, slots, lead, now)
 		s.Admission.Concurrency = advanceNeed(raw, c.Confirmations, old.Concurrency, func(int) []NeedProof { return []NeedProof{{Key: "load", At: s.At}} })
-		used, capacity, waiting := exitLoad(s, now)
-		if waiting >= c.EmergencyQueue || float64(used+waiting) > c.EffectiveCapacity(capacity) {
-			s.Admission.Concurrency.ConfirmedNeed = raw
-			s.Admission.Concurrency.FastReason = "实际容量不足或紧急排队"
-		}
 	}
 	if c.ExitEnabled {
 		f := ForecastExits(c, s, tasks, slots, lead, now)
 		s.Admission.Exit = advanceNeed(f.Need, c.Confirmations, old.Exit, func(n int) []NeedProof { return exitProof(f, n, s.At) })
-		_, _, waiting := exitLoad(s, now)
-		urgent := f.UrgentNeed
-		if waiting >= c.EmergencyQueue {
-			urgent = f.Need
-		}
-		if urgent > 0 {
-			s.Admission.Exit.ConfirmedNeed = max(s.Admission.Exit.ConfirmedNeed, urgent)
-			s.Admission.Exit.FastReason = "确定退出将造成容量缺口或紧急排队"
-		}
 	}
 	s.ExitConfirmations = firstCount(s.Admission.Exit)
 	return s
@@ -207,8 +211,10 @@ func (s Snapshot) ConcurrencyConfirmations() int {
 
 // Reuse the same cooling decision in evaluation and the reservation transaction.
 func (d Decision) Cooldown(c Config) int {
-	fast := d.Snapshot.Admission != nil && (d.Snapshot.Admission.Concurrency.FastReason != "" || d.Snapshot.Admission.Exit.FastReason != "")
-	if fast || d.EmptyGroupNeed > 0 || d.Waiting >= c.EmergencyQueue || (c.ExitEnabled && d.ExitNeed > 0 && d.Exit != nil && d.Exit.Emergency) {
+	// Emergency changes the cooldown only; admission still requires every
+	// configured confirmation for each requested quantity.
+	overloaded := c.ConcurrencyEnabled && float64(d.Used+d.Waiting) > d.Capacity
+	if overloaded || d.EmptyGroupNeed > 0 || d.Waiting >= c.EmergencyQueue || (c.ExitEnabled && d.ExitNeed > 0 && d.Exit != nil && d.Exit.Emergency) {
 		return c.EmergencyCooldownSeconds
 	}
 	return c.CooldownSeconds

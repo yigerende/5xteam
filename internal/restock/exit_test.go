@@ -258,8 +258,12 @@ func TestExitDynamicPressureNeedsConsecutiveSamples(t *testing.T) {
 	}
 	s.ExitConfirmations = 0
 	s.Accounts[0].Waiting = c.EmergencyQueue
-	if Evaluate(c, s, nil, Limits{}, 0, 50, 2, now).ExitNeed != 1 {
-		t.Fatal("actual account queue ignored")
+	if Evaluate(c, s, nil, Limits{}, 0, 50, 2, now).ExitNeed != 0 {
+		t.Fatal("actual account queue bypassed confirmation")
+	}
+	s.ExitConfirmations = c.Confirmations
+	if Evaluate(c, s, nil, Limits{}, 0, 50, 2, now).ExitNeed == 0 {
+		t.Fatal("confirmed account queue ignored")
 	}
 }
 

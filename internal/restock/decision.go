@@ -75,7 +75,8 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	d = Decision{At: now, Version: c.Version, Snapshot: s, Config: c, Limits: limits, Confirmations: confirmations, LeadMinutes: lead, TriggerMinutes: float64(c.TriggerMinutes), TargetMinutes: float64(c.TargetMinutes), Warnings: []string{}}
 	d.Trace = &DecisionTrace{Version: 2, NewAccountCapacity: newSlots, EffectiveNewAccountCapacity: c.EffectiveCapacity(newSlots), StopStage: "data"}
 	if s.Admission != nil {
-		d.Trace.ConcurrencyConfirmation = &s.Admission.Concurrency
+		confirmation := s.Admission.Concurrency.requireConfirmations(c.Confirmations)
+		d.Trace.ConcurrencyConfirmation = &confirmation
 	}
 	// Keep forecasts, demand and collection errors visible while suppressing
 	// every trigger, including startup, replacement and emergency demand.
@@ -162,7 +163,7 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 	if c.ExitEnabled && exit.Confirmed {
 		d.ExitNeed = exit.Need
 		if s.Admission != nil {
-			d.ExitNeed = min(exit.Need, s.Admission.Exit.ConfirmedNeed)
+			d.ExitNeed = min(exit.Need, exit.Confirmation.ConfirmedNeed)
 		}
 	}
 	if c.ExitEnabled && float64(c.ExitMinutes) < lead+float64(c.MarginMinutes) {
@@ -180,11 +181,15 @@ func Evaluate(c Config, s Snapshot, tasks []Task, limits Limits, confirmations, 
 		d.Warnings = append(d.Warnings, "部分 EJH 账号时限或首次推送记录不明，已排除，不按 0 分钟触发")
 	}
 	futureCapacity := d.ReportedCapacity
-	if c.ConcurrencyEnabled && pressureAt(c, s, now) && (confirmations >= c.Confirmations || s.Admission != nil && s.Admission.Concurrency.ConfirmedNeed > 0) {
+	confirmedConcurrency := confirmations >= c.Confirmations
+	if d.Trace.ConcurrencyConfirmation != nil {
+		confirmedConcurrency = d.Trace.ConcurrencyConfirmation.ConfirmedNeed > 0
+	}
+	if c.ConcurrencyEnabled && pressureAt(c, s, now) && confirmedConcurrency {
 		d.Trace.ConcurrencyTriggered = true
 		d.ConcurrencyNeed = concurrencyNeed(c, s, tasks, newSlots, lead, now)
 		if s.Admission != nil {
-			d.ConcurrencyNeed = min(d.ConcurrencyNeed, s.Admission.Concurrency.ConfirmedNeed)
+			d.ConcurrencyNeed = min(d.ConcurrencyNeed, d.Trace.ConcurrencyConfirmation.ConfirmedNeed)
 		}
 	}
 	d.Trace.FutureCapacity = c.EffectiveCapacity(futureCapacity)

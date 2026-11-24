@@ -8,11 +8,11 @@ import (
 func TestAdmissionCooldownPreservesIndependentSettings(t *testing.T) {
 	c := DefaultConfig()
 	c.CooldownSeconds, c.EmergencyCooldownSeconds = 0, 120
-	d := Decision{Snapshot: Snapshot{Admission: &AdmissionState{Concurrency: NeedConfirmation{FastReason: "capacity"}}}}
+	d := Decision{Capacity: 60, Used: 61}
 	if d.Cooldown(c) != 120 {
 		t.Fatal("emergency cooldown was silently clamped")
 	}
-	d.Snapshot.Admission = nil
+	d.Used = 30
 	if d.Cooldown(c) != 0 {
 		t.Fatal("normal zero cooldown changed")
 	}
@@ -45,7 +45,7 @@ func TestAdmissionFiveSecondTicksRequireNewQuota(t *testing.T) {
 				t.Fatalf("ordered before three independent samples: interval=%d tick=%d", interval, tick)
 			}
 			// Slow/failing quota collection doesn't stop fixed-deadline or load rules;
-			// those fast paths are covered separately, without counting cache as fresh.
+			// those rules confirm fresh load separately, without counting cache as fresh.
 			previous = next
 		}
 	}

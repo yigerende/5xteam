@@ -145,14 +145,22 @@ func TestAdmissionDistributionAndHardDeadline(t *testing.T) {
 	if d.ExitNeed != 0 || d.Exit.AtRisk != 0 || next.SupplyChangedAt.IsZero() {
 		t.Fatal("pre-arrival rate triggered another purchase", d)
 	}
-	// Fixed expiry must still trigger fast when it creates a real gap.
+	// Fixed expiry keeps using fresh load samples during distribution, but
+	// still needs the configured number of confirmations.
 	deadline := s.At.Add(time.Minute)
 	s.Accounts[0].ExitDeadline = &deadline
 	s.Accounts[1].ExitDeadline = &deadline
-	s = refreshReplay(s, 5*time.Second, false)
-	_, d = observeDecision(c, s, next, nil)
-	if d.ExitNeed != 1 || d.Suggested != 1 || d.Exit.UrgentNeed != 1 {
-		t.Fatal("distribution wait delayed certain shortage", d)
+	previous := next
+	for i := 1; i <= c.Confirmations; i++ {
+		s = refreshReplay(s, 5*time.Second, false)
+		previous, d = observeDecision(c, s, previous, nil)
+		want := 0
+		if i == c.Confirmations {
+			want = 1
+		}
+		if d.ExitNeed != want || d.Suggested != want || d.Exit.UrgentNeed != 1 {
+			t.Fatalf("certain shortage confirmation %d: %+v", i, d)
+		}
 	}
 	// New rates can be established in 30 seconds, without a universal minute wait.
 	s.Accounts[0].ExitDeadline = nil
@@ -169,7 +177,7 @@ func TestAdmissionDistributionAndHardDeadline(t *testing.T) {
 		t.Fatal("did not use post-distribution rate", d.Exit)
 	}
 }
-func TestAdmissionProductionFastAndBatchGuards(t *testing.T) {
+func TestAdmissionProductionEmergencyConfirmationAndBatchGuards(t *testing.T) {
 	for _, kind := range []string{"empty", "queue", "overload", "deadline"} {
 		t.Run(kind, func(t *testing.T) {
 			c, s, now := productionFixture(t, 2, 100)
@@ -186,9 +194,19 @@ func TestAdmissionProductionFastAndBatchGuards(t *testing.T) {
 				deadline := now.Add(time.Minute)
 				s.Accounts[0].ExitDeadline = &deadline
 			}
-			_, d := observeDecision(c, s, Snapshot{}, nil)
+			var previous Snapshot
+			var d Decision
+			for i := 1; i <= c.Confirmations; i++ {
+				s = refreshReplay(s, 5*time.Second, false)
+				previous, d = observeDecision(c, s, previous, nil)
+				if kind != "empty" && i < c.Confirmations && d.Suggested != 0 {
+					t.Fatal("emergency bypassed confirmation", d)
+				}
+			}
+			s = previous
+			now = s.At
 			if d.Suggested < 1 {
-				t.Fatal("fast path delayed", d)
+				t.Fatal("confirmed shortage delayed", d)
 			}
 			if kind == "overload" && d.Suggested != 2 {
 				t.Fatal("real shortage of two reduced", d)
@@ -201,14 +219,13 @@ func TestAdmissionProductionFastAndBatchGuards(t *testing.T) {
 				}
 			}
 			last := now.Add(-30 * time.Second)
-			s = ObserveAdmission(c, s, Snapshot{}, nil, 60, 4.1076, now)
 			d = Evaluate(c, s, nil, Limits{LastBatch: &last}, 0, 60, 4.1076, now)
 			if d.Suggested == 0 || *d.Trace.CooldownSeconds != 20 {
-				t.Fatal("used ordinary cooldown on fast path", d)
+				t.Fatal("used ordinary cooldown after emergency confirmation", d)
 			}
 			for _, limits := range []Limits{{HourCount: 10}, {DayCount: 100}, {Failures: 2}} {
 				if Evaluate(c, s, nil, limits, 0, 60, 4.1076, now).Suggested != 0 {
-					t.Fatal("fast path bypassed hard cap")
+					t.Fatal("confirmed emergency bypassed hard cap")
 				}
 			}
 		})
@@ -356,15 +373,18 @@ func TestAdmissionProductionSingleAccountLifecycle(t *testing.T) {
 				s.Accounts[0].Waiting = 3
 				s.Accounts[0].Used = 57
 				want = 1
+				confirm = true
 			case "deadline":
 				at := now.Add(time.Minute)
 				s.Accounts[0].ExitDeadline = &at
 				want = 1
+				confirm = true
 			case "quota_reached":
 				threshold := 99.
 				s.Accounts[0].QuotaMergeThreshold = &threshold
 				s.Accounts[0].Windows = []Window{{Seconds: 604800, ResetAt: now.Add(time.Hour).Unix(), Used: 99, At: now}}
 				want = 1
+				confirm = true
 			case "quota_prediction":
 				s.Accounts[0].Money = replayMoney(now, 95, 950, 10)
 				want = 1
@@ -396,6 +416,10 @@ func TestAdmissionProductionSingleAccountLifecycle(t *testing.T) {
 					s = refreshReplay(s, 5*time.Second, true)
 				} else {
 					s = refreshReplay(s, time.Second, false)
+				}
+				if kind == "quota_reached" {
+					s.Accounts[0].Windows = append([]Window(nil), s.Accounts[0].Windows...)
+					s.Accounts[0].Windows[0].At = s.At
 				}
 				next, decision := observeDecision(c, s, prev, nil)
 				prev, d = next, decision

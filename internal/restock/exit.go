@@ -426,8 +426,8 @@ func ForecastExits(c Config, s Snapshot, tasks []Task, newSlots int, lead float6
 		}
 		f.Points = append(f.Points, point)
 		// A fixed deadline/reached threshold is not a burn-rate prediction.
-		// If only those certain exits cause a real shortage inside the delivery
-		// lead plus margin, waiting for three quota samples would be too late.
+		// Record certain shortages inside the delivery lead plus margin, without
+		// treating urgency as permission to bypass the configured confirmations.
 		if !at.After(arrival.Add(time.Duration(c.MarginMinutes) * time.Minute)) {
 			hardBase := capacity
 			for _, r := range f.Rows {
@@ -442,12 +442,12 @@ func ForecastExits(c Config, s Snapshot, tasks []Task, newSlots int, lead float6
 			}
 		}
 	}
-	// Future shortage is still a prediction: a single demand spike must not
-	// order a batch. Only actual account-side emergency queues skip confirmation.
-	f.Confirmed = f.Pressure && (waiting >= c.EmergencyQueue || s.ExitConfirmations >= c.Confirmations)
+	// Even an actual queue or a certain exit requires consecutive evidence.
+	f.Confirmed = f.Pressure && s.ExitConfirmations >= c.Confirmations
 	if s.Admission != nil {
-		f.Confirmation = &s.Admission.Exit
-		f.Confirmed = s.Admission.Exit.ConfirmedNeed > 0
+		confirmation := s.Admission.Exit.requireConfirmations(c.Confirmations)
+		f.Confirmation = &confirmation
+		f.Confirmed = f.Pressure && confirmation.ConfirmedNeed > 0
 	}
 	return f
 }
