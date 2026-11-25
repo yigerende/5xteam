@@ -696,6 +696,7 @@ func preserveProProfile(profile *model.MailAccountProfile, old model.MailAccount
 	profile.ProPendingPushTargetID = old.ProPendingPushTargetID
 	profile.Sub2ProxyBindingID = old.Sub2ProxyBindingID
 	profile.ProPushStartedAt = old.ProPushStartedAt
+	profile.ProPushStartedSource = old.ProPushStartedSource
 	profile.ProPushTimeoutEnabled, profile.ProPushTimeoutMinutes = old.ProPushTimeoutEnabled, old.ProPushTimeoutMinutes
 	profile.ProPushDownstream = old.ProPushDownstream
 	profile.ProForceMergeNextAt, profile.ProForceMergeAttempts = old.ProForceMergeNextAt, old.ProForceMergeAttempts

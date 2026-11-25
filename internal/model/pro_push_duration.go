@@ -2,6 +2,17 @@ package model
 
 import "time"
 
+// Start once: successful activation owns the clock, later pushes never reset it.
+// Accounts imported without activation evidence retain the first-push fallback.
+func (p *MailAccountProfile) StartProPushClock(at time.Time, source string) bool {
+	if at.IsZero() || (p.ProPushStartedAt != nil && !p.ProPushStartedAt.IsZero()) {
+		return false
+	}
+	p.ProPushStartedAt = &at
+	p.ProPushStartedSource = source
+	return true
+}
+
 // A display clock only: this does not change quota, timeout or retry policies.
 func (p MailAccountProfile) ProPushEndTime() *time.Time {
 	if p.ProPushEndedAt != nil && !p.ProPushEndedAt.IsZero() {

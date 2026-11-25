@@ -120,7 +120,7 @@ defineExpose({open})
 <p v-if="state.status==='awaiting_deletion'">删除已提交，等待上游明确确认；可在账号菜单续跑核验，不会重复提交删除。</p>
 <p v-if="state.stop_requested" role="status">{{state.pro_workflow_running?'正在停止当前任务…':'已停止，定时任务不会继续执行。'}}<span v-if="deletionSubmitted">已提交上游的删除请求无法撤回。</span></p>
 <p v-if="state.status==='waiting_quota'">等待额度达到 {{ state.quota_used_threshold }}%，下次检测：{{ formatTime(state.next_check_at) }}</p>
-<p v-if="quotaResumeAvailable">已开通并完成授权、推送，可恢复定时额度检测及后续合并/删除。首次推送计时继续沿用。</p>
+<p v-if="quotaResumeAvailable">已开通并完成授权、推送，可恢复定时额度检测及后续合并/删除。原起算时间继续沿用。</p>
 <p v-if="state.status==='awaiting_push'">RT/AT 已保存，请推送当前下游，成功后自动恢复定时额度检测；也可点击“继续后续流程”。</p>
 <p v-if="state.proxy_name">登录代理：{{ state.proxy_name }}<span v-if="state.exit_ip"> · 首次记录 IP：{{ state.exit_ip }}</span></p>
 <p v-if="visibleError" role="alert" class="danger-text">{{ visibleError }}</p>

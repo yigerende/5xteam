@@ -309,9 +309,9 @@ onBeforeUnmount(() => { disposed = true; purchaseGroupsController?.abort(); edit
         <label class="field"><span>空间席位套餐</span><select v-model="automation.target_seat_type"><option value="default">Standard（普通空间）</option><option value="prolite">Premium（5x）</option></select></label>
         <div class="target-summary wide"><strong>{{ selectedAdmin?.label || selectedAdmin?.email || '尚未选择母号' }}</strong><span>{{ selectedAdmin?.team_account_id || '选择后显示目标 Team ID' }}</span></div>
 </div>
-            <div class="config-divider"><h4>推送等待时限</h4><p>从首次推送开始计时，重试和重启不清零。</p></div>
-            <div class="settings-fields">        <label class="toggle-row wide"><div><strong>推送超时执行合并/删除/API 商户/2.0</strong><small>保存后同步更新尚未开始合并/删除的在途账号，仍从首次成功推送开始计时。缩短至已超时会在后续检查时执行；重试和重启不清零，停止、暂停和待确认任务仍遵守原规则。按当前选择执行空间合并、删除账户或 API 商户；API 商户模式会提交退款申请并查询进度，卡台到账仍以真实流水为准。</small></div><input v-model="automation.force_merge_enabled" type="checkbox"/><i></i></label>
-        <label class="field"><span>首次推送后最多等待（分钟）</span><input v-model.number="automation.force_merge_minutes" type="number" min="1" max="525600" :required="automation.force_merge_enabled"/></label>
+            <div class="config-divider"><h4>推送等待时限</h4><p>开通成功即按开通时间计时，推送、重试和重启不清零；推送成功后才执行超时收尾。</p></div>
+            <div class="settings-fields">        <label class="toggle-row wide"><div><strong>推送超时执行合并/删除/API 商户/2.0</strong><small>保存后同步更新尚未开始合并/删除的在途账号，新开通账号从开通时间计时，已有起算时间保持不变；推送成功后才执行。缩短至已超时会在后续检查时执行；重试和重启不清零，停止、暂停和待确认任务仍遵守原规则。按当前选择执行空间合并、删除账户或 API 商户；API 商户模式会提交退款申请并查询进度，卡台到账仍以真实流水为准。</small></div><input v-model="automation.force_merge_enabled" type="checkbox"/><i></i></label>
+        <label class="field"><span>开通后最多等待（分钟）</span><input v-model.number="automation.force_merge_minutes" type="number" min="1" max="525600" :required="automation.force_merge_enabled"/></label>
 </div>
           </section>
           <section v-show="configSection === 'advanced'" data-config-section="advanced">

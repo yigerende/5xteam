@@ -349,9 +349,16 @@ func (s *Store) updateProAccount(email string, expected time.Time, mutate func(*
 		p.ProAuto.RetryAt = nil
 		p.ProLastError = p.ProDead.Reason
 	}
-	if previousPushStatus != "completed" && p.PushStatus == "completed" && p.ProPushStartedAt == nil {
-		now := time.Now()
-		p.ProPushStartedAt = &now
+	if p.ProPushStartedAt == nil || p.ProPushStartedAt.IsZero() {
+		pushed := previousPushStatus != "completed" && p.PushStatus == "completed"
+		if p.ProAuto.Steps["recharge"] == "completed" || pushed {
+			if err := s.recoverProActivationClockLocked(&p); err != nil {
+				return p, err
+			}
+		}
+		if pushed {
+			p.StartProPushClock(time.Now(), "push")
+		}
 	}
 	if p.PushProvider != previousProvider || p.Sub2AccountID != previousSub2ID || p.VM2 != nil {
 		// A committed SIWC transfer explicitly binds the carried total to its

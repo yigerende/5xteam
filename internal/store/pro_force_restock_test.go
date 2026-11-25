@@ -193,7 +193,7 @@ func TestProOrderTimeoutCapturedBeforePushAndPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _, _ := s.MailAccountCredential(email)
-	if p.ProPushTimeoutEnabled == nil || *p.ProPushTimeoutEnabled || p.ProPushStartedAt != nil {
+	if p.ProPushTimeoutEnabled == nil || *p.ProPushTimeoutEnabled || p.ProPushStartedAt == nil || !p.ProPushStartedAt.Equal(order.CreatedAt) {
 		t.Fatal("manual order did not snapshot disabled policy")
 	}
 	cfg.ForceMergeEnabled = true
@@ -201,8 +201,8 @@ func TestProOrderTimeoutCapturedBeforePushAndPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := s.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.PushStatus = "failed" })
-	if err != nil || p.ProPushStartedAt != nil {
-		t.Fatal("failed push started countdown", err)
+	if err != nil || p.ProPushStartedAt == nil || !p.ProPushStartedAt.Equal(order.CreatedAt) {
+		t.Fatal("failed push changed activation clock", err)
 	}
 	p, err = s.UpdateProAccount(email, func(p *model.MailAccountProfile) { p.PushStatus = "completed" })
 	if err != nil || p.ProPushStartedAt == nil || p.ProPushDeadline() == nil {

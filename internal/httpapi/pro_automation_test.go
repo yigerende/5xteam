@@ -248,6 +248,10 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 					return err
 				}
 				if tc.loseSession {
+					p, _, _ := st.MailAccountCredential(email)
+					if p.ProPushStartedAt == nil || p.ProPushStartedSource != "activation" || p.PushStatus == "completed" {
+						t.Error("activation clock missing before OAuth failure")
+					}
 					return errors.New("session expired")
 				}
 				_, err = rpc("pro_tokens", map[string]any{"exit_ip": "198.51.100.8", "tokens": map[string]any{"access_token": proAutoToken(email, "after"), "refresh_token": "after-rt"}, "web_session": map[string]any{"accessToken": "updated-web-at", "session_token": "updated-session-cookie"}})
@@ -282,6 +286,14 @@ func TestProAutoContinuousPaymentToCompletion(t *testing.T) {
 				t.Fatal(rec.Body.String())
 			}
 			p := waitProAutoFinished(t, s, email)
+			order, _, orderErr := st.GPTPayOrder(p.ProAuto.OrderID)
+			if tc.paymentCode == 0 {
+				if orderErr != nil || order.SucceededAt == nil || p.ProPushStartedAt == nil || !p.ProPushStartedAt.Equal(*order.SucceededAt) || p.ProPushStartedSource != "activation" {
+					t.Fatal("activation/push clock mismatch", orderErr)
+				}
+			} else if p.ProPushStartedAt != nil {
+				t.Fatal("failed/uncertain payment started clock")
+			}
 			if tc.threshold > 0 && (p.ProAuto.QuotaUsedThreshold != tc.threshold || p.ProAuto.QuotaIntervalSeconds != 45) {
 				t.Fatal("new task did not use shared Pro quota settings")
 			}

@@ -412,6 +412,9 @@ func (s *Store) CreateGPTPayOrder(v gptpay.Order, snapshot gptpay.Snapshot) erro
 	if err = ejhSaveCaseTx(tx, v); err != nil {
 		return err
 	}
+	if err = captureProActivationClockTx(tx, v); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 func (s *Store) UpdateGPTPayOrder(v gptpay.Order) error {
@@ -481,6 +484,9 @@ func (s *Store) updateGPTPayOrder(v gptpay.Order, unsubmitted *gptpay.Order) err
 		return err
 	}
 	if err = ejhSaveCaseTx(tx, v); err != nil {
+		return err
+	}
+	if err = captureProActivationClockTx(tx, v); err != nil {
 		return err
 	}
 	return tx.Commit()

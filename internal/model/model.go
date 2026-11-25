@@ -38,6 +38,7 @@ type MailAccountProfile struct {
 	ProPushDownstream          *ProDownstreamRef              `json:"pro_push_downstream,omitempty"`
 	ProPushEndedAt             *time.Time                     `json:"pro_push_ended_at,omitempty"`
 	ProPushStartedAt           *time.Time                     `json:"pro_push_started_at,omitempty"`
+	ProPushStartedSource       string                         `json:"pro_push_started_source,omitempty"`
 	ProForceMergeNextAt        *time.Time                     `json:"pro_force_merge_next_at,omitempty"`
 	ProForceMergeAttempts      int                            `json:"pro_force_merge_attempts,omitempty"`
 	ProMergeTrigger            string                         `json:"pro_merge_trigger,omitempty"`
