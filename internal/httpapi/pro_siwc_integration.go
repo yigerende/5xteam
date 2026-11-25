@@ -22,6 +22,21 @@ type siwcBroker struct {
 }
 
 func (b *siwcBroker) call(method string, args map[string]any) (any, error) {
+	if method == "siwc_retry_prepare" {
+		profile, _, err := b.s.store.MailAccountCredential(b.email)
+		if err != nil {
+			return nil, err
+		}
+		_, found, err := b.s.recoverSIWCImport(b.ctx, profile, b.settings, b.password)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return map[string]any{"completed": true}, nil
+		}
+		b.generated = nil
+		return map[string]any{"completed": false}, nil
+	}
 	if method == "siwc_generate" {
 		if b.generated != nil {
 			return *b.generated, nil

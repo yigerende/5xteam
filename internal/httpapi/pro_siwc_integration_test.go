@@ -201,10 +201,11 @@ func TestSIWCIntegrationLostResponseRecoveryCompletesBothStages(t *testing.T) {
 	if p.PushStatus == "completed" {
 		t.Fatal("push reported before confirmation")
 	}
-	p, found, err := f.s.recoverSIWCImport(context.Background(), p, cfg, "test")
-	if err != nil || !found {
-		t.Fatal(found, err)
+	recovered, err := b.call("siwc_retry_prepare", nil)
+	if err != nil || recovered.(map[string]any)["completed"] != true {
+		t.Fatal(recovered, err)
 	}
+	p, _, _ = f.s.store.MailAccountCredential(f.email)
 	if p.Sub2AccountID != 73 || p.ProAuto.Steps["oauth"] != "completed" || p.ProAuto.Steps["push"] != "completed" || p.ProAuto.OAuthSource != "siwc_sub2api" {
 		t.Fatal("stages or binding not saved")
 	}
@@ -212,7 +213,7 @@ func TestSIWCIntegrationLostResponseRecoveryCompletesBothStages(t *testing.T) {
 	if err != nil || c.SIWC == nil || c.SIWC.WebAccountID != "personal-id" {
 		t.Fatal("encrypted credentials not saved")
 	}
-	_, found, err = f.s.recoverSIWCImport(context.Background(), p, cfg, "test")
+	_, found, err := f.s.recoverSIWCImport(context.Background(), p, cfg, "test")
 	if err != nil || found || callbackCalls != 2 {
 		t.Fatal("completed import submitted again")
 	}

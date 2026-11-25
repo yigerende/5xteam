@@ -740,6 +740,9 @@ func (s *Server) runProAutomation(ctx context.Context, email string, unlock, can
 }
 
 func (s *Server) proAutoRPC(ctx context.Context, email string, cfg gptpay.Settings, key string, card gptpay.Card, secret gptpay.CardSecret, method string, args map[string]any) (any, error) {
+	if method == "pro_oauth_retry" {
+		return s.proOAuthRetryRPC(ctx, email, args)
+	}
 	p, c, err := s.store.MailAccountCredential(email)
 	if err != nil {
 		return nil, err
@@ -1043,6 +1046,9 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 	localRPC := &oauthProtocolRPC{server: s, ctx: ctx, email: email}
 	defer localRPC.close()
 	result, err := runOAuthChild(ctx, cmd, payload, func(method string, args map[string]any) (any, error) {
+		if method == "pro_oauth_retry" {
+			args["expected_downstream"] = model.ProDownstream(push)
+		}
 		if broker != nil && strings.HasPrefix(method, "siwc_") {
 			return broker.call(method, args)
 		}
@@ -1077,6 +1083,15 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 		return err
 	}
 	if result["success"] != true {
+		if result["error_code"] == "oauth_paid_relogin" {
+			return errProOAuthReloginReady
+		}
+		if result["error_code"] == "oauth_retry_exhausted" {
+			return fmt.Errorf("%w：%v", errProOAuthRetriesExhausted, result["error"])
+		}
+		if oauthSource != "" && result["error_code"] == "siwc_session_expired" {
+			return &siwcSessionExpiredError{Source: oauthSource, Downstream: model.ProDownstream(push)}
+		}
 		if oauthSource != "" && result["error_code"] == "siwc_consent_not_authorized" && fmt.Sprint(result["http_status"]) == "401" {
 			return &siwcConsentDeniedError{Source: oauthSource, Downstream: model.ProDownstream(push)}
 		}

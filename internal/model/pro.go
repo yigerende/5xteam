@@ -10,6 +10,7 @@ type ProAutoState struct {
 	// The failed order is also the durable claim for this workflow's single re-login.
 	SessionRecoveryOrderID string                  `json:"session_recovery_order_id,omitempty"`
 	SIWCConsentFailure     *ProSIWCConsentFailure  `json:"siwc_consent_failure,omitempty"`
+	OAuthRecovery          *ProOAuthRecovery       `json:"oauth_recovery,omitempty"`
 	OAuthSource            string                  `json:"oauth_source,omitempty"`
 	Replacement            *ProRechargeReplacement `json:"replacement,omitempty"`
 	PaymentReviewRequired  bool                    `json:"payment_review_required,omitempty"`
@@ -42,6 +43,16 @@ type ProAutoState struct {
 	StartedAt            time.Time            `json:"started_at,omitempty"`
 	UpdatedAt            time.Time            `json:"updated_at,omitempty"`
 	NextCheckAt          *time.Time           `json:"next_check_at,omitempty"`
+}
+
+// A payment-free recovery budget belongs to the paid workflow, not a process.
+type ProOAuthRecovery struct {
+	OrderID    string           `json:"order_id"`
+	Source     string           `json:"source"`
+	Downstream ProDownstreamRef `json:"downstream"`
+	Attempts   int              `json:"attempts"`
+	NextAt     *time.Time       `json:"next_at,omitempty"`
+	Exhausted  bool             `json:"exhausted"`
 }
 
 // Evidence is scoped to one paid workflow and stop generation, never an email alone.

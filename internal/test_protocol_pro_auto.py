@@ -112,6 +112,7 @@ class ContinuousSessionTest(unittest.TestCase):
             events.append('login');flow.device_id='same-device';flow.set_cookie('login_session','auth-cookie','auth.openai.com')
             return {'access_token':'first-web-at','user':{'email':'pro@example.com'},'account':{'id':'personal'}}
         def rpc(method, args):
+            if method == 'pro_oauth_retry':return {'retry':False}
             outer.assertEqual(len(clients),1);outer.assertFalse(clients[0].closed)
             if method=='pro_recharge':
                 events.append('pay');outer.assertEqual(args['session']['access_token'],'first-web-at')

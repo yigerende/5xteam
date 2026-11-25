@@ -28,7 +28,7 @@ func TestProAutoSameAccountRetries(t *testing.T) {
 		{"exhausted", 2, 3, 0, false},
 		{"disabled", 0, 1, 0, false},
 		{"unknown_payment", 2, 1, 1, false},
-		{"paid_oauth_failure", 2, 1, 1, false},
+		{"paid_oauth_failure", 2, 3, 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logins, purchases, pushes atomic.Int32
@@ -76,7 +76,11 @@ func TestProAutoSameAccountRetries(t *testing.T) {
 					if n == 1 {
 						firstFlow = p.ProAuto.ID
 					}
-					if current != email || p.ProAuto.ID != firstFlow || p.ProAuto.CardID != "test-card" || p.ProAuto.RetryAttempts != int(n)-1 {
+					wantRetries := int(n) - 1
+					if tc.name == "paid_oauth_failure" {
+						wantRetries = 0
+					}
+					if current != email || p.ProAuto.ID != firstFlow || p.ProAuto.CardID != "test-card" || p.ProAuto.RetryAttempts != wantRetries {
 						t.Error("retry changed account, flow, card or lost its attempt count")
 					}
 					if tc.name == "exhausted" || tc.name == "disabled" || tc.name == "login_then_success" && n == 1 {

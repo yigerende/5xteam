@@ -129,7 +129,7 @@ class ContinuousProLogin(ProjectProtocolLogin):
         bridge.emit("oauth", "session_reuse", "开通成功，沿用首次登录会话继续 Codex 授权；不重新登录")
         callback, final = self.capture_oauth_callback(self.auth_url)
         if not callback:
-            raise RuntimeError("原登录会话未能直接完成 OAuth 授权，可能已失效或要求重新验证；已停止，未重新登录。final=" + bridge.safe_url(final))
+            raise upstream.LoginFlowError("原登录会话未能完成 OAuth 授权，需要恢复已付款授权。final=" + bridge.safe_url(final), code="oauth_session_expired")
         query = parse_qs(urlsplit(callback).query)
         if query.get("state", [""])[0] != self.oauth_state:
             raise RuntimeError("OAuth state 校验失败")
@@ -138,7 +138,8 @@ class ContinuousProLogin(ProjectProtocolLogin):
             raise RuntimeError("原会话 OAuth 未返回授权码")
         url = upstream.OPENAI_OAUTH_TOKEN_URL
         data = {}
-        for attempt in range(3):
+        token_attempts = 1 if self.payload.get("pro_oauth_retry_managed") else 3
+        for attempt in range(token_attempts):
             self.record_exit("交换 RT/AT 前")
             response = self.request(url, method="POST", form_data={
                 "grant_type": "authorization_code", "client_id": upstream.OPENAI_CODEX_CLIENT_ID,
@@ -149,7 +150,7 @@ class ContinuousProLogin(ProjectProtocolLogin):
             upstream.token_response(response.status, data)
             if response.status == 200:
                 break
-            if 400 <= response.status < 500 or attempt == 2:
+            if 400 <= response.status < 500 or attempt == token_attempts - 1:
                 raise RuntimeError(f"原会话 OAuth token 交换失败 HTTP {response.status}")
             time.sleep(1.5)
         if not data.get("access_token") or not data.get("refresh_token"):
@@ -161,13 +162,59 @@ def local_payload(payload):
     email = str(payload.get("email") or "").strip()
     pickup = str(payload.get("pickup_url") or "").strip()
     mode = "password_totp" if payload.get("login_mode") == "password_totp" else "email_otp"
-    return {**payload, "email": email, "password": str(payload.get("gpt_password") or "") if mode == "password_totp" else "",
+    return {**payload, "pro_oauth_retry_managed": True, "email": email, "password": str(payload.get("gpt_password") or "") if mode == "password_totp" else "",
             "_totp_secret": str(payload.get("totp_secret") or ""),
             "force_email_code": mode == "email_otp", "email_code_login": mode == "email_otp",
             "selected_login_mode": mode, "credential_mode": "chatgpt_at", "allow_sms": False,
             "skip_phone_verification": True, "hero_managed": True,
             "generic_accounts": [{"email": email, "pickup_url": pickup, "imap_host": pickup,
                                   "mode": "mailtoken" if urlsplit(pickup).fragment else "directurl"}] if pickup else []}
+
+
+def complete_paid_oauth(flow, payload):
+    tokens = None
+    retrying = False
+    while True:
+        try:
+            if retrying and payload.get("siwc_authorization_source") == "sub2api" and tokens is None:
+                # Resolve a lost callback reply before generating another link.
+                if bridge.call("siwc_retry_prepare").get("completed"):
+                    return
+            if tokens is None:
+                if payload.get("credential_mode") == "siwc":
+                    from .siwc import SIWCProtocolLogin
+                    web_before = flow._chatgpt_web_session() if payload.get("siwc_authorization_source") == "sub2api" else None
+                    tokens = SIWCProtocolLogin.continue_authenticated(flow, web_before)
+                else:
+                    tokens = flow.continue_codex()
+            bridge.protect_code(tokens.get("access_token"))
+            bridge.protect_code(tokens.get("refresh_token"))
+            web_session = flow._chatgpt_web_session()
+            if tokens.get("auth_mode") == "siwc":
+                tokens["web_access_token"] = web_session.get("access_token") or web_session.get("accessToken") or ""
+                tokens["web_account_id"] = flow.paid_account_id
+            flow.record_exit("第三步 RT/AT/Session 保存前")
+            flow.record_oauth_context("第三步凭证获取完成")
+            bridge.call("pro_tokens", tokens=tokens, web_session=web_session, **flow.exit_details())
+            flow.record_oauth_context("第三步凭证保存完成", credentials_saved=True)
+            return
+        except Exception as exc:
+            code = exc.code if isinstance(exc, upstream.LoginFlowError) else ""
+            decision = bridge.call("pro_oauth_retry", error_code=code,
+                                   error=bridge.redact(exc),
+                                   http_status=exc.status if isinstance(exc, upstream.LoginFlowError) else None)
+            if decision.get("completed"):
+                return
+            if decision.get("retry") is not True:
+                # Keep the existing explicit consent/401 disposition policy;
+                # every other exhausted error stops without final actions.
+                final_code = code if code == "siwc_consent_not_authorized" else "oauth_retry_exhausted"
+                raise upstream.LoginFlowError(str(decision.get("message") or "第三步授权重试已耗尽") + ": " + bridge.redact(exc),
+                                             code=final_code, status=exc.status if isinstance(exc, upstream.LoginFlowError) else None) from exc
+            if decision.get("relogin"):
+                raise upstream.LoginFlowError("正在恢复已付款授权：会话已失效，重新登录后继续第三步", code="oauth_paid_relogin") from exc
+            retrying = True
+            flow.log("oauth_retry", "按后台配置重试第三步授权，保留当前客户端与代理会话；不重新付款")
 
 
 def run(payload, rpc):
@@ -200,22 +247,7 @@ def run(payload, rpc):
             raise RuntimeError("供应商尚未确认开通成功，停止后续授权")
         flow.record_exit("第三步获取凭证开始")
         flow.record_oauth_context("第三步开始")
-        if payload.get("credential_mode") == "siwc":
-            from .siwc import SIWCProtocolLogin
-            web_before = flow._chatgpt_web_session() if payload.get("siwc_authorization_source") == "sub2api" else None
-            tokens = SIWCProtocolLogin.continue_authenticated(flow, web_before)
-        else:
-            tokens = flow.continue_codex()
-        bridge.protect_code(tokens.get("access_token"))
-        bridge.protect_code(tokens.get("refresh_token"))
-        web_session = flow._chatgpt_web_session()
-        if tokens.get("auth_mode") == "siwc":
-            tokens["web_access_token"] = web_session.get("access_token") or web_session.get("accessToken") or ""
-            tokens["web_account_id"] = flow.paid_account_id
-        flow.record_exit("第三步 RT/AT/Session 保存前")
-        flow.record_oauth_context("第三步凭证获取完成")
-        bridge.call("pro_tokens", tokens=tokens, web_session=web_session, **flow.exit_details())
-        flow.record_oauth_context("第三步凭证保存完成", credentials_saved=True)
+        complete_paid_oauth(flow, payload)
         return {"success": True, "session_reused": True}
     except (Exception, bridge.DeadAccountError) as exc:
         bridge.emit("pro_auto", "failed", "Pro 连续会话流程停止",

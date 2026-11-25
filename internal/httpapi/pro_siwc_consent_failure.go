@@ -77,6 +77,9 @@ func (s *Server) prepareSIWCConsentRetry(ctx context.Context, email string, caus
 	}
 	// Already-used restock recovery attempts count towards the same budget.
 	retries = max(retries, p.ProAuto.RestockRecoveries)
+	if r := p.ProAuto.OAuthRecovery; r != nil && r.OrderID == p.ProAuto.OrderID {
+		retries = max(retries, r.Attempts)
+	}
 	exhausted := retries >= v.RetryCount
 	next := time.Now().Add(time.Duration(v.RetryIntervalSeconds) * time.Second)
 	message := fmt.Sprintf("SIWC 确认授权被拒绝，%d 秒后重新登录授权 %d/%d；原订单已付款，不重新付款", v.RetryIntervalSeconds, retries+1, v.RetryCount)

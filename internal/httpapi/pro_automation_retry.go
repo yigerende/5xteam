@@ -20,9 +20,30 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 		if err = ctx.Err(); err != nil {
 			return err
 		}
+		// A manually resumed workflow retains a previously persisted wait, too.
+		p, _, readErr := s.store.MailAccountCredential(email)
+		if readErr != nil {
+			return readErr
+		}
+		if r := p.ProAuto.OAuthRecovery; r != nil && r.OrderID == p.ProAuto.OrderID && r.NextAt != nil {
+			if err = waitProAuto(ctx, time.Until(*r.NextAt)); err != nil {
+				return err
+			}
+			latest, e := s.store.UpdateProAccount(email, func(current *model.MailAccountProfile) {
+				if current.ProAuto.ID == p.ProAuto.ID && current.ProAuto.StopVersion == p.ProAuto.StopVersion && !current.ProAuto.StopRequested && current.ProAuto.OAuthRecovery != nil {
+					current.ProAuto.OAuthRecovery.NextAt = nil
+				}
+			})
+			if e != nil {
+				return e
+			}
+			if latest.ProAuto.ID != p.ProAuto.ID || latest.ProAuto.StopVersion != p.ProAuto.StopVersion || latest.ProAuto.StopRequested {
+				return context.Canceled
+			}
+		}
 		stage, message := "login", "开始 Pro 全自动流程，建立连续登录会话"
 		if isProPaidRecovery(ctx) {
-			stage, message = "oauth", "原订单已开通，仅重新登录原账号恢复 RT/AT 授权，不重新开通或付款"
+			stage, message = "oauth", "正在恢复已付款授权：重新登录原账号继续第三步，不重新开通或付款"
 		}
 		if err = s.autoProUpdate(email, stage, "running", message); err != nil {
 			return err
@@ -47,6 +68,28 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if errors.Is(err, errProOAuthRetriesExhausted) {
+			return err
+		}
+		if errors.Is(err, errProOAuthReloginReady) {
+			p, _, readErr := s.store.MailAccountCredential(email)
+			if readErr != nil {
+				return readErr
+			}
+			ctx = context.WithValue(ctx, proPaidRecoveryKey{}, p.ProAuto.OrderID)
+			continue
+		}
+		if handled, recoveryErr := s.prepareOAuthRecovery(ctx, email, err); handled {
+			if recoveryErr != nil {
+				return recoveryErr
+			}
+			p, _, readErr := s.store.MailAccountCredential(email)
+			if readErr != nil {
+				return readErr
+			}
+			ctx = context.WithValue(ctx, proPaidRecoveryKey{}, p.ProAuto.OrderID)
+			continue
+		}
 		if handled, recoveryErr := s.prepareSIWCConsentRetry(ctx, email, err); handled {
 			if recoveryErr != nil {
 				return recoveryErr
@@ -59,6 +102,30 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 			continue
 		} else if recoveryErr != nil {
 			err = recoveryErr
+		}
+		// A timeout/crashed child has already released its live session. Apply
+		// the same third-step budget before starting payment-free recovery.
+		p, _, readErr = s.store.MailAccountCredential(email)
+		if readErr != nil {
+			return readErr
+		}
+		if p.ProAuto.Stage == "oauth" && p.ProAuto.Steps["recharge"] == "completed" && p.ProAuto.Steps["oauth"] != "completed" {
+			v, _, _, e := s.proNewPushSettings(p)
+			if e != nil {
+				return e
+			}
+			source := firstNonEmpty(p.ProAuto.OAuthSource, proOAuthSource(v))
+			failure := &siwcSessionExpiredError{Source: source, Downstream: model.ProDownstream(v)}
+			var denied *siwcConsentDeniedError
+			if errors.As(err, &denied) {
+				failure.Source, failure.Downstream = denied.Source, denied.Downstream
+			}
+			_, e = s.prepareOAuthRecovery(ctx, email, failure)
+			if e != nil {
+				return fmt.Errorf("%w；上次第三步失败：%v", e, err)
+			}
+			ctx = context.WithValue(ctx, proPaidRecoveryKey{}, p.ProAuto.OrderID)
+			continue
 		}
 
 		var unavailable *globalProxyWaiting
@@ -91,7 +158,7 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 			}
 			return err
 		}
-		p, _, readErr := s.store.MailAccountCredential(email)
+		p, _, readErr = s.store.MailAccountCredential(email)
 		if readErr != nil {
 			return err
 		}

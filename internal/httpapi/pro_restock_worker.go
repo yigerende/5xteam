@@ -290,6 +290,15 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 					}
 				} else if order.Status == "success" && profile.ProAuto.Steps["oauth"] != "completed" && (profile.ProAuto.Status == "interrupted" || profile.ProAuto.Status == "failed") {
 					s.queueRestockPaidRecovery(profile, p)
+					if recovery := profile.ProAuto.OAuthRecovery; recovery != nil && recovery.Exhausted && !s.proAutomationRunning(t.Email) {
+						push, _, _, pushErr := s.proNewPushSettings(profile)
+						pending, pendingErr := s.proHasPushAttempt(profile, push)
+						if pushErr == nil && pendingErr == nil && !pending {
+							t.Status = "failed"
+							t.Message = "已付款，但第三步授权重试耗尽；已释放补货执行占位，请在 Pro 管理手动处理原账号"
+							t.ETA = nil
+						}
+					}
 				}
 			} else if t.Status == "attention" {
 				t.Status = "failed"

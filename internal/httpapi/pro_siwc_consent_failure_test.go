@@ -20,9 +20,9 @@ func TestSIWCConsentFailureRetriesThenFinal(t *testing.T) {
 	}{
 		{name: "local", source: "local", enabled: true, logins: 3, finals: 1},
 		{name: "s2", source: "sub2api", enabled: true, logins: 3, finals: 1},
-		{name: "disabled", source: "local", logins: 1},
-		{name: "unrelated401", source: "sub2api", enabled: true, other: true, logins: 1},
-		{name: "lastFailureIsNetwork", source: "local", enabled: true, laterOther: true, logins: 2},
+		{name: "disabled", source: "local", logins: 3},
+		{name: "unrelated401", source: "sub2api", enabled: true, other: true, logins: 3},
+		{name: "lastFailureIsNetwork", source: "local", enabled: true, laterOther: true, logins: 3},
 		{name: "finalPaused", source: "local", enabled: true, paused: true, logins: 3, finals: 1},
 		{name: "targetChanged", source: "local", enabled: true, changeTarget: true, logins: 1},
 	} {

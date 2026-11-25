@@ -21,6 +21,9 @@ MANIFEST_SYNC = ("https", "chatgpt.com", "/api/auth/session-manifest-sync")
 
 
 class SIWCProtocolLogin(ProjectProtocolLogin):
+    def web_request_attempt_limit(self):
+        return 1 if self.payload.get("pro_oauth_retry_managed") else super().web_request_attempt_limit()
+
     @classmethod
     def continue_authenticated(cls, flow, web_session=None):
         # A protocol adapter over the existing live client, never a new login.
@@ -35,6 +38,8 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
             result = adapter.exchange_oauth_callback(callback)
             if result.get("reauthorize") is not True:
                 return result
+            if adapter.payload.get("pro_oauth_retry_managed"):
+                raise upstream.LoginFlowError("下游确认未创建账号，需要重新取得 SIWC 授权", code="siwc_reauthorize_required")
             if adapter.payload.get("siwc_authorization_source") != "sub2api" or attempt:
                 raise RuntimeError("SIWC 重新授权一次后仍失败")
             adapter.log("siwc_recovery", "下游确认未创建账号，沿用当前登录会话重新获取授权链接并授权一次")
@@ -68,7 +73,103 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
             bridge.emit("siwc_sentinel", "refreshed", "SIWC 授权校验令牌已刷新",
                         details={"endpoint": parsed.path, "flow": "authorize_continue"},
                         duration_ms=int((time.monotonic() - started) * 1000))
-        return super().request(url, **kwargs)
+        response = super().request(url, **kwargs)
+        if (getattr(self, "oauth_authorize_source", "") == "siwc"
+                and (parsed.scheme, parsed.netloc) == ("https", "auth.openai.com")
+                and parsed.path in {"/api/accounts/session/select", "/api/accounts/password/verify",
+                                    "/api/accounts/mfa/verify"}):
+            try:
+                data = response.json()
+            except (ValueError, TypeError):
+                data = {}
+            if isinstance(data, dict):
+                error = data.get("error")
+                if isinstance(error, dict) and error.get("code") in {
+                        "session_expired", "invalid_session", "session_not_found", "login_required"}:
+                    raise upstream.LoginFlowError("SIWC 身份验证会话已失效，需要恢复已付款授权",
+                                                 code="siwc_session_expired", status=response.status)
+                if response.status == 200:
+                    # Keep the MFA factors and page type, not only continue_url.
+                    self._siwc_next_step = data
+        return response
+
+    def siwc_identity_next(self, step, fallback=""):
+        """Advance only the challenge actually returned by the current transaction."""
+        step = step if isinstance(step, dict) else {}
+        if step.get("error") or step.get("success") is False:
+            raise upstream.LoginFlowError("SIWC 身份验证未通过", code="siwc_identity_failed")
+        page = self.extract_page_type(step)
+        target = self.extract_continue_url(step)
+        if not target and page == "sign_in_with_chatgpt_consent":
+            target = ISSUER + "/sign-in-with-chatgpt/consent"
+        target = target or fallback
+        path = urlsplit(urljoin(ISSUER, target)).path if target else ""
+        self.raise_if_passkey_or_challenge(step, target)
+        if page in {"login", "login_identifier"} or path in {"/log-in", "/log-in/", "/login"}:
+            raise upstream.LoginFlowError("SIWC 原会话要求重新登录，需要恢复已付款授权",
+                                         code="siwc_session_expired")
+        kind = "password" if page == "login_password" or path == "/log-in/password" else (
+            "totp" if page == "mfa_challenge" or path.startswith("/mfa-challenge") else "")
+        if not kind:
+            if target:
+                parsed = urlsplit(target)
+                if self._siwc_verified and (parsed.scheme, parsed.netloc, parsed.path) in {
+                        ("https", "chatgpt.com", "/"), ("https", "chatgpt.com", "/api/auth/callback/openai")}:
+                    return self.siwc_revisit_authorize()
+                return target
+            if page == "sign_in_with_chatgpt_consent":
+                return ISSUER + "/sign-in-with-chatgpt/consent"
+            if not page and self._siwc_verified:
+                return self.siwc_revisit_authorize()
+            return ""
+        if kind in self._siwc_challenges:
+            raise upstream.LoginFlowError("SIWC 身份验证后仍重复要求验证，需要恢复已付款授权",
+                                         code="siwc_session_expired")
+        self._siwc_challenges.add(kind)
+        self.log("siwc_identity", "正在补充身份验证：" + ("提交密码" if kind == "password" else "提交 2FA"))
+        self._siwc_next_step = None
+        if kind == "password":
+            password = str(self.payload.get("password") or self.payload.get("gpt_password") or "")
+            if not password:
+                raise upstream.LoginFlowError("SIWC 要求密码验证，但账号未配置密码", code="siwc_password_missing")
+            self.sentinel_token = upstream.generate_openai_sentinel_token(self.device_id, "password_verify", self.proxy_url)
+            if not self.sentinel_token:
+                raise upstream.LoginFlowError("SIWC 密码验证校验令牌生成失败", code="siwc_sentinel_failed")
+            bridge.protect_code(self.sentinel_token)
+            # The shared login mixin deliberately permits one password write
+            # per login. SIWC is a later authorization transaction; its own
+            # challenge guard above permits one explicitly requested write.
+            result = upstream.ChatGPTProtocolLogin.submit_modern_password(self, password)
+            self._siwc_verified = True
+            return self.siwc_identity_next(result)
+        secret = str(self.payload.get("_totp_secret") or "")
+        if not secret:
+            raise upstream.LoginFlowError("SIWC 要求 2FA，但账号未配置 2FA 密钥", code="totp_secret_missing")
+        # Shared factor selection, TOTP generation and verification; the response
+        # is retained by request() so a further page is never silently discarded.
+        next_url = self.complete_totp_challenge(step, secret)
+        self._siwc_verified = True
+        return self.siwc_identity_next(self._siwc_next_step, next_url)
+
+    def submit_mfa_verify(self, factor_id, code):
+        data = super().submit_mfa_verify(factor_id, code)
+        if data.get("error"):
+            raise upstream.LoginFlowError("SIWC 2FA 验证未通过", code="siwc_identity_failed")
+        if not self.extract_continue_url(data) and self.extract_page_type(data) == "sign_in_with_chatgpt_consent":
+            data = {**data, "continue_url": ISSUER + "/sign-in-with-chatgpt/consent"}
+            self._siwc_next_step = data
+        if not self.extract_continue_url(data) and not self.extract_page_type(data) and not data.get("error"):
+            # A successful verification can leave navigation to the caller.
+            data = {**data, "continue_url": self.siwc_revisit_authorize()}
+            self._siwc_next_step = data
+        return data
+
+    def siwc_revisit_authorize(self):
+        if self._siwc_revisited:
+            raise upstream.LoginFlowError("SIWC 验证后无法恢复授权会话", code="siwc_session_expired")
+        self._siwc_revisited = True
+        self.log("siwc_identity", "身份验证已通过，沿用原授权链接继续授权")
+        return self.auth_url
 
     def prepare_oauth_authorize_url(self):
         self.oauth_authorize_source = "siwc"
@@ -115,6 +216,10 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
         return authorize_url
 
     def capture_oauth_callback(self, start_url, max_hops=18):
+        self._siwc_next_step = None
+        self._siwc_challenges = set()
+        self._siwc_verified = False
+        self._siwc_revisited = False
         current = self.normalize_auth_url(start_url)
         previous = self.auth_url
         chose_account = False
@@ -124,11 +229,15 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
             if parsed.fragment:
                 raise RuntimeError("SIWC 授权跳转地址无效")
             if (parsed.scheme, parsed.netloc, parsed.path) == ("http", "127.0.0.1:1456", "/auth/callback"):
+                if parse_qs(parsed.query).get("error") == ["login_required"]:
+                    raise upstream.LoginFlowError("SIWC 要求重新登录", code="siwc_session_expired")
                 # Capture even an error callback without connecting to loopback.
                 return current, current
             manifest_sync = (parsed.scheme, parsed.netloc, parsed.path) == MANIFEST_SYNC
             if not manifest_sync and (parsed.scheme, parsed.netloc) != ("https", "auth.openai.com"):
                 raise RuntimeError("SIWC 授权跳转地址无效")
+            if parsed.path == "/api/accounts/authorize" and current != self.auth_url:
+                raise RuntimeError("SIWC 续验证不能替换原授权参数")
             if manifest_sync:
                 if current in synced_urls or len(synced_urls) >= 3:
                     raise RuntimeError("SIWC 会话同步中转循环或次数超限")
@@ -150,7 +259,15 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
                     next_url = self.extract_continue_url(data) if isinstance(data, dict) else ""
                 elif parsed.path == "/choose-an-account" and not chose_account:
                     chose_account = True
+                    self._siwc_next_step = None
                     next_url = self.choose_account_from_html(response.text, current)
+                    next_url = self.siwc_identity_next(self._siwc_next_step, next_url)
+                elif parsed.path in {"/log-in", "/log-in/", "/login", "/log-in/password"} or parsed.path.startswith("/mfa-challenge"):
+                    try:
+                        page_data = response.json()
+                    except (ValueError, TypeError):
+                        page_data = None
+                    next_url = self.siwc_identity_next(page_data if isinstance(page_data, dict) and self.extract_page_type(page_data) else self._siwc_next_step, current)
                 elif parsed.path == "/sign-in-with-chatgpt/consent":
                     next_url = self.grant_siwc_consent(current)
                 elif self.is_workspace_or_consent_url(current):
@@ -166,6 +283,9 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
                             http_status=response.status,
                             details={"next_url": bridge.safe_url(urljoin(current, next_url))})
             previous, current = current, urljoin(current, next_url)
+            if current == self.auth_url and self._siwc_verified:
+                # A verified session may need account selection once more.
+                chose_account = False
         raise RuntimeError("SIWC 授权跳转次数超限")
 
     def grant_siwc_consent(self, referer):
@@ -226,7 +346,8 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
                 bridge.protect_code(tokens.get(key))
             return tokens
         self.log("siwc_token", "已取得 SIWC 授权码，正在交换 RT / AT")
-        for attempt in range(3):
+        token_attempts = 1 if self.payload.get("pro_oauth_retry_managed") else 3
+        for attempt in range(token_attempts):
             response = self.request(TOKEN, method="POST", form_data={
                 "grant_type": "authorization_code", "client_id": client_id,
                 "code": query["code"][0], "redirect_uri": self.oauth_redirect_uri,
@@ -234,7 +355,7 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
             }, headers=self.headers(TOKEN, {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}), timeout=60)
             if response.status < 500:
                 break
-            if attempt < 2:
+            if attempt < token_attempts - 1:
                 self.log("siwc_token", f"SIWC Token 交换 HTTP {response.status}，重试 {attempt + 2}/3", "warning")
                 time.sleep(1.5)
         if response.status != 200:

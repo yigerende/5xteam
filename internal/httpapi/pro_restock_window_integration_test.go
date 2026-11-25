@@ -84,6 +84,13 @@ func TestProRestockWindowFullFlowAndPaidRecovery(t *testing.T) {
 			var failAuth atomic.Bool
 			failAuth.Store(recoverPaid)
 			st := s.store
+			if recoverPaid {
+				settings, _, _, _ := st.ProSettings()
+				settings.RetryCount, settings.RetryIntervalSeconds = 1, 1
+				if _, err := st.SaveProSettings(settings, "", ""); err != nil {
+					t.Fatal(err)
+				}
+			}
 			s.notifications.queue = make(chan notificationEvent, 30)
 			s.proAutoHooks = &proAutomationHooks{Session: func(ctx context.Context, current string, rpc func(string, map[string]any) (any, error)) error {
 				if current != email {
@@ -98,7 +105,13 @@ func TestProRestockWindowFullFlowAndPaidRecovery(t *testing.T) {
 				if err := windowRecharge(s, current, rpc); err != nil {
 					return err
 				}
-				if failAuth.Load() {
+				if failAuth.Swap(false) {
+					// A blocked purchase window must still allow the configured
+					// third-step retry without another card or payment.
+					c.NoRestockWindows[0].AllowedProvider = ""
+					if _, err := st.SaveProRestockConfig(c); err != nil {
+						return err
+					}
 					return errors.New("fixture authorization interrupted after payment")
 				}
 				_, err := rpc("pro_tokens", map[string]any{"exit_ip": "198.51.100.8", "tokens": map[string]any{"access_token": proAutoToken(current, "new"), "refresh_token": "fixture-new-rt"}})
@@ -119,18 +132,9 @@ func TestProRestockWindowFullFlowAndPaidRecovery(t *testing.T) {
 			windowTick(t, s)
 			profile := waitProAutoFinished(t, s, email)
 			if recoverPaid {
-				if profile.ProAuto.Status != "failed" || purchases.Load() != 1 || pushes.Load() != 0 {
-					t.Fatal("expected paid interruption", profile.ProAuto)
+				if profile.ProAuto.OAuthRecovery == nil || profile.ProAuto.OAuthRecovery.Attempts != 1 || profile.ProAuto.RestockRecoveries != 0 {
+					t.Fatal("did not use the configured third-step budget", profile.ProAuto)
 				}
-				// Cross into a full block after payment: recovery may finish the original
-				// workflow and must not issue a card or submit another payment.
-				c.NoRestockWindows[0].AllowedProvider = ""
-				if _, err := st.SaveProRestockConfig(c); err != nil {
-					t.Fatal(err)
-				}
-				failAuth.Store(false)
-				windowTick(t, s)
-				profile = waitProAutoFinished(t, s, email)
 			}
 			if profile.ProAuto.Status != "waiting_quota" || purchases.Load() != 1 || pushes.Load() != 1 || f.opens.Load() != 1 {
 				t.Fatal("full chain failed or paid twice", profile.ProAuto, purchases.Load(), pushes.Load(), f.opens.Load())
