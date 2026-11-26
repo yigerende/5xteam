@@ -1048,6 +1048,7 @@ func (s *Server) runProContinuousSession(ctx context.Context, email string, rpc 
 	result, err := runOAuthChild(ctx, cmd, payload, func(method string, args map[string]any) (any, error) {
 		if method == "pro_oauth_retry" {
 			args["expected_downstream"] = model.ProDownstream(push)
+			args["proxy_lease"] = lease
 		}
 		if broker != nil && strings.HasPrefix(method, "siwc_") {
 			return broker.call(method, args)

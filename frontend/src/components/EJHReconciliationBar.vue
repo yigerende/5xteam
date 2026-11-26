@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { reconciliationStatus } from '../ejh-reconciliation-view'
+import { reconciliationStatus, reconciliationDifferenceNote } from '../ejh-reconciliation-view'
 import { usdToR } from '../ejh-profit'
 const props=defineProps({data:{type:Object,required:true},masked:Boolean})
 const display=value=>props.masked?'---':value
@@ -12,7 +12,8 @@ const queryTime=at=>at===null?'查询时间未记录':new Date(at).toLocaleStrin
 <template>
  <section class="reconcile-bar" :class="state" aria-label="资金核对">
   <div class="reconcile-status"><span class="status-dot"></span><div><strong>资金核对 · {{masked?'已关闭':report.label}}</strong><small>按最近查询余额 · 含估算 · ≤ 1 USD 为小额差异</small></div></div>
-  <div class="reconcile-values"><div><span>账面差额</span><b>{{display(value.gap??'—')}} <em>USD</em></b><small>{{display(usdToR(value.gap)??'—')}} R</small></div><div><span>实际使用消耗（已计成本）</span><b>{{display(value.usage.usd.amount??'—')}} <em>USD</em></b><small>回款后估算 · 含已销卡</small></div><div><span>其余待核对</span><b>{{display(value.unexplained??'—')}} <em>USD</em></b><small>未认定为损失</small></div></div>
+  <div class="reconcile-values"><div><span>累计总成本</span><b>{{display(value.earnings.costUSD??'—')}} <em>USD</em></b><small>其中使用消耗 ≈ {{display(value.usage.usd.amount??'—')}} USD · 已包含</small></div><div><span>成本外资金差额</span><b>{{display(value.gap??'—')}} <em>USD</em></b><small>{{display(usdToR(value.gap)??'—')}} R · 不计入成本或利润</small></div></div>
+  <small v-if="!masked" class="reconcile-explanation">{{reconciliationDifferenceNote(value.gap)}}。实际使用消耗已包含在总成本内，只扣一次。</small>
   <details v-if="!masked&&value.gap!==null"><summary>核对明细与计算方式</summary><p>实际到账 <b>{{display(value.net)}}</b> − 余额及在途 <b>{{display(value.assets)}}</b> − 成本 <b>{{display(value.earnings.costUSD)}}</b> − 退款手续费 <b>{{display(value.refundFees.amount)}}</b> + 外部 API 收费 <b>{{display(value.merchantFee)}}</b><template v-if="value.externalTransfer!=='0.00'"> − 平台外转出 <b>{{display(value.externalTransfer??'—')}}</b></template><template v-if="value.paymentOnly.amount"> − 只付款支出 <b>{{(value.paymentOnly.amount/100).toFixed(2)}}</b></template> ＝ 差额 <b>{{display(value.gap)}}</b> USD</p></details>
   <p v-else-if="!masked">{{display(value.lossReasons.join('；')||'部分费用待核实，暂不能核对总账。')}}</p>
   <details v-if="!masked&&state==='stale'" open><summary>{{report.issues.join('；')}}</summary><ul><li v-for="row in report.freshness" :key="row.id">{{row.label}}：{{queryTime(row.at)}}</li></ul><small v-if="report.freshness?.length">以上时间为北京时间。自动同步卡片与交易不会查询账户及单卡余额；请点击“刷新核对余额”。正常待定及销卡处理中余额也参与核对。</small></details>
@@ -28,4 +29,5 @@ const queryTime=at=>at===null?'查询时间未记录':new Date(at).toLocaleStrin
 
 <style scoped>
 .reconcile-bar{padding:12px 16px;gap:10px 24px}.reconcile-values b{font-size:20px;margin:3px 0}.reconcile-bar details{flex-basis:100%;font-size:11px}.reconcile-bar summary{cursor:pointer;width:fit-content}.reconcile-bar details p{margin-top:10px}
+.reconcile-explanation{flex-basis:100%}
 </style>

@@ -4,7 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RefreshCw, Scale, CheckCircle2, AlertCircle, ChevronRight } from 'lucide-vue-next'
 import { api } from '../api'
 import { usdToR } from '../ejh-profit'
-import { reconciliationStatus, reconciliationCards } from '../ejh-reconciliation-view'
+import { reconciliationStatus, reconciliationCards, reconciliationDifferenceNote } from '../ejh-reconciliation-view'
 import { isClosedCard } from '../card-status'
 import { ejhRefreshGate, ejhPageRefreshSeconds } from '../ejhRefresh'
 import { formatTime } from '../utils'
@@ -29,7 +29,7 @@ const blocks = computed(() => [
   { label: '外部 API 收费', amount: value.value.merchantFee, note: '未从卡台扣款，剔除', sign: '+' },
   { label: '只付款支出', amount: (value.value.paymentOnly.amount/100).toFixed(2), note: '本金单列', sign: '−' },
   ...(value.value.externalTransfer !== '0.00' ? [{ label: '平台外转出', amount: value.value.externalTransfer, note: '外部消费，不计平台成本', sign: '−' }] : []),
-  { label: '待核对差额', amount: value.value.gap, note: '保留差额，不计作成本', sign: '=' },
+  { label: '成本外资金差额', amount: value.value.gap, note: reconciliationDifferenceNote(value.value.gap), sign: '=' },
 ])
 const assets = computed(() => [
   { label: 'EJH 账户余额', amount: value.value.lossReasons.some(r => r.startsWith('EJH')) ? null : value.value.accountUSD, note: formatTime(data.value?.balance?.at) },

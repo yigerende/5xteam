@@ -7,9 +7,47 @@ from test_protocol_siwc import SIWCScenario  # installs the runtime path
 from manager_oauth import bridge, upstream
 from manager_oauth.continuous_pro import complete_paid_oauth
 from manager_oauth.siwc import SIWCProtocolLogin
+from manager_oauth.continuous_pro import ContinuousProLogin
+from manager_oauth.adapter import ProjectProtocolLogin
 
 
 class PaidOAuthRetryTests(unittest.TestCase):
+    def test_proxy_failure_recreates_client_instead_of_replaying_cached_error(self):
+        for kind in (ContinuousProLogin, SIWCProtocolLogin):
+            with self.subTest(kind=kind.__name__):
+                flow=object.__new__(kind)
+                flow.__dict__.update(payload={"pro_oauth_retry_managed":True},proxy_url="http://proxy.example:80",
+                                     rate_limit_error=None,first_failed_request=None,proxy_transport_error=None,
+                                     oauth_authorize_source="",last_stage="",last_status=0)
+                failure=RuntimeError("curl: (5) Could not resolve proxy: geo.iproyal.com")
+                with patch.object(ProjectProtocolLogin,"is_chatgpt_at",return_value=True), \
+                     patch.object(ProjectProtocolLogin,"_web_session_request",side_effect=failure) as request, \
+                     patch.object(bridge,"emit"):
+                    with self.assertRaises(RuntimeError):flow.request("https://chatgpt.com/api/auth/session")
+                    self.assertTrue(failure.pro_proxy_request_failed)
+                    if kind is ContinuousProLogin:
+                        with self.assertRaises(RuntimeError):flow.request("https://chatgpt.com/api/auth/session")
+                        self.assertEqual(request.call_count,1)
+                current=self.flow();current.continue_codex.side_effect=failure
+                def rpc(method,**params):
+                    self.assertEqual(method,"pro_oauth_retry")
+                    self.assertTrue(params["proxy_request_failed"])
+                    return {"retry":True,"relogin":True,"proxy_failed":True}
+                with patch.object(bridge,"call",rpc),self.assertRaises(upstream.LoginFlowError) as raised:
+                    complete_paid_oauth(current,{})
+                self.assertEqual(raised.exception.code,"oauth_paid_relogin")
+                self.assertIn("代理网络故障",str(raised.exception))
+                self.assertEqual(current.continue_codex.call_count,1)
+
+    def test_downstream_network_error_does_not_implicate_gpt_proxy(self):
+        flow=self.flow();flow.continue_codex.side_effect=RuntimeError("callback network timeout")
+        def rpc(method,**params):
+            self.assertEqual(method,"pro_oauth_retry")
+            self.assertFalse(params["proxy_request_failed"])
+            return {"retry":False}
+        with patch.object(bridge,"call",rpc),self.assertRaises(upstream.LoginFlowError):
+            complete_paid_oauth(flow,{})
+
     def flow(self):
         return SimpleNamespace(_chatgpt_web_session=Mock(return_value={"access_token":"web"}),
                                paid_account_id="personal", record_exit=Mock(), record_oauth_context=Mock(),

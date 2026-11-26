@@ -202,6 +202,7 @@ def complete_paid_oauth(flow, payload):
             code = exc.code if isinstance(exc, upstream.LoginFlowError) else ""
             decision = bridge.call("pro_oauth_retry", error_code=code,
                                    error=bridge.redact(exc),
+                                   proxy_request_failed=getattr(exc, "pro_proxy_request_failed", False) is True,
                                    http_status=exc.status if isinstance(exc, upstream.LoginFlowError) else None)
             if decision.get("completed"):
                 return
@@ -212,7 +213,8 @@ def complete_paid_oauth(flow, payload):
                 raise upstream.LoginFlowError(str(decision.get("message") or "第三步授权重试已耗尽") + ": " + bridge.redact(exc),
                                              code=final_code, status=exc.status if isinstance(exc, upstream.LoginFlowError) else None) from exc
             if decision.get("relogin"):
-                raise upstream.LoginFlowError("正在恢复已付款授权：会话已失效，重新登录后继续第三步", code="oauth_paid_relogin") from exc
+                reason = "代理网络故障，切换可用代理重新登录" if decision.get("proxy_failed") else "会话已失效，重新登录"
+                raise upstream.LoginFlowError("正在恢复已付款授权：" + reason + "后继续第三步", code="oauth_paid_relogin") from exc
             retrying = True
             flow.log("oauth_retry", "按后台配置重试第三步授权，保留当前客户端与代理会话；不重新付款")
 

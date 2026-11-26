@@ -15,7 +15,7 @@ import (
 
 func TestProOAuthConfiguredRetryNoSecondPayment(t *testing.T) {
 	for _, source := range []string{"local", "sub2api", "codex"} {
-		for _, scenario := range []string{"same_client", "expired", "exhausted", "child_exit"} {
+		for _, scenario := range []string{"same_client", "expired", "exhausted", "child_exit", "proxy", "proxy_exhausted"} {
 			t.Run(source+"/"+scenario, func(t *testing.T) {
 				var payments, logins, authorizations, pushes atomic.Int32
 				s, st, email := gptPayFixture(t, func(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +25,26 @@ func TestProOAuthConfiguredRetryNoSecondPayment(t *testing.T) {
 				s.proAutoCancel()
 				s.proAutoWG.Wait()
 				configureProAutoFixture(t, s)
+				proxyScenario := strings.HasPrefix(scenario, "proxy")
+				var proxyURLs []string
+				if proxyScenario {
+					global := st.Settings()
+					global.OAuthProxyMode = "global"
+					global.ProxyFailover = model.DefaultGlobalProxyPolicy()
+					for i := 0; i < 3; i++ {
+						p, err := st.SaveProxy(model.ProxyProfile{Name: fmt.Sprint(i), URL: fmt.Sprintf("http://proxy%d.example:80", i)})
+						if err != nil {
+							t.Fatal(err)
+						}
+						proxyURLs = append(proxyURLs, p.URL)
+						if i == 0 {
+							global.ProxyURL = p.URL
+						} else {
+							global.ProxyFailover.BackupIDs = append(global.ProxyFailover.BackupIDs, p.ID)
+						}
+					}
+					st.SaveSettings(global)
+				}
 				cfg, password, _, _ := st.ProSettings()
 				cfg.RetryCount = 2
 				cfg.RetryIntervalSeconds = 1
@@ -42,6 +62,18 @@ func TestProOAuthConfiguredRetryNoSecondPayment(t *testing.T) {
 				s.proAutoHooks = &proAutomationHooks{
 					Session: func(ctx context.Context, current string, rpc func(string, map[string]any) (any, error)) error {
 						n := logins.Add(1)
+						var lease *oauthProxyLease
+						if proxyScenario {
+							var err error
+							lease, err = s.acquireOAuthProxy()
+							if err != nil {
+								return err
+							}
+							defer lease.Release()
+							if n > 3 || lease.url != proxyURLs[n-1] {
+								t.Fatalf("faulty proxy reused: login %d %s", n, lease.label)
+							}
+						}
 						if n > 1 && !isProPaidRecovery(ctx) {
 							t.Error("new client can pay again")
 						}
@@ -57,7 +89,7 @@ func TestProOAuthConfiguredRetryNoSecondPayment(t *testing.T) {
 						for {
 							attempt := authorizations.Add(1)
 							times = append(times, time.Now())
-							if attempt == 3 && scenario != "exhausted" {
+							if attempt == 3 && !strings.HasSuffix(scenario, "exhausted") {
 								_, err := rpc("pro_tokens", map[string]any{"tokens": map[string]any{"access_token": proAutoToken(current, "oauth"), "refresh_token": "new-rt"}})
 								return err
 							}
@@ -68,7 +100,11 @@ func TestProOAuthConfiguredRetryNoSecondPayment(t *testing.T) {
 							if scenario == "expired" {
 								code = "siwc_session_expired"
 							}
-							result, err := rpc("pro_oauth_retry", map[string]any{"error_code": code, "error": "HTTP 200 password continuation / upstream failure"})
+							failure := "HTTP 200 password continuation / upstream failure"
+							if proxyScenario {
+								failure = "curl: (5) Could not resolve proxy: geo.iproyal.com"
+							}
+							result, err := rpc("pro_oauth_retry", map[string]any{"error_code": code, "error": failure, "proxy_request_failed": proxyScenario, "proxy_lease": lease})
 							if err != nil {
 								return err
 							}
@@ -107,13 +143,13 @@ func TestProOAuthConfiguredRetryNoSecondPayment(t *testing.T) {
 					}
 				}
 				wantLogins := int32(1)
-				if scenario == "expired" || scenario == "child_exit" {
+				if scenario == "expired" || scenario == "child_exit" || proxyScenario {
 					wantLogins = 3
 				}
 				if logins.Load() != wantLogins {
 					t.Fatalf("logins=%d want=%d", logins.Load(), wantLogins)
 				}
-				if scenario == "exhausted" {
+				if strings.HasSuffix(scenario, "exhausted") {
 					if !p.ProAuto.OAuthRecovery.Exhausted || pushes.Load() != 0 || p.ProAuto.Status != "failed" || p.ProAuto.SIWCConsentFinal() {
 						t.Fatal("exhaustion failed", p.ProAuto)
 					}
@@ -124,7 +160,7 @@ func TestProOAuthConfiguredRetryNoSecondPayment(t *testing.T) {
 					for range 5 {
 						s.queueRestockPaidRecovery(p, cfg)
 					}
-					if s.proAutomationRunning(email) || logins.Load() != 1 {
+					if s.proAutomationRunning(email) || logins.Load() != wantLogins {
 						t.Fatal("restock added more retries")
 					}
 				} else if pushes.Load() != 1 || p.ProAuto.Status != "waiting_quota" {
@@ -193,6 +229,50 @@ func TestProOAuthRetryStopDuringConfiguredWait(t *testing.T) {
 	}
 	if strings.Contains(p.ProAuto.Error, "收尾") {
 		t.Fatal("stop executed final")
+	}
+}
+
+func TestProOAuthCoolingWaitDoesNotSpendRetryBudget(t *testing.T) {
+	s, st, email := gptPayFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":0,"data":{"id":"paid","status":"success"}}`)
+	})
+	s.proAutoCancel()
+	s.proAutoWG.Wait()
+	configureProAutoFixture(t, s)
+	cfg, pass, _, _ := st.ProSettings()
+	cfg.RetryCount, cfg.RetryIntervalSeconds = 1, 1
+	st.SaveProSettings(cfg, pass, "")
+	var sessions atomic.Int32
+	s.proAutoHooks = &proAutomationHooks{Session: func(ctx context.Context, e string, rpc func(string, map[string]any) (any, error)) error {
+		n := sessions.Add(1)
+		if n > 1 && !isProPaidRecovery(ctx) {
+			t.Error("lost payment-free recovery context")
+		}
+		if n == 2 || n == 3 {
+			return &globalProxyWaiting{Until: time.Now().Add(25 * time.Millisecond)}
+		}
+		if _, err := rpc("pro_recharge", map[string]any{"session": map[string]any{"access_token": proAutoToken(e, "login"), "user": map[string]any{"email": e}, "account": map[string]any{"id": "personal-id"}}}); err != nil {
+			return err
+		}
+		if n == 1 {
+			if _, err := rpc("pro_oauth_retry", map[string]any{"error_code": "oauth_session_expired", "error": "expired"}); err != nil {
+				return err
+			}
+			return errProOAuthReloginReady
+		}
+		_, err := rpc("pro_tokens", map[string]any{"tokens": map[string]any{"access_token": proAutoToken(e, "oauth"), "refresh_token": "rt"}})
+		return err
+	}, Push: func(_ context.Context, e string) (model.MailAccountProfile, error) {
+		return st.UpdateProAccount(e, func(p *model.MailAccountProfile) { p.PushStatus = "completed" })
+	}, Quota: func(_ context.Context, e string, _ bool) (model.MailAccountProfile, error) {
+		return st.UpdateProAccount(e, func(p *model.MailAccountProfile) { p.Quota7D = &model.FreeQuotaWindow{UsedPercent: 10} })
+	}}
+	if r := payCall(t, s.startProAutomation, "email", email, map[string]any{"card_id": "test-card", "plan_code": "pro20"}); r.Code != 202 {
+		t.Fatal(r.Body.String())
+	}
+	p := waitProAutoFinished(t, s, email)
+	if sessions.Load() != 4 || p.ProAuto.Status != "waiting_quota" || p.ProAuto.OAuthRecovery.Attempts != 1 || p.ProAuto.OAuthRecovery.Exhausted {
+		t.Fatal("waiting spent authorization budget", sessions.Load(), p.ProAuto)
 	}
 }
 

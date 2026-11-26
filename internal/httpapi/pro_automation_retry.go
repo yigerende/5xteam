@@ -68,6 +68,26 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// No proxy was acquired, so waiting must not consume an OAuth attempt.
+		var unavailable *globalProxyWaiting
+		if errors.As(err, &unavailable) {
+			at := unavailable.Until
+			if at.After(time.Now().Add(30 * time.Second)) {
+				at = time.Now().Add(30 * time.Second)
+			}
+			_, saveErr := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
+				p.ProAuto.RetryAt = &at
+				p.ProAuto.Error = unavailable.Error()
+				p.ProAuto.UpdatedAt = time.Now()
+			})
+			if saveErr != nil {
+				return saveErr
+			}
+			if e := waitProAuto(ctx, time.Until(at)); e != nil {
+				return e
+			}
+			continue
+		}
 		if errors.Is(err, errProOAuthRetriesExhausted) {
 			return err
 		}
@@ -128,25 +148,6 @@ func (s *Server) runProProvisioning(ctx context.Context, email string, cfg gptpa
 			continue
 		}
 
-		var unavailable *globalProxyWaiting
-		if errors.As(err, &unavailable) {
-			at := unavailable.Until
-			if at.After(time.Now().Add(30 * time.Second)) {
-				at = time.Now().Add(30 * time.Second)
-			}
-			_, saveErr := s.store.UpdateProAccount(email, func(p *model.MailAccountProfile) {
-				p.ProAuto.RetryAt = &at
-				p.ProAuto.Error = unavailable.Error()
-				p.ProAuto.UpdatedAt = time.Now()
-			})
-			if saveErr != nil {
-				return saveErr
-			}
-			if e := waitProAuto(ctx, time.Until(at)); e != nil {
-				return e
-			}
-			continue
-		}
 		if isProPaidRecovery(ctx) {
 			var cooled *cooledLoginProxyError
 			if errors.As(err, &cooled) && paidProxyRetries < 3 {

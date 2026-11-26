@@ -51,6 +51,20 @@ func (s *Server) proOAuthRetryRPC(ctx context.Context, email string, args map[st
 	if target, ok := args["expected_downstream"].(model.ProDownstreamRef); ok && !target.Matches(model.ProDownstream(v)) {
 		return nil, errors.New("推送目标已变化，停止旧授权会话重试")
 	}
+	// Only the child request adapter can identify a failure of its GPT client.
+	// Callback broker, database and other RPC errors retain the current session.
+	proxyFailed := args["proxy_request_failed"] == true && isLoginProxyNetworkFailure(errors.New(fmt.Sprint(args["error"])))
+	if proxyFailed {
+		lease, _ := args["proxy_lease"].(*oauthProxyLease)
+		if lease == nil {
+			return nil, errors.New("授权代理上下文缺失，停止故障会话重试")
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		s.recordLoginProxyFailure(lease, errors.New(fmt.Sprint(args["error"])))
+		s.auditProEvent(p, "oauth", "pending", "pro_auto", "第三步代理网络故障，冷却当前代理；按授权重试配置选择可用代理重新登录，不重新付款", map[string]any{"proxy_name": lease.label})
+	}
 	s.auditProEvent(p, "oauth", "failed", "pro_auto", "第三步授权失败，按后台配置检查重试次数", map[string]any{"error": redactSensitiveText(fmt.Sprint(args["error"])), "error_code": args["error_code"]})
 	_, err = s.prepareOAuthRecovery(ctx, email, &siwcSessionExpiredError{Source: source, Downstream: model.ProDownstream(v)})
 	if err != nil {
@@ -60,7 +74,7 @@ func (s *Server) proOAuthRetryRPC(ctx context.Context, email string, args map[st
 		}
 		return nil, err
 	}
-	return map[string]any{"retry": true, "relogin": args["error_code"] == "siwc_session_expired" || args["error_code"] == "oauth_session_expired"}, nil
+	return map[string]any{"retry": true, "relogin": proxyFailed || args["error_code"] == "siwc_session_expired" || args["error_code"] == "oauth_session_expired", "proxy_failed": proxyFailed}, nil
 }
 
 func (s *Server) prepareOAuthRecovery(ctx context.Context, email string, cause error) (bool, error) {

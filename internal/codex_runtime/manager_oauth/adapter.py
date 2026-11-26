@@ -487,6 +487,11 @@ class ProjectProtocolLogin(PasswordFirstLogin, upstream.ChatGPTProtocolLogin):
                 kwargs.pop("allow_redirects", None)
                 response = super().request(url, **kwargs)
         except Exception as exc:
+            # Identify failures of this account's GPT proxy transport. Downstream
+            # RPC/storage failures must not cool an unrelated login proxy.
+            if (getattr(self, "payload", {}).get("pro_oauth_retry_managed") and self.proxy_url
+                    and urlsplit(url).hostname in {"chatgpt.com", "auth.openai.com"}):
+                exc.pro_proxy_request_failed = True
             duration_ms = int((time.monotonic() - started) * 1000)
             if self.first_failed_request is None:
                 self.first_failed_request = {"request_id": request_id, "stage": stage, "http_status": 0,

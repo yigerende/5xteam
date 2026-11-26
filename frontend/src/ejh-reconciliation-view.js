@@ -6,6 +6,13 @@ import { isClosedCard } from './card-status.js'
 
 // A display tolerance only. Never write off the difference or deduct it as cost.
 export const reconciliationToleranceUSD = '1.00'
+export function reconciliationDifferenceNote(gap) {
+  const n = cents(gap)
+  if (n === null) return '数据补齐后计算，不计入成本或利润'
+  if (n < 0n) return '余额及在途高于账面预计；核对估算费用、扣款时间和余额时点，不视为亏损'
+  if (n > 0n) return '余额及在途低于账面预计；原因待核实，不直接认定为损失'
+  return '当前账面一致，不另计成本或利润'
+}
 export function reconciliationStatus(data, now = Date.now(), maxAgeSeconds = 600, overview = null) {
   const value = overview || financeOverview(data), issues = [...value.lossReasons]
   if (value.earnings.costIncomplete) issues.push('部分费用缺少金额或折算依据')
