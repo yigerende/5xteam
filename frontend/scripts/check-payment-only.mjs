@@ -14,7 +14,7 @@ const ejh={reversal_fee_percent:0,recharge_ledger:{amount:'1000'},balance:{data:
 const original=structuredClone(ejh), result=financeOverview(ejh)
 assert.equal(result.paymentOnly.amount,20000)
 assert.equal(result.platformClearingUSD,'0.00')
-assert.equal(result.earnings.costUSD,'10.50')
+assert.equal(result.earnings.costUSD,'0.50','recharge fee is disclosed separately from operating cost')
 assert.equal(result.gap,'0.00')
 assert.equal(result.inFlight.count,0)
 assert.equal(applyPaymentPolicies(ejh).cases[0].state,'no_return')

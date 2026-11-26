@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import {fileURLToPath} from 'node:url'
 import {spawnSync} from 'node:child_process'
 import {financeReport} from '../src/ejh-finance.js'
 import {createFinanceReportCache} from '../src/ejh-finance-report-client.js'
@@ -9,7 +10,7 @@ const data={cards:[card],operations:[],trades:[trade('clear','4','100','2026-11-
 const history={consumption:[{id:'usage',email:'a@example.com',total:250,start_day:'2026-11-15',end_day:'2026-11-16',daily_checked_at:'2026-11-16T12:00:00+08:00'}],usage_days:[{id:'usage:2026-11-15',day:'2026-11-15',email:'a@example.com',amount:100,source:'sub2_daily'},{id:'usage:2026-11-16',day:'2026-11-16',email:'a@example.com',amount:150,source:'sub2_daily'}]}
 const runtime=new URL('../../internal/financecalc/report.mjs',import.meta.url)
 for(const [mode,date] of [['day','2026-11-15'],['day','2026-11-16'],['day','2026-11-17'],['week','2026-11-16'],['month','2026-11-16'],['all','2026-11-16']]){
- const child=spawnSync(process.execPath,[runtime.pathname.replace(/^\/(\w:)/,'$1')],{input:JSON.stringify({data,history,mode,date,accounts:true}),encoding:'utf8'})
+ const child=spawnSync(process.execPath,[fileURLToPath(runtime)],{input:JSON.stringify({data,history,mode,date,accounts:true}),encoding:'utf8'})
  assert.equal(child.status,0,child.stderr)
  const actual=JSON.parse(child.stdout),expected=JSON.parse(JSON.stringify(financeReport(data,history,mode,date)))
  for(const key of Object.keys(expected).filter(k=>k!=='overview'))assert.deepEqual(actual[key],expected[key],mode+':'+date+':'+key)

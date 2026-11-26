@@ -20,8 +20,8 @@ export function usdToR(value) {
   const n = units(value)
   return format(n === null ? null : rounded(n * 67n, 1000n))
 }
-function calculateProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUSD = 0, refundUSD = 0, merchantUSD = 0, deadUSD = 0, consumption, costMissing = 0, consumptionMissing = 0, refundMissing = 0, rechargeMissing = 0, estimated = false }, deductRefund) {
-  const usdCosts = [openingUSD, reversalUSD, clearingUSD, merchantUSD, deadUSD].map(units)
+function calculateProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUSD = 0, refundUSD = 0, merchantUSD = 0, deadUSD = 0, usageUSD = 0, consumption, costMissing = 0, consumptionMissing = 0, refundMissing = 0, rechargeMissing = 0, estimated = false }, deductRefund) {
+  const usdCosts = [openingUSD, reversalUSD, clearingUSD, merchantUSD, deadUSD, usageUSD].map(units)
   if (deductRefund) usdCosts.push(units(refundUSD))
   const costs = usdCosts.map(n => {
     return n === null ? null : rounded(n * 67n, 1000n)
@@ -36,7 +36,7 @@ function calculateProfit({ openingUSD, reversalUSD, rechargeUSD, clearingUSD = 0
   const revenue = rawRevenue === null ? null : rounded(rawRevenue, 100n)
   const incomplete = partial || !!consumptionMissing || revenue === null
   return {
-    openingR: format(costs[0]), reversalR: format(costs[1]), rechargeR: rechargeMissing ? null : usdToR(rechargeUSD), clearingR: format(costs[2]), refundR: refundMissing ? null : usdToR(refundUSD), merchantR: format(costs[3]), deadR: format(costs[4]),
+    openingR: format(costs[0]), reversalR: format(costs[1]), rechargeR: rechargeMissing ? null : usdToR(rechargeUSD), clearingR: format(costs[2]), refundR: refundMissing ? null : usdToR(refundUSD), merchantR: format(costs[3]), deadR: format(costs[4]), usageR: format(costs[5]),
     costR: partial ? null : format(cost), knownCostR: known.length ? format(cost) : null,
     costUSD: partial ? null : usdText, knownCostUSD: known.length ? usdText : null,
     consumptionR: format(revenue), profitR: incomplete ? null : format(revenue - cost),

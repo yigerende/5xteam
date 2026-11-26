@@ -27,7 +27,7 @@ assert.equal(accountEarnings(row,[card],[],data.trades,8).profitR,'34.3306','loc
 assert.equal(accountEarnings({...row,returns:[refund,refund]},[card],[],[...data.trades,refund],8).profitR,'34.3306','duplicate receipts charge fee once')
 assert.equal(accountEarnings({...row,returns:[{...refund,confirmed:false}]},[card],[],data.trades,8).profitR,null)
 assert.equal(accountEarnings({...row,returns:[{...refund,reversal_fee:{percent:'invalid'}}]},[card],[],data.trades,8).profitR,null)
-const next={...refund,id:'refund2',trade:{...refund.trade,tradeNo:'refund2',cardAmount:'0.00',billAmount:'1.00'}}
+const next={...refund,id:'refund2',confirmed_amount:'0.00',trade:{...refund.trade,tradeNo:'refund2',cardAmount:'0.00',billAmount:'1.00'}}
 assert.equal(accountEarnings({...row,returns:[refund,next]},[card],[],data.trades,8).profitR,'33.9956','distinct partial refunds each contribute their own fee')
 const manual=applyRefundFeeOverrides({...data,refund_fees:[{id:'fee',revision:1,amount:'3.00',at:returned,source:'manual',trade_ids:['refund']}]})
 assert.equal(accountEarnings(manual.cases[0],manual.cards,[],manual.trades,8).profitR,'44.6486','manual fee replaces estimate instead of being added again')

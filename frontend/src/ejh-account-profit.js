@@ -1,3 +1,4 @@
+import { summarizeUsageCosts } from './ejh-usage-cost.js'
 import { ejhDeadLoss } from './dead-account-loss.js'
 import { casePaymentTrades, summarizeClearingCosts } from './ejh-clearing.js'
 import { paymentOnlySummary, paymentMoney } from './payment-only.js'
@@ -17,20 +18,20 @@ export function accountCaseCosts(row, cards = [], operations = [], trades = []) 
   const summary=paymentOnlySummary({payment_policies:[{card_id:id,mode:'payment_only'}],cards,cases:[row],operations,trades:casePaymentTrades(row,trades)},'ejh')
   clearing={...raw,usd:{...raw.usd,amount:raw.usd.amount===null?null:paymentMoney(Math.round(Number(raw.usd.amount)*100)-summary.costExcluded)},missing:raw.missing+summary.missing}
  }
- return {dead,clearing}
+ return {dead,clearing,usage:summarizeUsageCosts([row],cards,operations,trades,{includeUnlinked:false})}
 }
 
-export function accountProfit({fee,refund,clearing=null,deadFeeUSD='0.00',merchantFeeUSD='0.00',consumption=null,consumptionMissing=0}) {
+export function accountProfit({fee,refund,clearing=null,usage=null,deadFeeUSD='0.00',merchantFeeUSD='0.00',consumption=null,consumptionMissing=0}) {
  const base=reversalProfit(fee,consumption,consumptionMissing)
- if(deadFeeUSD!==null&&!Number(deadFeeUSD)&&!clearing&&!Number(merchantFeeUSD)&&!refund.count&&!refund.missing&&!refund.pending)return base
- const earnings=balanceProfit({openingUSD:0,rechargeUSD:0,reversalUSD:fee.usd.amount??(!fee.count?'0.00':null),refundUSD:refund.usd.amount??'0.00',deadUSD:deadFeeUSD,merchantUSD:merchantFeeUSD,clearingUSD:clearing?.usd.amount||'0.00',consumption,consumptionMissing,costMissing:refund.missing+refund.pending+fee.missing+fee.pending+fee.usd.missing+(clearing?.missing||0)+(clearing?.pending||0)})
- return {...base,profit:earnings.profitR,estimated:base.estimated||refund.estimated||clearing?.estimated}
+ if(deadFeeUSD!==null&&!Number(deadFeeUSD)&&!clearing&&!usage?.count&&!usage?.missing&&!Number(merchantFeeUSD)&&!refund.count&&!refund.missing&&!refund.pending)return base
+ const earnings=balanceProfit({openingUSD:0,rechargeUSD:0,reversalUSD:fee.usd.amount??(!fee.count?'0.00':null),refundUSD:refund.usd.amount??'0.00',deadUSD:deadFeeUSD,merchantUSD:merchantFeeUSD,usageUSD:usage?.usd.amount??(usage?.missing?null:'0.00'),clearingUSD:clearing?.usd.amount||'0.00',consumption,consumptionMissing,costMissing:(usage?.missing||0)+refund.missing+refund.pending+fee.missing+fee.pending+fee.usd.missing+(clearing?.missing||0)+(clearing?.pending||0)})
+ return {...base,profit:earnings.profitR,estimated:base.estimated||refund.estimated||clearing?.estimated||usage?.estimated}
 }
 
 export function accountEarnings(row, cards=[], operations=[], trades=[], feePercent=6) {
- const {dead,clearing}=accountCaseCosts(row,cards,operations,trades)
+ const {dead,clearing,usage}=accountCaseCosts(row,cards,operations,trades)
  const consumption=accountConsumptionForProfit(row)
- const result=accountProfit({fee:summarizeReversalFees(row.returns||[],feePercent,true,cards,operations),refund:summarizeRefundFees(row.returns||[],feePercent,true,cards,operations),clearing,deadFeeUSD:dead.missing?null:paymentMoney(dead.amount),merchantFeeUSD:row.merchant_fee_usd||'0.00',consumption})
+ const result=accountProfit({fee:summarizeReversalFees(row.returns||[],feePercent,true,cards,operations),refund:summarizeRefundFees(row.returns||[],feePercent,true,cards,operations),clearing,usage,deadFeeUSD:dead.missing?null:paymentMoney(dead.amount),merchantFeeUSD:row.merchant_fee_usd||'0.00',consumption})
  return {consumptionR:accountConsumption(row)?.toFixed(4)??null,consumptionNotPushed:consumptionNotPushed(row),profitR:result.profit,estimated:!!result.estimated,reason:result.profit===null?(consumption===null?'消费未查询完整':'费用待核实'):''}
 }
 

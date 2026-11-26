@@ -1,3 +1,4 @@
+import { summarizeUsageCosts } from './ejh-usage-cost.js'
 import { createAccountEarnings } from './ejh-account-profit.js'
 import { ejhDeadLoss } from './dead-account-loss.js'
 import { applyPaymentPolicies, paymentOnlySummary, paymentMoney } from './payment-only.js'
@@ -56,6 +57,7 @@ export function financeOverview(data={}) {
   const paymentOnly=paymentOnlySummary(data,'ejh'),dead=ejhDeadLoss(data)
   const cards=data.cards||[],operations=data.operations||[],cases=data.cases||[]
   const reversal=summarizeReversalFees(data.trades||[],data.reversal_fee_percent??6,false,cards,operations)
+  const usage=summarizeUsageCosts(cases,cards,operations,data.trades||[])
   const opening=openingEntries(data),consumption=consumptionSummary(cases,data.consumption_history||[])
   const gross=cents(data.recharge_ledger?.amount),deposit=feeCents(data.recharge_ledger?.amount),net=gross===null?null:gross-deposit
   const cardUSD=summarizeCardBalancesUSD(cards,operations),inFlight=summarizeInFlightPayments(cases,cards,operations,data.trades||[])
@@ -89,8 +91,8 @@ export function financeOverview(data={}) {
   if(refundSettlement.missing)reasons.push(`${refundSettlement.missing} 笔退款待销卡结算金额待核实`)
   const loss=reasons.length?null:net-externalTransfer-BigInt(paymentOnly.amount)-account-(cents(cardUSD.amount)||0n)-(cents(inFlight.paymentUSD.amount)||0n)-(cents(refundSettlement.amount)||0n)
   const openingFee=money(BigInt(opening.length)*50n)
-  let earnings=financeProfit({openingUSD:openingFee,reversalUSD:reversal.usd.amount??(!reversal.count?'0.00':null),rechargeUSD:money(deposit),clearingUSD:platformClearingUSD,refundUSD:refundFees.amount,merchantUSD:merchantFee,deadUSD:money(BigInt(dead.amount)),consumption:consumption.total,
-    costMissing:dead.missing+paymentOnly.missing+reversal.missing+reversal.pending+reversal.usd.missing+clearing.missing+clearing.pending,refundMissing:refundFees.missing,consumptionMissing:consumption.missing,estimated:!!reversal.count||clearing.estimated})
+  let earnings=financeProfit({openingUSD:openingFee,reversalUSD:reversal.usd.amount??(!reversal.count?'0.00':null),rechargeUSD:money(deposit),clearingUSD:platformClearingUSD,refundUSD:refundFees.amount,merchantUSD:merchantFee,deadUSD:money(BigInt(dead.amount)),usageUSD:usage.usd.amount,consumption:consumption.total,
+    costMissing:usage.missing+dead.missing+paymentOnly.missing+reversal.missing+reversal.pending+reversal.usd.missing+clearing.missing+clearing.pending,refundMissing:refundFees.missing,consumptionMissing:consumption.missing,estimated:!!reversal.count||clearing.estimated||usage.estimated})
   const refundPrincipalUSD=money(cents(tradeMoney(clearing.entries.filter(e=>e.refund&&!e.refundPending&&!e.incomplete).reduce((sum,e)=>sum+(tradeUnits(String(e.usd).replace('-',''))||0n),0n))))
   earnings=cashflowSummary({earnings,clearingUSD:platformClearingUSD,refundPrincipalUSD}).earnings
   const reconciliation=authorizationDiscrepancies(cases,(data.trades||[]).filter(t=>!paymentOnly.rows.some(p=>p.card_id===t.card_id)),cards,operations,inFlight.authorizationKeys)
@@ -98,10 +100,10 @@ export function financeOverview(data={}) {
   // them from operating profit must not manufacture an unexplained cash gap.
   // Recharge fees are already deducted in net receipts, so do not deduct again.
   const gap=loss===null||earnings.costUSD===null||refundFees.missing?null:money(loss-(cents(earnings.costUSD)+(cents(refundFees.amount)||0n)-(cents(merchantFee)||0n)))
-  const closurePending=reconciliation.unaccountedUSD.missing?null:reconciliation.unaccountedUSD.amount??'0.00'
+  const closurePending='0.00' // Returned shortfalls are usage expenses, not expected refunds.
   const unexplained=gap===null||closurePending===null?null:money(cents(gap)-cents(closurePending))
   const assets=reasons.length?null:money(account+(cents(cardUSD.amount)||0n)+(cents(inFlight.paymentUSD.amount)||0n)+(cents(refundSettlement.amount)||0n))
-  return {refundSettlement,refundPrincipalUSD,dead,paymentOnly,reversal,earnings,merchantFee,openingCount:opening.length,openingFee,consumption,netR:usdToR(money(net)),lossR:usdToR(money(loss)),
+  return {usage,refundSettlement,refundPrincipalUSD,dead,paymentOnly,reversal,earnings,merchantFee,openingCount:opening.length,openingFee,consumption,netR:usdToR(money(net)),lossR:usdToR(money(loss)),
     reconciliation,gap,clearing,rawClearingUSD,platformClearingUSD,externalTransfer:money(externalTransfer),refundFees,closurePending,unexplained,assets,
     gross:money(gross),depositFee:money(deposit),net:money(net),loss:money(loss),lossReasons:[...new Set(reasons)],
     estimated:!!(cardUSD.estimated||inFlight.paymentUSD.estimated),stale:cards.filter(c=>c.remote?.status!=='2'&&c.balance_error).length,
@@ -126,12 +128,14 @@ export function financeEvents(data,history={}) {
   data=applyRefundFeeOverrides(applyPaymentPolicies(data))
   const paymentOnly=paymentOnlySummary(data,'ejh'),dead=ejhDeadLoss(data)
   const events=openingEntries(data),seen=new Map(),cards=data.cards||[],operations=data.operations||[]
+  const cardNames=new Map(cards.map(c=>[c.id,c.local?.name||c.remote?.cardNo||c.id]))
   for(const r of dead.rows){events.push({id:"dead:"+r.id,kind:"dead",at:financeTime(r.at),email:r.email,card:r.card_id,usd:r.amount==null?null:paymentMoney(r.amount),amount:r.amount==null?null:paymentMoney(r.amount),currency:"USD",incomplete:r.missing,estimated:r.estimated,note:"死号本金亏损，已扣实际回款"});if(r.alreadyCost)events.push({id:"dead-reclass:"+r.id,kind:"clearing",at:financeTime(r.at),usd:paymentMoney(-r.alreadyCost),amount:paymentMoney(-r.alreadyCost),currency:"USD",note:"已计清算转入死号亏损，避免重复成本"})}
  for(const fee of data.merchant_fees||[])events.push({id:'merchant:'+fee.request_id,kind:'merchant',at:financeTime(fee.at),email:fee.email,card:fee.card_id,reference:fee.request_id,amount:fee.amount,currency:'USD',usd:fee.amount,note:'API 商户最终成功 · 外部收费'})
   for(const fee of refundFeeEntries(data.refund_fees||[])) {
     const valid=/^\d{1,12}(\.\d{1,2})?$/.test(String(fee.amount??''))&&(cents(fee.amount)||0n)>0n
     events.push({id:'refund-fee:'+fee.id,kind:'refund',at:financeTime(fee.at),reference:fee.id,amount:valid?fee.amount:null,currency:'USD',usd:valid?fee.amount:null,incomplete:!valid,estimated:fee.source==='balance_reconciliation',note:(fee.source==='balance_reconciliation'?'余额核对登记':'手动登记')+' · '+fee.note})
   }
+  for(const entry of summarizeUsageCosts(data.cases||[],cards,operations,data.trades||[]).entries)events.push({...entry,kind:'usage',card:cardNames.get(entry.card_id)||entry.card_id,note:entry.reason||'实际使用消耗 · 已回款后按付款减回款计算；已计清算不重复扣除，USD 按开卡比例估算'})
   const historyMonth=/^20\d{2}-(0[1-9]|1[0-2])$/.test(data.recharge_ledger?.history_month||'')?data.recharge_ledger.history_month:null
   for(const e of summarizeClearingCosts(data.trades||[],cards,operations,data.cases||[]).entries){
     const t=e.record.trade
@@ -248,7 +252,7 @@ export function eventAmountR(event) {
   return usdToR(event.kind==='opening'?event.amount:event.usd)
 }
 function summarizeEvents(events) {
-  let usd=0n,usdt=0n,reversalUSD=0n,rechargeUSD=0n,rechargeMissing=0,clearingUSD=0n,externalTransferUSD=0n,refundUSD=0n,refundMissing=0,merchantUSD=0n,deadUSD=0n,refundPrincipalUSD=0n,refundPrincipalMissing=0,r=0,missing=0,consumptionMissing=0,opening=0
+  let usd=0n,usdt=0n,reversalUSD=0n,rechargeUSD=0n,rechargeMissing=0,clearingUSD=0n,externalTransferUSD=0n,refundUSD=0n,refundMissing=0,merchantUSD=0n,deadUSD=0n,usageUSD=0n,refundPrincipalUSD=0n,refundPrincipalMissing=0,r=0,missing=0,consumptionMissing=0,opening=0
   const original=new Map()
   for(const e of events){
     if(e.kind==='consumption'){
@@ -282,10 +286,11 @@ function summarizeEvents(events) {
     if(e.externalTransfer)externalTransferUSD-=signed
     if(e.kind==='merchant')merchantUSD+=signed
  if(e.kind==='dead')deadUSD+=signed
+    if(e.kind==='usage')usageUSD+=signed
   }
   const rounded=n=>money(((n<0n?-n:n)+5000n)/10000n*(n<0n?-1n:1n))
-  const earnings=financeProfit({openingUSD:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),consumption:r,costMissing:missing,consumptionMissing,refundMissing,rechargeMissing,estimated:events.some(e=>!['refund','recharge'].includes(e.kind)&&(e.kind==='reversal'||e.estimated))})
-  return {refundPrincipalUSD:refundPrincipalMissing?null:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rechargeMissing?null:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:refundMissing?null:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),r,missing:missing+consumptionMissing+refundMissing+rechargeMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
+  const earnings=financeProfit({openingUSD:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),refundUSD:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),usageUSD:rounded(usageUSD),consumption:r,costMissing:missing,consumptionMissing,refundMissing,rechargeMissing,estimated:events.some(e=>!['refund','recharge'].includes(e.kind)&&(e.kind==='reversal'||e.estimated))})
+  return {refundPrincipalUSD:refundPrincipalMissing?null:rounded(refundPrincipalUSD),usd:rounded(usd),usdt:money(usdt),reversalUSD:rounded(reversalUSD),rechargeUSD:rechargeMissing?null:rounded(rechargeUSD),clearingUSD:rounded(clearingUSD),externalTransferUSD:rounded(externalTransferUSD),refundUSD:refundMissing?null:rounded(refundUSD),merchantUSD:rounded(merchantUSD),deadUSD:rounded(deadUSD),usageUSD:rounded(usageUSD),r,missing:missing+consumptionMissing+refundMissing+rechargeMissing,opening,earnings,original:[...original].map(([currency,n])=>({currency,amount:money(n)}))}
 }
 export function prepareFinanceReport(data,history={}) {
   const accountData=applyRefundFeeOverrides(applyPaymentPolicies(data))
@@ -334,7 +339,8 @@ export function financeReport(data,history={},mode='day',date=beijingDay(),prepa
     summary.rechargeUSD=overview.depositFee
     summary.externalTransferUSD=overview.externalTransfer
     summary.clearingUSD=overview.platformClearingUSD
-    summary.usd=money((cents(summary.reversalUSD)||0n)+(cents(summary.clearingUSD)||0n)+(cents(summary.merchantUSD)||0n)+BigInt(overview.dead.amount))
+    summary.usageUSD=overview.usage.usd.amount
+    summary.usd=money((cents(summary.reversalUSD)||0n)+(cents(summary.clearingUSD)||0n)+(cents(summary.merchantUSD)||0n)+(cents(summary.usageUSD)||0n)+BigInt(overview.dead.amount))
     summary.missing+=overview.consumption.missing
     summary.earnings=overview.earnings
   }

@@ -5,7 +5,7 @@ import { applyPaymentPolicies } from '../src/payment-only.js'
 import { applyRefundFeeOverrides } from '../src/ejh-refund-cost.js'
 
 const at='2026-11-19T12:00:00+08:00'
-const row={id:'order',email:'one@example.test',card_id:'card',payment_status:'success',opened_at:at,state:'returned',consumption_total:88.6245,returns:[{id:'return',card_id:'card',confirmed:true,reversal_fee:{percent:6},trade:{tradeNo:'return',tradeType:'2',tradeStatus:'2',cardAmount:'765',cardCurrency:'PHP'}}]}
+const row={id:'order',email:'one@example.test',card_id:'card',payment_status:'success',opened_at:at,state:'returned',consumption_total:88.6245,charge:{id:'auth',type:'1',status:'1',card_amount:'765',card_currency:'PHP'},returns:[{id:'return',card_id:'card',confirmed:true,confirmed_amount:'765',confirmed_currency:'PHP',reversal_fee:{percent:6},trade:{tradeNo:'return',tradeType:'2',tradeStatus:'2',cardAmount:'765',cardCurrency:'PHP'}}]}
 const cards=[{id:'card',remote:{orderNo:'opening'}}]
 const operations=[{id:'open',order_no:'opening',method:'open',status:'completed',result:{cardAmount:'1000',cardCurrency:'PHP',billAmount:'100',billCurrency:'USD'}}]
 const expected={consumptionR:'88.6245',consumptionNotPushed:false,profitR:'57.8715',estimated:true,reason:''}

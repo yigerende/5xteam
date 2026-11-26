@@ -63,4 +63,4 @@ assert.equal(holdingDifference.reconciliation.pendingUSD.amount,'0.23')
 assert.equal(holdingDifference.closurePending,'0.00','principal already in flight must not be deducted from the unexplained gap twice')
 const closedCard={...card,remote:{...card.remote,status:'2'}}
 assert.equal(summarizeInFlightPayments([reversedCase],[closedCard],[op],[auth,returned]).count,0,'completed card closure must not retain a stale in-flight case')
-assert.equal(financeOverview({...data,cases:[{...reversedCase,state:'returned'}],trades:[auth,returned]}).closurePending,'0.23')
+assert.equal(financeOverview({...data,cases:[{...reversedCase,state:'returned'}],trades:[auth,returned]}).closurePending,'0.00','returned shortfalls are no longer expected closure refunds')

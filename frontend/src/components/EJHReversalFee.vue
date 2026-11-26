@@ -1,10 +1,11 @@
 <script setup>
+import EJHUsageCost from './EJHUsageCost.vue'
 import { computed } from 'vue'
 import { accountProfit } from '../ejh-account-profit'
 import { summarizeReversalFees } from '../ejh-reversal-fees'
 import { summarizeRefundFees } from '../ejh-refund-cost'
 import { usdToR } from '../ejh-profit'
-const props = defineProps({ deadFeeUSD:{type:String,default:'0.00'}, merchantFeeUSD:{type:String,default:'0.00'}, clearing: {type:Object,default:null}, records: { type: Array, default: () => [] }, feePercent: { type: Number, default: 6 }, cards: { type: Array, default: () => [] }, operations: { type: Array, default: () => [] }, confirmedOnly: Boolean, hideLabel: Boolean, showProfit: Boolean, consumption: {type:Number,default:null}, consumptionMissing: {type:Number,default:0} })
+const props = defineProps({ usage:{type:Object,default:null}, deadFeeUSD:{type:String,default:'0.00'}, merchantFeeUSD:{type:String,default:'0.00'}, clearing: {type:Object,default:null}, records: { type: Array, default: () => [] }, feePercent: { type: Number, default: 6 }, cards: { type: Array, default: () => [] }, operations: { type: Array, default: () => [] }, confirmedOnly: Boolean, hideLabel: Boolean, showProfit: Boolean, consumption: {type:Number,default:null}, consumptionMissing: {type:Number,default:0} })
 const fee = computed(() => summarizeReversalFees(props.records, props.feePercent, props.confirmedOnly, props.cards, props.operations))
 const refund = computed(() => summarizeRefundFees(props.records, props.feePercent, props.confirmedOnly, props.cards, props.operations))
 const result = computed(() => accountProfit({...props,fee:fee.value,refund:refund.value}))
@@ -25,8 +26,9 @@ const result = computed(() => accountProfit({...props,fee:fee.value,refund:refun
   </div>
  </div>
  <div v-if="refund.count||refund.pending||refund.missing" class="reversal-fee" :class="{'reversal-fee-cell':hideLabel}"><span v-if="!hideLabel">退款手续费</span><div class="reversal-fee-values"><strong>{{refund.usd.amount??'待核实'}}{{refund.usd.amount!==null?' USD':''}}</strong><small v-if="refund.usd.amount!==null">折合 {{usdToR(refund.usd.amount)}} R</small><small v-if="refund.entries.some(e=>e.manual)">按已关联登记费用{{refund.entries.some(e=>e.allocated)?'分摊':''}}</small><small v-if="refund.entries.some(e=>!e.manual)">{{refund.percent===null?'按各笔费率计算':'按 '+refund.percent+'% 计算'}}{{records.some(r=>r.reversal_fee)?' · 已回款费率已锁定':''}}</small><small v-if="refund.missing||refund.pending">{{refund.missing+refund.pending}} 笔待核实或待入账，未计入</small></div></div>
+ <EJHUsageCost v-if="usage" :summary="usage"/>
  <div v-if="deadFeeUSD===null||Number(deadFeeUSD)>0" class="reversal-fee"><span>死号亏损</span><strong>{{deadFeeUSD??'待核实'}} USD</strong></div><div v-if="showProfit" class="reversal-fee"><span>API 收费</span><strong>{{merchantFeeUSD}} USD</strong></div>
- <div v-if="showProfit" class="reversal-profit" title="账号结余＝消费收益 R − 撤销费 R − 退款手续费 R − 清算成本 R − API 收费 R − 死号亏损 R；未分摊开卡费、充值手续费">
+ <div v-if="showProfit" class="reversal-profit" title="账号结余＝消费收益 R − 撤销费 R − 退款手续费 R − 清算成本 R − 实际使用消耗 R − API 收费 R − 死号亏损 R；未分摊开卡费、充值手续费">
   <span>账号结余</span><div><strong :class="{'negative':result.profit?.startsWith('-')}">{{result.profit!==null&&result.estimated?'≈ ':''}}{{result.profit??'—'}} R</strong><small>未分摊开卡费、充值手续费</small><small v-if="result.profit===null">{{consumptionMissing||consumption===null?'消费未查询完整':'费用待核实'}}</small></div>
  </div>
 </template>

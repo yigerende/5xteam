@@ -1,25 +1,20 @@
 <script setup>
+import { accountCaseCosts } from '../ejh-account-profit'
 import ProOAICaseFlow from './ProOAICaseFlow.vue'
-import { paymentOnlySummary, paymentMoney } from '../payment-only'
+import { paymentMoney } from '../payment-only'
 import { computed } from 'vue'
 import { accountAmounts } from '../ejh-account-amounts'
 import { accountConsumptionText, accountConsumptionForProfit } from '../ejh-consumption'
 import { formatTime } from '../utils'
 import EJHCaseState from './EJHCaseState.vue'
-import { casePaymentTrades, summarizeClearingCosts } from '../ejh-clearing'
 import EJHClearingCost from './EJHClearingCost.vue'
 import EJHReversalFee from './EJHReversalFee.vue'
 
 const props = defineProps({ row: { type: Object, required: true }, cards: { type: Array, default: () => [] }, operations: { type: Array, default: () => [] }, trades: { type: Array, default: () => [] }, feePercent: { type: Number, default: 6 } })
 defineEmits(['updated'])
 const amounts = computed(() => accountAmounts(props.row,props.trades))
-const clearing = computed(() => {
- const raw=summarizeClearingCosts(casePaymentTrades(props.row,props.trades),props.cards,props.operations,[props.row])
- if(!props.row.payment_only)return raw
- const id=props.row.ejh_card_id||props.row.card_id
- const summary=paymentOnlySummary({payment_policies:[{card_id:id,mode:'payment_only'}],cards:props.cards,cases:[props.row],operations:props.operations,trades:casePaymentTrades(props.row,props.trades)},'ejh')
- return {...raw,usd:{...raw.usd,amount:raw.usd.amount===null?null:paymentMoney(Math.round(Number(raw.usd.amount)*100)-summary.costExcluded)},missing:raw.missing+summary.missing}
-})
+const costs = computed(() => accountCaseCosts(props.row,props.cards,props.operations,props.trades))
+const clearing = computed(() => costs.value.clearing)
 </script>
 
 <template>
@@ -28,11 +23,11 @@ const clearing = computed(() => {
   <dl class="return-amounts">
    <div><dt>付款<span v-if="amounts.authorization">（授权）</span></dt><dd>{{amounts.paid===null?'待识别':amounts.paid+' '+amounts.currency}}</dd></div>
    <div><dt>回款</dt><dd v-for="r in amounts.returned" :key="r.currency">{{r.amount}} {{r.currency}}</dd><dd v-if="!amounts.returned.length">{{amounts.invalid||amounts.pending?'待核实':'0.00'+(amounts.currency?' '+amounts.currency:'')}}</dd></div>
-   <div><dt>差额</dt><dd>{{amounts.difference===null?'—':amounts.difference+' '+amounts.currency}}</dd></div>
+   <div><dt>差额</dt><dd>{{row.state!=='returned'||!amounts.returned.length?'回款后计算':amounts.difference===null?'待核实':amounts.difference+' '+amounts.currency}}</dd></div>
    <div class="consumption-total" title="Pro 管理中的用户消耗统计，按账号显示"><dt>消费收益</dt><dd>{{accountConsumptionText(row)}}</dd></div>
   </dl>
   <details class="fee-details"><summary>费用与回款明细</summary>
-  <p v-if="['opened','waiting'].includes(row.state)" class="return-note">尚待回款：{{amounts.remaining??'待核实'}} {{amounts.currency}}（已扣清算）</p><EJHClearingCost :summary="clearing"/><EJHReversalFee :merchant-fee-u-s-d="row.merchant_fee_usd||'0.00'" :clearing="clearing" show-profit :consumption="accountConsumptionForProfit(row)" :records="row.returns||[]" :fee-percent="feePercent" :cards="cards" :operations="operations" confirmed-only/>
+  <p v-if="['opened','waiting'].includes(row.state)" class="return-note">尚待回款：{{amounts.remaining??'待核实'}} {{amounts.currency}}（已扣清算）</p><EJHClearingCost :summary="clearing"/><EJHReversalFee :merchant-fee-u-s-d="row.merchant_fee_usd||'0.00'" :clearing="clearing" :usage="costs.usage" :dead-fee-u-s-d="costs.dead.missing?null:paymentMoney(costs.dead.amount)" show-profit :consumption="accountConsumptionForProfit(row)" :records="row.returns||[]" :fee-percent="feePercent" :cards="cards" :operations="operations" confirmed-only/>
   <p v-if="amounts.pending||amounts.invalid" class="return-note">{{amounts.pending?amounts.pending+' 笔回款待核实，未计入金额':'回款金额待核实'}}</p>
   <p v-else-if="amounts.paid!==null&&amounts.reason" class="return-note">{{amounts.reason}}</p>
   <p v-if="row.state_override?.state==='returned'&&!amounts.returned.length" class="return-note">人工标记已回款，尚无已确认金额</p>
