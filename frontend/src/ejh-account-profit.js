@@ -2,7 +2,7 @@ import { summarizeUsageCosts } from './ejh-usage-cost.js'
 import { ejhDeadLoss } from './dead-account-loss.js'
 import { casePaymentTrades, summarizeClearingCosts } from './ejh-clearing.js'
 import { paymentOnlySummary, paymentMoney } from './payment-only.js'
-import { balanceProfit } from './ejh-profit.js'
+import { balanceProfit, usdToR } from './ejh-profit.js'
 import { summarizeReversalFees, reversalProfit } from './ejh-reversal-fees.js'
 import { summarizeRefundFees } from './ejh-refund-cost.js'
 import { accountConsumption, accountConsumptionForProfit, consumptionNotPushed } from './ejh-consumption.js'
@@ -31,8 +31,18 @@ export function accountProfit({fee,refund,clearing=null,usage=null,deadFeeUSD='0
 export function accountEarnings(row, cards=[], operations=[], trades=[], feePercent=6) {
  const {dead,clearing,usage}=accountCaseCosts(row,cards,operations,trades)
  const consumption=accountConsumptionForProfit(row)
- const result=accountProfit({fee:summarizeReversalFees(row.returns||[],feePercent,true,cards,operations),refund:summarizeRefundFees(row.returns||[],feePercent,true,cards,operations),clearing,usage,deadFeeUSD:dead.missing?null:paymentMoney(dead.amount),merchantFeeUSD:row.merchant_fee_usd||'0.00',consumption})
- return {consumptionR:accountConsumption(row)?.toFixed(4)??null,consumptionNotPushed:consumptionNotPushed(row),profitR:result.profit,estimated:!!result.estimated,reason:result.profit===null?(consumption===null?'消费未查询完整':'费用待核实'):''}
+ const fee=summarizeReversalFees(row.returns||[],feePercent,true,cards,operations),refund=summarizeRefundFees(row.returns||[],feePercent,true,cards,operations)
+ const result=accountProfit({fee,refund,clearing,usage,deadFeeUSD:dead.missing?null:paymentMoney(dead.amount),merchantFeeUSD:row.merchant_fee_usd||'0.00',consumption})
+ const returnFees=[['reversal',fee],['refund',refund]].filter(([,value])=>value.count||value.missing||value.pending||value.usd.missing).map(([kind,value])=>({kind,...accountCostDetail(value,kind==='reversal'&&value.count>0)}))
+ const usageDetail=accountCostDetail(usage)
+ if(usage.waiting){usageDetail.amountR=null;usageDetail.reason='未回款'}
+ return {consumptionR:accountConsumption(row)?.toFixed(4)??null,consumptionNotPushed:consumptionNotPushed(row),profitR:result.profit,estimated:!!result.estimated,reason:result.profit===null?(consumption===null?'消费未查询完整':'费用待核实'):'',returnFees,usage:usageDetail}
+}
+
+function accountCostDetail(value, estimated=false) {
+ const incomplete=!!(value.missing||value.pending||value.usd.missing)
+ const amountR=incomplete?null:usdToR(value.usd.amount)
+ return {amountR,estimated:!!(estimated||value.estimated||value.usd.estimated),reason:amountR===null?'待核实':''}
 }
 
 // Preserve original ordering (including duplicate evidence) while indexing once.

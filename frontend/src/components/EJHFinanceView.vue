@@ -110,8 +110,18 @@ onBeforeUnmount(()=>{disposed=true;generation++;clearTimeout(timer);clearTimeout
    <section v-if="openedExpanded" id="ejh-opened-accounts" class="finance-panel" aria-label="本期开通账号明细" :aria-busy="accountsBusy">
     <div class="panel-heading"><h2>本期开通账号明细 <small>{{report.openedAccounts}} 个</small></h2><small>{{report.range.label}} · 北京时间</small></div>
     <p v-if="accountsError" class="finance-error">{{accountsError}} <button @click="loadDetails('accounts')">重试</button></p><div class="detail-filters"><input v-model="openedQuery" type="search" aria-label="搜索开通账号、套餐或卡尾号" placeholder="搜索账号、套餐或卡尾号"/></div>
-    <p class="opened-earnings-note">消费收益与结余为账号当前累计值，与账号详情一致；日期仅筛选开通账号。结余未分摊开卡费。</p>
-    <div class="finance-table"><table><thead><tr><th>账号</th><th>套餐</th><th>开通时间</th><th>当前状态</th><th>卡尾号</th><th>消费收益 R</th><th>账号结余 R</th></tr></thead><tbody><tr v-for="row in openedVisible" :key="row.email"><td>{{row.email}}<small v-if="row.deleted">账号已删除，保留开通记录</small></td><td>{{proPlanName(row.plan)||'—'}}</td><td>{{openingTime(row.opened_at)}}</td><td>{{returnStates[row.state]||'状态未知'}}</td><td>{{row.last4?'尾号 '+row.last4:'—'}}</td><td>{{row.earnings.consumptionR??'—'}}<small v-if="row.earnings.consumptionR===null">{{row.earnings.consumptionNotPushed?'未推送，无消费数据':'未查询'}}</small></td><td><span class="profit-value" :class="{negative:row.earnings.profitR?.startsWith('-')}">{{row.earnings.profitR!==null&&row.earnings.estimated?'≈ ':''}}{{row.earnings.profitR??'—'}}</span><small v-if="row.earnings.reason">{{row.earnings.reason}}</small></td></tr><tr v-if="!openedVisible.length"><td colspan="7" class="empty">{{accountsBusy?'正在读取账号明细…':accountsError|| (openedQuery?'没有匹配的账号':'本期没有开通账号')}}</td></tr></tbody></table></div>
+    <p class="opened-earnings-note">消费收益、费用与结余均为账号当前累计值，与账号详情一致；日期仅筛选开通账号。结余未分摊开卡费。</p>
+    <div class="finance-table"><table>
+     <thead><tr><th>账号</th><th>套餐</th><th>开通时间</th><th>当前状态</th><th>卡尾号</th><th>消费收益 R</th><th>撤销／退款费 R</th><th>使用消耗 R</th><th>账号结余 R</th></tr></thead>
+     <tbody><tr v-for="row in openedVisible" :key="row.email">
+      <td>{{row.email}}<small v-if="row.deleted">账号已删除，保留开通记录</small></td>
+      <td>{{proPlanName(row.plan)||'—'}}</td><td>{{openingTime(row.opened_at)}}</td><td>{{returnStates[row.state]||'状态未知'}}</td><td>{{row.last4?'尾号 '+row.last4:'—'}}</td>
+      <td>{{row.earnings.consumptionR??'—'}}<small v-if="row.earnings.consumptionR===null">{{row.earnings.consumptionNotPushed?'未推送，无消费数据':'未查询'}}</small></td>
+      <td><template v-if="row.earnings.returnFees"><template v-for="fee in row.earnings.returnFees" :key="fee.kind"><span>{{fee.amountR!==null&&fee.estimated?'≈ ':''}}{{fee.amountR??'—'}}</span><small>{{fee.kind==='reversal'?'撤销费':'退款费'}}{{fee.reason?' · '+fee.reason:''}}</small></template><span v-if="!row.earnings.returnFees.length">0.0000</span></template><template v-else>—<small>待刷新</small></template></td>
+      <td>{{row.earnings.usage?.amountR!=null&&row.earnings.usage.estimated?'≈ ':''}}{{row.earnings.usage?.amountR??'—'}}<small v-if="row.earnings.usage?.reason">{{row.earnings.usage.reason}}</small></td>
+      <td><span class="profit-value" :class="{negative:row.earnings.profitR?.startsWith('-')}">{{row.earnings.profitR!==null&&row.earnings.estimated?'≈ ':''}}{{row.earnings.profitR??'—'}}</span><small v-if="row.earnings.reason">{{row.earnings.reason}}</small></td>
+     </tr><tr v-if="!openedVisible.length"><td colspan="9" class="empty">{{accountsBusy?'正在读取账号明细…':accountsError|| (openedQuery?'没有匹配的账号':'本期没有开通账号')}}</td></tr></tbody>
+    </table></div>
     <Pagination :page="openedPage" :page-size="openedPageSize" :total="accountTotal" @update:page="openedPage=$event" @update:page-size="openedPageSize=$event"/>
    </section>
    <div class="finance-heroes">

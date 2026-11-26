@@ -8,7 +8,7 @@ const at='2026-11-19T12:00:00+08:00'
 const row={id:'order',email:'one@example.test',card_id:'card',payment_status:'success',opened_at:at,state:'returned',consumption_total:88.6245,charge:{id:'auth',type:'1',status:'1',card_amount:'765',card_currency:'PHP'},returns:[{id:'return',card_id:'card',confirmed:true,confirmed_amount:'765',confirmed_currency:'PHP',reversal_fee:{percent:6},trade:{tradeNo:'return',tradeType:'2',tradeStatus:'2',cardAmount:'765',cardCurrency:'PHP'}}]}
 const cards=[{id:'card',remote:{orderNo:'opening'}}]
 const operations=[{id:'open',order_no:'opening',method:'open',status:'completed',result:{cardAmount:'1000',cardCurrency:'PHP',billAmount:'100',billCurrency:'USD'}}]
-const expected={consumptionR:'88.6245',consumptionNotPushed:false,profitR:'57.8715',estimated:true,reason:''}
+const expected={consumptionR:'88.6245',consumptionNotPushed:false,profitR:'57.8715',estimated:true,reason:'',returnFees:[{kind:'reversal',amountR:'30.7530',estimated:true,reason:''}],usage:{amountR:'0.0000',estimated:false,reason:''}}
 assert.deepEqual(accountEarnings(row,cards,operations),expected,'screenshot: 88.6245 - 4.59 * 6.7')
 assert.equal(accountEarnings({...row,consumption_total:0},cards,operations).profitR,'-30.7530')
 assert.equal(accountEarnings({...row,consumption_total:null},cards,operations).profitR,null)
@@ -19,6 +19,14 @@ assert.equal(accountEarnings(row,[],[]).reason,'费用待核实')
 assert.equal(accountEarnings(row,cards,operations,[],20).profitR,'57.8715','locked rate wins over current rate')
 assert.equal(accountEarnings({...row,merchant_fee_usd:'1.00'},cards,operations).profitR,'51.1715')
 assert.equal(accountEarnings({...row,returns:row.returns.map(r=>({...r,confirmed:false}))},cards,operations).profitR,null)
+assert.equal(accountEarnings(row,[],[]).returnFees[0].amountR,null,'missing FX must not display a zero fee')
+assert.equal(accountEarnings({...row,returns:row.returns.map(r=>({...r,confirmed:false}))},cards,operations).returnFees[0].reason,'待核实')
+const used={...row,returns:row.returns.map(r=>({...r,confirmed_amount:'755',trade:{...r.trade,cardAmount:'755'}}))}
+assert.equal(accountEarnings(used,cards,operations).usage.amountR,'6.7000','payment 765 minus confirmed return 755, using the original opening rate')
+const refunded={...used,returns:used.returns.map(r=>({...r,trade:{...r.trade,tradeType:'5'}}))}
+assert.equal(accountEarnings(refunded,cards,operations).returnFees[0].kind,'refund')
+assert.equal(accountEarnings(refunded,cards,operations).returnFees[0].amountR,'30.3510','refund fee shares the account balance calculation')
+assert.deepEqual(accountEarnings({...row,state:'waiting',returns:[]},cards,operations).usage,{amountR:null,estimated:false,reason:'未回款'})
 
 const trade=(id,type,amount)=>({id,card_id:'card',trade:{tradeNo:id,authCode:'auth',tradeType:type,tradeStatus:'2',cardAmount:amount,cardCurrency:'USD',billAmount:amount,billCurrency:'USD'}})
 const charged={...row,returns:[],consumption_total:100,charge:{id:'charge',trade_no:'charge',type:'1',status:'2',card_amount:'10',card_currency:'USD'}}
