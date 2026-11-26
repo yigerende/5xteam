@@ -91,6 +91,8 @@ func TestProRestockWindowFullFlowAndPaidRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// Keep notifications for assertions only after the delivery worker exits.
+			s.stopNotifications()
 			s.notifications.queue = make(chan notificationEvent, 30)
 			s.proAutoHooks = &proAutomationHooks{Session: func(ctx context.Context, current string, rpc func(string, map[string]any) (any, error)) error {
 				if current != email {
