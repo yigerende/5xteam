@@ -32,7 +32,7 @@ const today=computed(()=>props.data._overview?.today || dailyFinanceCost(props.d
 
   </div>
   <div class="finance-cash"><span>退款待销卡结算 <b>{{display(totals.refundSettlement.amount??'待核实')}}</b> USD <small>已有退款流水，销卡转主余额不重复计收益</small></span><span>实际到账 <b>{{display(totals.netR??'—')}} R</b> <small>（{{display(totals.net??'—')}} USD）</small></span><span :title="totals.lossReasons.join('；')">实际损耗（资金核对）<b>{{display(totals.lossR??'—')}} R</b> <small>（{{display(totals.loss??'—')}} USD）</small></span><small>1 USD = 6.7 R · 开卡 USDT 按 1:1 USD 记账</small><small v-if="!masked&&(totals.lossReasons.length)" class="warning">{{display(totals.lossReasons.join('；'))}}</small><small v-if="!masked&&(totals.stale)" class="warning">{{display(totals.stale)}} 张卡使用上次余额</small></div>
-  <details v-if="!masked&&(totals.gap!==null)" class="finance-reconcile"><summary>成本之外的资金差额：{{display(totals.gap)}} USD（待核对）</summary><p>差额＝实际损耗 − 总成本 − 清算退款手续费 + 外部 API 收费。实际使用消耗已计入总成本；销卡后延迟清算和汇率估算可能暂时形成差异，本项不再次扣减利润。</p></details>
+  <details v-if="!masked&&(totals.gap!==null)" class="finance-reconcile"><summary>成本之外的资金差额：{{display(totals.gap)}} USD</summary><p>差额＝实际损耗 − 总成本 − 清算退款手续费 + 外部 API 收费 + 平账金额。原始差额 {{totals.rawGap??'—'}} USD，累计平账 {{totals.adjustment??'0.00'}} USD。实际使用消耗已计入总成本；销卡后延迟清算和汇率估算可能暂时形成差异，本项不再次扣减利润。</p></details>
   </details>
  </div>
  <Teleport to="body"><div v-if="consumptionDetail&&!masked" class="consumption-backdrop"><EJHConsumptionDetails :data="data" :kind="consumptionDetail" @close="consumptionDetail=''" @updated="emit('updated')"/></div></Teleport>

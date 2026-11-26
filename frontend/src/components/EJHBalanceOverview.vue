@@ -1,4 +1,5 @@
 <script setup>
+import EJHAdjustmentAction from './EJHAdjustmentAction.vue'
 import PaymentOnlySummary from './PaymentOnlySummary.vue'
 import { computed, nextTick, ref } from 'vue'
 import { RefreshCw, Wallet, Pencil } from 'lucide-vue-next'
@@ -14,7 +15,7 @@ import EJHExternalTransfer from './EJHExternalTransfer.vue'
 
 const props = defineProps({ data: { type: Object, required: true }, busy: Boolean, ready: Boolean, enabled: Boolean, progress: { type: Object, default: null }, failures: { type: Array, default: () => [] } })
 const display = value => props.enabled ? value : '---'
-const emit = defineEmits(['refresh', 'refresh-reconciliation', 'retry-failed', 'ledger-updated', 'refund-fee-saved', 'consumption-updated'])
+const emit = defineEmits(['refresh', 'refresh-reconciliation', 'retry-failed', 'ledger-updated', 'refund-fee-saved', 'consumption-updated', 'adjustment-saved', 'show-adjustments'])
 const balances = computed(() => props.data._overview?.balances || summarizeCardBalances(props.data.cards))
 const usd = computed(() => props.data._overview?.usd || summarizeCardBalancesUSD(props.data.cards, props.data.operations))
 const inFlight = computed(() => props.data._overview?.inFlight || summarizeInFlightPayments(props.data.cases, props.data.cards, props.data.operations, props.data.trades))
@@ -43,7 +44,7 @@ async function saveLedger() {
   <p v-if="!enabled" class="overview-disabled">卡台已关闭，可手动查询和操作。</p>
   <p v-if="enabled&&data.balance_sync?.error" class="overview-disabled danger-text">自动更新余额未全部成功：{{data.balance_sync.error}}。已成功项目已保存，其余保留上次余额，下轮自动重试。</p>
   <EJHReconciliationBar :data="data" :masked="!enabled"/>
-  <div class="reconciliation-action"><button class="btn ghost" type="button" :disabled="busy||saving||!ready" @click="emit('refresh-reconciliation')">刷新核对余额</button><small>账户及所有未完成销卡的卡片余额，含正常待定和销卡处理中</small></div>
+  <div class="reconciliation-action"><button class="btn ghost" type="button" :disabled="busy||saving||!ready" @click="emit('refresh-reconciliation')">刷新核对余额</button><EJHAdjustmentAction :disabled="busy||saving||!ready" @saved="emit('adjustment-saved',$event)"/><small>账户及所有未完成销卡的卡片余额，含正常待定和销卡处理中</small></div>
   <div class="overview-grid">
    <div class="overview-ledger">
     <div class="overview-label"><span>充值总账</span><button v-if="!editing" type="button" class="ledger-edit" :disabled="busy||saving||!ready" aria-label="修改充值总账 USD" @click="editLedger"><Pencil :size="12"/>{{ledger.amount===''?'填写':'修改'}}</button></div>
@@ -55,6 +56,7 @@ async function saveLedger() {
     </form>
     <template v-else><div class="overview-values"><div><strong>{{display(ledger.amount===''?'—':ledger.amount)}}</strong><span>USD</span></div></div><small>手动记录<span v-if="ledger.updated_at"> · {{display(formatTime(ledger.updated_at))}} 更新</span></small></template>
     <EJHExternalTransfer :ledger="ledger" :disabled="busy||saving||editing||!ready" :masked="!enabled" @saved="emit('ledger-updated',$event)"/>
+    <div class="overview-usd"><button type="button" class="text-link" @click="emit('show-adjustments')">平账金额</button><strong>{{display(data.reconciliation_adjustments?.amount||'0.00')}} <em>USD</em></strong></div><small>累计手动平账 · {{display(data.reconciliation_adjustments?.count||0)}} 条 · 仅调整核对差额</small>
     <PaymentOnlySummary issuer="ejh" :data="data" :masked="!enabled"/>
    </div>
    <div>

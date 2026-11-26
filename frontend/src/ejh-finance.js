@@ -99,12 +99,14 @@ export function financeOverview(data={}) {
   // Cash reconciliation still accounts for disclosed refund fees; excluding
   // them from operating profit must not manufacture an unexplained cash gap.
   // Recharge fees are already deducted in net receipts, so do not deduct again.
-  const gap=loss===null||earnings.costUSD===null||refundFees.missing?null:money(loss-(cents(earnings.costUSD)+(cents(refundFees.amount)||0n)-(cents(merchantFee)||0n)))
+  const rawGap=loss===null||earnings.costUSD===null||refundFees.missing?null:money(loss-(cents(earnings.costUSD)+(cents(refundFees.amount)||0n)-(cents(merchantFee)||0n)))
+  const adjustment=cents(data.reconciliation_adjustments?.amount??'0.00')
+  const gap=rawGap===null||adjustment===null?null:money(cents(rawGap)+adjustment)
   const closurePending='0.00' // Returned shortfalls are usage expenses, not expected refunds.
   const unexplained=gap===null||closurePending===null?null:money(cents(gap)-cents(closurePending))
   const assets=reasons.length?null:money(account+(cents(cardUSD.amount)||0n)+(cents(inFlight.paymentUSD.amount)||0n)+(cents(refundSettlement.amount)||0n))
   return {usage,refundSettlement,refundPrincipalUSD,dead,paymentOnly,reversal,earnings,merchantFee,openingCount:opening.length,openingFee,consumption,netR:usdToR(money(net)),lossR:usdToR(money(loss)),
-    reconciliation,gap,clearing,rawClearingUSD,platformClearingUSD,externalTransfer:money(externalTransfer),refundFees,closurePending,unexplained,assets,
+    reconciliation,rawGap,adjustment:money(adjustment),gap,clearing,rawClearingUSD,platformClearingUSD,externalTransfer:money(externalTransfer),refundFees,closurePending,unexplained,assets,
     gross:money(gross),depositFee:money(deposit),net:money(net),loss:money(loss),lossReasons:[...new Set(reasons)],
     estimated:!!(cardUSD.estimated||inFlight.paymentUSD.estimated),stale:cards.filter(c=>c.remote?.status!=='2'&&c.balance_error).length,
     accountUSD:money(account),cardUSD,inFlight}

@@ -29,6 +29,7 @@ const blocks = computed(() => [
   { label: '外部 API 收费', amount: value.value.merchantFee, note: '未从卡台扣款，剔除', sign: '+' },
   { label: '只付款支出', amount: (value.value.paymentOnly.amount/100).toFixed(2), note: '本金单列', sign: '−' },
   ...(value.value.externalTransfer !== '0.00' ? [{ label: '平台外转出', amount: value.value.externalTransfer, note: '外部消费，不计平台成本', sign: '−' }] : []),
+  { label: '平账金额', amount: value.value.adjustment, note: '累计手动平账；原始差额 '+(value.value.rawGap??'待核实')+' USD', sign: '+' },
   { label: '成本外资金差额', amount: value.value.gap, note: reconciliationDifferenceNote(value.value.gap), sign: '=' },
 ])
 const assets = computed(() => [

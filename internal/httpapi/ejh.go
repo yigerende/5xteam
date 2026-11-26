@@ -60,6 +60,9 @@ func (s *Server) ejhConfig() (ejh.Settings, string, error) {
 	return c, k, nil
 }
 func (s *Server) ejhRoutes(m *http.ServeMux) {
+	m.HandleFunc("GET /api/ejh/adjustments", s.ejhAdjustments)
+	m.HandleFunc("GET /api/ejh/adjustments/preview", s.ejhAdjustmentPreview)
+	m.HandleFunc("POST /api/ejh/adjustments", s.saveEJHAdjustment)
 	m.HandleFunc("PUT /api/ejh/cards/{id}/payment-policy", s.saveCardPaymentPolicy("ejh"))
 	m.HandleFunc("PUT /api/ejh/cards/{id}/category", s.ejhCardCategory)
 	m.HandleFunc("PUT /api/ejh/refund-fees/{id}", s.saveEJHRefundFee)
@@ -377,7 +380,11 @@ func (s *Server) readEJHDashboard(includeAudit bool) (map[string]any, error) {
 	}
 	var autoCancel ejhAutoCancelState
 	_ = s.store.EJHGet("auto_cancel", "latest", &autoCancel)
-	return map[string]any{"auto_cancel": autoCancel, "payment_policies": policies, "merchant_fees": merchantFees, "cards": rows, "operations": ops, "trades": trades, "cases": cases, "sync": syncState, "balance_sync": balanceSync, "balance": balance, "recharge_ledger": ledger, "recharge_history": recharges, "external_transfer_history": transfers, "refund_fees": refundFees, "reversal_fee_percent": settings.ReversalFeePercent, "page_refresh_seconds": settings.PageRefreshSeconds, "consumption_history": usage, "audit": audit, "server_time": time.Now()}, nil
+	adjustments, err := s.store.EJHAdjustmentSummary()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"reconciliation_adjustments": adjustments, "auto_cancel": autoCancel, "payment_policies": policies, "merchant_fees": merchantFees, "cards": rows, "operations": ops, "trades": trades, "cases": cases, "sync": syncState, "balance_sync": balanceSync, "balance": balance, "recharge_ledger": ledger, "recharge_history": recharges, "external_transfer_history": transfers, "refund_fees": refundFees, "reversal_fee_percent": settings.ReversalFeePercent, "page_refresh_seconds": settings.PageRefreshSeconds, "consumption_history": usage, "audit": audit, "server_time": time.Now()}, nil
 }
 func maskEJH(n string) string {
 	if len(n) > 4 {
