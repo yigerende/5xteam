@@ -127,7 +127,7 @@ func (s *Store) SaveCardPaymentPolicy(in CardPaymentPolicy, moveExternal string)
 			return in, fmt.Errorf("转入金额超过现有平台外转出累计")
 		}
 		after := new(big.Rat).Sub(amount, moved).FloatString(2)
-		event := EJHExternalTransferEvent{EJHRechargeEvent: EJHRechargeEvent{ID: EJHID("payment-only-transfer", key+now.String()), At: now, Before: before, After: after, Delta: new(big.Rat).Neg(moved).FloatString(2)}, Note: "重新分类为只付款支出：" + in.CardID}
+		event := EJHExternalTransferEvent{EJHRechargeEvent: EJHRechargeEvent{ID: EJHID("payment-only-transfer", key+now.String()), At: now, Before: before, After: after, Delta: new(big.Rat).Neg(moved).FloatString(2)}, Note: "重新分类为只付款支出：" + in.CardID, Kind: "payment_only_reclassification", CardID: in.CardID}
 		ledger.ExternalTransferAmount, ledger.ExternalTransferUpdatedAt = after, &now
 		if err = s.ejhPutTx(tx, "recharge_ledger", "manual-usd", ledger); err != nil {
 			return in, err

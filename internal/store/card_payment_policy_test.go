@@ -94,6 +94,19 @@ func TestCardPaymentPolicyPersistenceAndTransfer(t *testing.T) {
 	if err != nil || got.Revision != 1 {
 		t.Fatal(got, err)
 	}
+	transfers, err := EJHRecords[EJHExternalTransferEvent](s, "finance_external_transfer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range transfers {
+		if event.Kind == "payment_only_reclassification" {
+			found = event.CardID == "c" && event.Delta == "-140.00" && event.Before == "200.00" && event.After == "60.00"
+		}
+	}
+	if !found {
+		t.Fatal("reclassification evidence missing", transfers)
+	}
 	ledger, _ := s.EJHRechargeLedger()
 	if ledger.ExternalTransferAmount != "60.00" || ledger.Amount != "1000.00" {
 		t.Fatal(ledger)

@@ -83,7 +83,9 @@ func (s *Store) SaveEJHRechargeLedger(amount string) (EJHRechargeLedger, error) 
 
 type EJHExternalTransferEvent struct {
 	EJHRechargeEvent
-	Note string `json:"note,omitempty"`
+	Note   string `json:"note,omitempty"`
+	Kind   string `json:"kind,omitempty"`
+	CardID string `json:"card_id,omitempty"`
 }
 
 // Record an accounting exclusion only. No money is moved at the issuer, and

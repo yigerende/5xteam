@@ -158,23 +158,7 @@ export function financeEvents(data,history={}) {
       events.push({id:'payment-only:'+row.card_id+':'+(t.tradeNo||e.record.id),kind:'clearing',at:financeTime(t.createdAt)||financeTime(t.tradeTime),card:row.last4,reference:t.tradeNo,cardID:row.card_id,refundExclusion:!!e.refund,usd:money(-n),amount:money(-n),currency:'USD',note:'只付款本金单列，冲减业务清算成本'})
     }else if(row.costExcluded)events.push({id:'payment-only:'+row.card_id,kind:'clearing',at:null,card:row.last4,usd:paymentMoney(-row.costExcluded),amount:paymentMoney(-row.costExcluded),currency:'USD',paymentOnlyUndated:true,note:'只付款本金单列 · 历史日期待核实'})
   }
-  // A separate signed exclusion preserves issuer trades. The first cumulative
-  // amount has no known spend date; later edits are dated accounting changes.
-  let recordedTransfer=0n
-  for(const event of new Map((history.external_transfers||data.external_transfer_history||[]).map(e=>[e.id,e])).values()){
-    const delta=cents(event.delta)
-    if(delta===null){
-      events.push({id:'external:'+event.id,kind:'clearing',externalTransfer:true,at:financeTime(event.at),reference:event.id,amount:null,usd:null,currency:'USD',incomplete:true,note:'平台外转出调整金额待核实'})
-      continue
-    }
-    recordedTransfer+=delta
-    if(delta===0n)continue
-    events.push({id:'external:'+event.id,kind:'clearing',externalTransfer:true,recordedAt:financeTime(event.at),at:event.baseline?null:financeTime(event.at),reference:event.id,amount:money(-delta),usd:money(-delta),currency:'USD',note:'平台外转出 · '+(event.baseline?'累计历史扣减，消费日期未记录':'按登记时间调整清算成本')+(event.note?' · '+event.note:'')})
-  }
-  const transfer=cents(data.recharge_ledger?.external_transfer_amount||'0')
-  if(transfer!==null&&transfer!==recordedTransfer){
-    events.push({id:'external-transfer-baseline',kind:'clearing',externalTransfer:true,recordedAt:financeTime(data.recharge_ledger?.external_transfer_updated_at),at:null,amount:money(recordedTransfer-transfer),usd:money(recordedTransfer-transfer),currency:'USD',note:'平台外转出 · 未记录日期的累计扣减'+(data.recharge_ledger?.external_transfer_note?' · '+data.recharge_ledger.external_transfer_note:'')})
-  }
+  events.push(...externalTransferCostEvents(data,history))
   for(const record of data.trades||[]){
     if(record.trade?.tradeType!=='2')continue
     const key=(record.card_id||record.trade.orderNo||'')+':'+(record.trade.tradeNo||record.id)
@@ -202,6 +186,51 @@ export function financeEvents(data,history={}) {
   const recordedR=usageDays.reduce((n,r)=>n+(Number.isFinite(r.amount)?r.amount:0),0)
   if(consumption.total!==null&&consumption.total>recordedR+0.0000001)events.push({id:'legacy-consumption',kind:'consumption',at:null,amount:consumption.total-recordedR,currency:'R',note:'首次采集的历史累计消费，无法还原每天发生额'})
   return attributeRefundCosts(events).sort((a,b)=>(b.at??-Infinity)-(a.at??-Infinity)||String(a.id).localeCompare(String(b.id)))
+}
+// A transfer to the payment-only bucket is a reclassification, not a new
+// expense. Reverse the old exclusion on its original accounting date (oldest
+// recorded funding first). Undated historical exclusions remain undated.
+// Ordinary edits of the external total keep their existing dated semantics.
+function externalTransferCostEvents(data,history) {
+  const records=[...new Map((history.external_transfers||data.external_transfer_history||[]).map(e=>[e.id,e])).values()]
+    .sort((a,b)=>(financeTime(a.at)??Infinity)-(financeTime(b.at)??Infinity)||String(a.id).localeCompare(String(b.id)))
+  const events=[],sources=[],policies=new Set((data.payment_policies||[]).map(p=>p.card_id))
+  let recorded=0n,head=0
+  for(const event of records){
+    const delta=cents(event.delta),recordedAt=financeTime(event.at),at=event.baseline?null:recordedAt
+    const base={id:'external:'+event.id,kind:'clearing',externalTransfer:true,recordedAt,at,reference:event.id,currency:'USD'}
+    if(delta===null){events.push({...base,amount:null,usd:null,incomplete:true,note:'平台外转出调整金额待核实'});continue}
+    recorded+=delta
+    if(delta===0n)continue
+    const legacy=/^重新分类为只付款支出：(ejh-[a-f0-9]{32})$/.exec(event.note||'')
+    const cardID=event.kind==='payment_only_reclassification'?event.card_id:legacy&&policies.has(legacy[1])?legacy[1]:null
+    const reclassified=delta<0n&&!!cardID
+    if(delta>0n)sources.push({remaining:delta,at,recordedAt,id:event.id})
+    if(reclassified){
+      let remaining=-delta,index=0
+      while(remaining>0n&&head<sources.length){
+        const source=sources[head],amount=remaining<source.remaining?remaining:source.remaining
+        if(amount>0n)events.push({...base,id:base.id+':source:'+index++,at:source.at,recordedAt:source.recordedAt,reclassifiedAt:recordedAt,
+          paymentOnlyReclassification:true,cardID,sourceReference:source.id,amount:money(amount),usd:money(amount),
+          note:'只付款分类转移 · 冲回原平台外转出记录（'+(source.at===null?'历史消费日期未记录':beijingDay(source.at))+'），不作为分类当天新成本'})
+        source.remaining-=amount;remaining-=amount
+        if(source.remaining===0n)head++
+      }
+      if(remaining>0n)events.push({...base,id:base.id+':unallocated',at:null,recordedAt:null,reclassifiedAt:recordedAt,
+        paymentOnlyReclassification:true,cardID,amount:money(remaining),usd:money(remaining),
+        note:'只付款分类转移 · 原外转出日期未记录，不作为分类当天新成本'})
+      continue
+    }
+    if(delta<0n){
+      let remaining=-delta
+      while(remaining>0n&&head<sources.length){const source=sources[head],amount=remaining<source.remaining?remaining:source.remaining;source.remaining-=amount;remaining-=amount;if(source.remaining===0n)head++}
+    }
+    events.push({...base,amount:money(-delta),usd:money(-delta),note:'平台外转出 · '+(event.baseline?'累计历史扣减，消费日期未记录':'按登记时间调整清算成本')+(event.note?' · '+event.note:'')})
+  }
+  const transfer=cents(data.recharge_ledger?.external_transfer_amount||'0')
+  if(transfer!==null&&transfer!==recorded)events.push({id:'external-transfer-baseline',kind:'clearing',externalTransfer:true,recordedAt:financeTime(data.recharge_ledger?.external_transfer_updated_at),at:null,
+    amount:money(recorded-transfer),usd:money(recorded-transfer),currency:'USD',note:'平台外转出 · 未记录日期的累计扣减'+(data.recharge_ledger?.external_transfer_note?' · '+data.recharge_ledger.external_transfer_note:'')})
+  return events
 }
 // Refund cash is reported on its receipt date. Its cost reduction belongs to
 // the original clearing, never to the day principal happens to return.
