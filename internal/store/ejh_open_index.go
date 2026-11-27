@@ -106,7 +106,9 @@ func (s *Store) CheckEJHOpenOwner(email, task string) error {
 func (s *Store) EJHRecentOpenOperations(since time.Time) ([]ejh.Operation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT r.sealed FROM ejh_open_index i JOIN ejh_records r ON r.kind='operation' AND r.id=i.id WHERE i.created_at>=?`, formatTime(since))
+	// Keep the date range outermost: SQLite otherwise prefers kind='operation'
+	// and scans every archived encrypted record before applying the date filter.
+	rows, err := s.db.Query(`SELECT r.sealed FROM ejh_open_index i INDEXED BY ejh_open_index_created CROSS JOIN ejh_records r ON r.kind='operation' AND r.id=i.id WHERE i.created_at>=?`, formatTime(since))
 	if err != nil {
 		return nil, err
 	}

@@ -195,4 +195,7 @@ func TestEJHOpenIndexUpgradeAndLargeHistory(t *testing.T) {
 		}
 	}
 	t.Logf("50,000 archived operations: 12 rounds of recent budget + owner query took %s", time.Since(started))
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("recent queries regressed into historical scans")
+	}
 }
