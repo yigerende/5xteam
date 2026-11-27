@@ -8,6 +8,7 @@ import (
 type Operation struct {
 	Resolution    string `json:"resolution,omitempty"`
 	RestockTaskID string `json:"restock_task_id,omitempty"`
+	AccountEmail  string `json:"account_email,omitempty"`
 
 	ErrorCode    string `json:"error_code,omitempty"`
 	Platform     string `json:"platform"`

@@ -134,8 +134,11 @@ func TestRestockSettledRiskFailureReleasesOnlyFinishedWork(t *testing.T) {
 							t.Fatal("failed order counted as supply")
 						}
 					}
-					if (active == 0) != settled {
+					if active != 0 {
 						t.Fatalf("tasks=%+v settled=%v", tasks, settled)
+					}
+					if !settled && (len(tasks) != 1 || !tasks[0].AutoIsolated) {
+						t.Fatal("uncertain order did not isolate durably", tasks)
 					}
 					if settled && (len(tasks) != 1 || !tasks[0].PaymentRiskPending) {
 						t.Fatal("failed workflow lost its durable one-time replacement", tasks)

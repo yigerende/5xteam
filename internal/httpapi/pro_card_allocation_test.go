@@ -366,7 +366,7 @@ func TestEJHAllocationGuardsBeforeIssuance(t *testing.T) {
 			case "maximum":
 				pro.MaxUnmerged = 1
 			case "unknown":
-				if err := s.store.EJHPut("operation", "unknown", ejh.Operation{ID: "unknown", Method: "open", Status: "unknown"}); err != nil {
+				if err := s.store.EJHPut("operation", "unknown", ejh.Operation{ID: "unknown", Method: "open", Status: "unknown", AccountEmail: email}); err != nil {
 					t.Fatal(err)
 				}
 			case "invalid-session":

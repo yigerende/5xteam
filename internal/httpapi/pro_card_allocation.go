@@ -15,6 +15,7 @@ import (
 // A manual start pins its explicit issuer for selection and optional issuance.
 // It never changes the default settings or overrides an automatic restock task.
 type proManualCardProviderKey struct{}
+type proCardAccountKey struct{}
 
 func (s *Server) restockCardSettings(ctx context.Context, cfg model.ProSettings) (model.ProSettings, bool, error) {
 	if fallback, _ := ctx.Value(proBalanceFallbackKey{}).(*model.ProPurchaseRoute); fallback != nil {
@@ -80,6 +81,7 @@ func (s *Server) automaticProCards(cfg model.ProSettings, strictProvider ...bool
 // Serialize selection, optional issuance and reservation across manual, auto
 // and scheduled starts. The database still enforces physical-card occupancy.
 func (s *Server) reserveProStartCard(ctx context.Context, email, selected string, autoOpen, enforceMaximum bool, admissionChecks ...func() error) (gptpay.Card, gptpay.CardSecret, error) {
+	ctx = context.WithValue(ctx, proCardAccountKey{}, email)
 	// Both manual and automatic preparation outrank maintenance. The separate
 	// manual guard below still gives interactive requests first priority.
 	s.proCardPreparing.Add(1)
@@ -149,6 +151,11 @@ func (s *Server) reserveProStartCard(ctx context.Context, email, selected string
 	}
 	if err := ctx.Err(); err != nil {
 		return card, secret, err
+	}
+	if taskProvider == "ejh" {
+		if err := s.store.CheckEJHOpenOwner(email, taskID); err != nil {
+			return card, secret, err
+		}
 	}
 	if enforceMaximum {
 		pro, _, _, err := s.store.ProSettings()

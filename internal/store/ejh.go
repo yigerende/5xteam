@@ -33,6 +33,9 @@ func (s *Store) initializeEJH() error {
 	if err == nil {
 		_, err = s.db.Exec(`CREATE TABLE IF NOT EXISTS ejh_operation_claims(scope TEXT PRIMARY KEY,operation_id TEXT NOT NULL UNIQUE)`)
 	}
+	if err == nil {
+		err = s.initializeEJHOpenIndex()
+	}
 	return err
 }
 func (s *Store) EJHSettings() (ejh.Settings, string, error) {
@@ -129,7 +132,15 @@ func (s *Store) EJHPut(kind, id string, value any) error {
 		}
 		return tx.Commit()
 	}
-	if op, ok := value.(ejh.Operation); kind == "operation" && ok {
+	if kind == "operation" {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		var op ejh.Operation
+		if err = json.Unmarshal(raw, &op); err != nil {
+			return err
+		}
 		tx, err := s.db.Begin()
 		if err != nil {
 			return err
@@ -224,7 +235,17 @@ func (s *Store) EJHBeginOperation(op ejh.Operation) error {
 	}
 	scope := "card:" + op.CardID
 	if op.Method == "open" {
+		// Different accounts may proceed while an earlier issuance is uncertain.
+		// The original account/task still cannot issue twice, including after restart.
+		if err = s.checkEJHOpenOwner(tx, op.AccountEmail, op.RestockTaskID); err != nil {
+			return err
+		}
 		scope = "open"
+		if op.AccountEmail != "" {
+			scope += ":account:" + strings.ToLower(op.AccountEmail)
+		} else if op.RestockTaskID != "" {
+			scope += ":task:" + op.RestockTaskID
+		}
 	}
 	if _, err = tx.Exec(`INSERT INTO ejh_operation_claims VALUES(?,?)`, scope, op.ID); err != nil {
 		return fmt.Errorf("存在并发或待核实资金操作，未再次提交: %w", err)
@@ -968,6 +989,12 @@ func (s *Store) ejhPutTx(tx *sql.Tx, kind, id string, value any) error {
 		return e
 	}
 	_, e = tx.Exec(`INSERT INTO ejh_records VALUES(?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET sealed=excluded.sealed,updated_at=excluded.updated_at`, kind, id, sealed, formatTime(time.Now()))
+	if e == nil && kind == "operation" {
+		var op ejh.Operation
+		if e = json.Unmarshal(raw, &op); e == nil {
+			e = saveEJHOpenIndex(tx, id, op)
+		}
+	}
 	if e == nil && kind == "trade" {
 		var t ejh.TradeRecord
 		if e = json.Unmarshal(raw, &t); e == nil {

@@ -244,6 +244,7 @@ type Task struct {
 	NextCardCheckAt     *time.Time              `json:"next_card_check_at,omitempty"`
 	StoppedAt           *time.Time              `json:"stopped_at,omitempty"`
 	StoppedFailure      bool                    `json:"stopped_failure,omitempty"`
+	AutoIsolated        bool                    `json:"auto_isolated,omitempty"`
 	AccountID           int64                   `json:"account_id"`
 	Cost                int64                   `json:"cost"`
 	CreatedAt           time.Time               `json:"created_at"`

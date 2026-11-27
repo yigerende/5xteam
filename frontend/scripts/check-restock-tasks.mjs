@@ -31,6 +31,8 @@ assert.deepEqual(input,original,'presenting history must not mutate task state o
 console.log('Passed: restock task sorting/filtering, execution and verified-success times, historical stages and missing milestones')
 
 assert.equal(restockTaskProgress({status:'cancelled',stopped_at:'2026-10-21T06:00:00Z',submitted_at:'2026-10-21T05:00:00Z'}).status,'已手动停止')
+assert.equal(restockTaskProgress({status:'cancelled',auto_isolated:true,stopped_at:'2026-11-27T06:00:00Z'}).status,'已隔离 · 继续补货')
+assert.equal(restockTaskProgress({status:'cancelled',stopped_failure:true,stopped_at:'2026-11-27T06:00:00Z'}).status,'超时已自动结束')
 
 assert.equal(restockTaskProgress({status:'attention',stage:'queued'}).stage,'准备异常 · 待核验')
 assert.equal(restockTaskProgress({status:'submitting',stage:'queued'}).stage,'准备卡片')

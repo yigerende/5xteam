@@ -81,7 +81,9 @@ func (s *Store) settleUnsubmittedRestockPreparation(expected *restock.Task, next
 	// issued a card on the other platform. Legacy EJH operations lack a task
 	// link, so conservatively retain any possible automatic issuance since
 	// reservation rather than treating an unknown charge as a safe failure.
-	rows, err := tx.Query(`SELECT sealed FROM ejh_records WHERE kind='operation'`)
+	rows, err := tx.Query(`SELECT r.sealed FROM ejh_records r WHERE r.kind='operation' AND r.id IN (
+SELECT id FROM ejh_open_index WHERE task_id=?
+UNION SELECT id FROM ejh_open_index WHERE task_id='' AND (created_at>=? OR created_at=?))`, current.ID, formatTime(current.CreatedAt), formatTime(time.Time{}))
 	if err != nil {
 		return false, err
 	}
@@ -102,7 +104,7 @@ func (s *Store) settleUnsubmittedRestockPreparation(expected *restock.Task, next
 		if op.Method != "open" {
 			continue
 		}
-		matching := op.RestockTaskID == current.ID || (op.RestockTaskID == "" && op.Automatic && (op.CreatedAt.IsZero() || !op.CreatedAt.Before(current.CreatedAt)))
+		matching := op.RestockTaskID == current.ID || (op.RestockTaskID == "" && (op.AccountEmail == "" || op.AccountEmail == current.Email) && op.Automatic && (op.CreatedAt.IsZero() || !op.CreatedAt.Before(current.CreatedAt)))
 		if matching && (op.Status != "failed" || op.ErrorCode == "" || op.CardID != "" || op.OrderNo != "" || op.Result != nil) {
 			unsafe = true
 			break

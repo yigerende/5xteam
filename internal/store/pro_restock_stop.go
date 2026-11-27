@@ -21,6 +21,7 @@ func (s *Store) ProRestockTask(id string) (restock.Task, error) {
 		return task, err
 	}
 	err := json.Unmarshal([]byte(raw), &task)
+	task.ObservedPayload = raw
 	return task, err
 }
 

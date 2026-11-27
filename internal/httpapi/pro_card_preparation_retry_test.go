@@ -62,12 +62,12 @@ func TestProCardBusyRetryResumesOnceAndHonorsStop(t *testing.T) {
 
 func TestProCardPreparationHoldIsNotBusyRetry(t *testing.T) {
 	s, issued, paid, email := allocationFixture(t)
-	op := ejh.Operation{ID: "unconfirmed-opening", Method: "open", Status: "unknown", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	op := ejh.Operation{ID: "unconfirmed-opening", Method: "open", Status: "unknown", AccountEmail: email, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	if err := s.store.EJHPut("operation", op.ID, op); err != nil {
 		t.Fatal(err)
 	}
 	r := payCall(t, s.startProAutomation, "email", email, map[string]any{"plan_code": "pro20"})
-	if r.Code != 409 || r.Header().Get("X-Pro-Card-Wait") != "preparation" || r.Header().Get("X-Pro-Card-Retry") != "" || issued.Load() != 0 || paid.Load() != 0 {
+	if r.Code != 409 || r.Header().Get("X-Pro-Card-Retry") != "" || issued.Load() != 0 || paid.Load() != 0 {
 		t.Fatal("financial hold became an automatic retry", r.Body.String())
 	}
 }

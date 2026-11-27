@@ -13,7 +13,7 @@ export function restockTaskProgress(task) {
  const submitted=taskTime(task.submitted_at),success=replaced?taskTime(task.fulfilled_at):task.status==='ready'?taskTime(task.ready_at):null
  const pushed=taskTime(times['push:completed'])
  const waitingPreparation=task.status==='reserved'&&task.stage==='card'&&taskTime(task.next_card_check_at)
- const status=replaced?'换号补货成功':task.stopped_at?'已手动停止':task.status==='ready'?(success?'补货成功':'已交付'):waitingPreparation?'等待卡片准备':statuses[task.status]||task.status
+ const status=replaced?'换号补货成功':task.auto_isolated?'已隔离 · 继续补货':task.stopped_at?(task.stopped_failure?'超时已自动结束':'已手动停止'):task.status==='ready'?(success?'补货成功':'已交付'):waitingPreparation?'等待卡片准备':statuses[task.status]||task.status
  const stage=replaced?'替换账号已推送并核验':task.stage==='queued'&&task.status!=='reserved'?(task.stopped_at?'已停止':task.status==='failed'?'准备失败':task.status==='submitting'?'准备卡片':'准备异常 · 待核验'):task.status==='ready'?(success?'推送后核验完成':'已进入后续流程'):stages[task.stage]||task.stage||'尚未执行'
  const message=replaced?`由 ${task.fulfilled_by_email} 完成补货，不再占用在途；原订单核实记录及卡片占用保留，见开通订单。`:task.status==='ready'?(success?'已完成推送并核验；此处记录补货结果，当前可用状态见监控。':task.message||'已交付，不再占用补货在途；历史核验时间未记录。'):task.message||'持续跟踪'
  return {active,started,submitted,success,pushed,status,stage,message,eta:active?taskTime(task.eta):null,

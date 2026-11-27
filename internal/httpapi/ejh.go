@@ -414,17 +414,9 @@ func (s *Server) ejhOpenLocked(ctx context.Context, id string, input ejh.OpenInp
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return prior, fmt.Errorf("无法核实既有操作，未提交开卡: %w", err)
 	}
-	ops, e := store.EJHRecords[ejh.Operation](s.store, "operation")
-	if e != nil {
-		return prior, e
-	}
-	for _, o := range ops {
-		if o.Method == "open" && (o.Status == "submitting" || o.Status == "unknown" || o.Status == "import_pending") {
-			return prior, fmt.Errorf("存在待核实开卡操作，请先核对操作记录，禁止重复扣款")
-		}
-	}
 	op := ejh.Operation{ID: id, Method: "open", Status: "submitting", Amount: input.CardAmount, Currency: input.CardCurrency, Automatic: automatic, CreatedAt: time.Now(), UpdatedAt: time.Now(), Request: input}
 	op.RestockTaskID, _ = ctx.Value(proRestockContextKey{}).(string)
+	op.AccountEmail, _ = ctx.Value(proCardAccountKey{}).(string)
 	if len(templateIDs) > 0 {
 		op.TemplateID = templateIDs[0]
 		for _, t := range c.Templates {
@@ -924,13 +916,15 @@ func (s *Server) ensureEJHCard(ctx context.Context, admissionChecks ...func() er
 	if e = ejh.ValidateOpen(input, time.Now()); e != nil {
 		return gptpay.Card{}, e
 	}
-	ops, e := store.EJHRecords[ejh.Operation](s.store, "operation")
+	zone := time.FixedZone("CST", 8*3600)
+	now := time.Now().In(zone)
+	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, zone)
+	ops, e := s.store.EJHRecentOpenOperations(day.Add(-5 * time.Minute))
 	if e != nil {
 		return gptpay.Card{}, e
 	}
 	count := 0
 	total := new(big.Rat)
-	zone := time.FixedZone("CST", 8*3600)
 	today := time.Now().In(zone).Format("2006-01-02")
 	for _, o := range ops {
 		if o.Method != "open" {
@@ -941,9 +935,6 @@ func (s *Server) ensureEJHCard(ctx context.Context, admissionChecks ...func() er
 		}
 		// Completed issuance history contributes to the daily budget only.
 		// Do not reconcile, release or reopen those cards during allocation.
-		if o.Method == "open" && (o.Status == "submitting" || o.Status == "unknown" || o.Status == "import_pending") {
-			return gptpay.Card{}, cardPreparationWait("存在未核实开卡（%s），先在 EJH 操作记录核对，原任务等待，禁止重复扣款", o.ID)
-		}
 		if o.Automatic && o.CreatedAt.In(zone).Format("2006-01-02") == today && o.Status != "failed" {
 			count++
 			if o.Currency != input.CardCurrency {

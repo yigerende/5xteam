@@ -55,7 +55,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 		s.proAutoMu.Lock()
 		preparing := s.proRestockStartJobs[t.ID] != nil
 		s.proAutoMu.Unlock()
-		if preparationActive || preparing {
+		if preparing {
 			continue
 		}
 		profile, _, err := s.store.MailAccountCredential(t.Email)
@@ -63,7 +63,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Status = "attention"
 			t.Message = "账号无法读取，保留在途与预算等待核验"
 			t.ETA = nil
-			if err = s.store.SaveProRestockObservation(t); err != nil {
+			if err = s.saveRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 			continue
@@ -91,7 +91,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 					} else {
 						t.Cost = 0
 					}
-					if err = s.store.SaveProRestockObservation(t); err != nil {
+					if err = s.saveRestockObservation(t); err != nil {
 						return nil, 0, err
 					}
 					continue
@@ -108,7 +108,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 				t.Status, t.Stage, t.ETA = "failed", "dead", nil
 				t.UpdatedAt = now
 				t.Message = "已确认死号，不再计入供给；关联卡片禁止再次开通"
-				if err = s.store.SaveProRestockObservation(t); err != nil {
+				if err = s.saveRestockObservation(t); err != nil {
 					return nil, 0, err
 				}
 				continue
@@ -123,7 +123,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 		if waiting, err := s.trackRestockCardImport(t, profile); err != nil {
 			return nil, 0, err
 		} else if waiting {
-			if err = s.store.SaveProRestockObservation(t); err != nil {
+			if err = s.saveRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 			continue
@@ -162,7 +162,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Message = "已完成推送并进入合并／移出阶段，不再占用补货在途；当前可用容量以监控组为准"
 			// No readiness observation was made: do not invent ReadyAt and count
 			// the account's entire consumption lifetime as provisioning latency.
-			if err = s.store.SaveProRestockObservation(t); err != nil {
+			if err = s.saveRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 			continue
@@ -171,7 +171,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Status, t.ETA = "unknown", nil
 			t.UpdatedAt = now
 			t.Message = "账号已进入合并／移出，但原付款记录尚未核清，保留订单与在途；不承诺新增容量"
-			if err = s.store.SaveProRestockObservation(t); err != nil {
+			if err = s.saveRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 			continue
@@ -310,7 +310,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Message = firstNonEmpty(t.Message, "启动结果待核验，保留预留，避免重复发卡")
 		}
 		t.UpdatedAt = now
-		if err = s.store.SaveProRestockObservation(t); err != nil {
+		if err = s.saveRestockObservation(t); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -410,7 +410,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 		if !running && orderErr == nil && order.Status == "failed" && !review {
 			continue
 		}
-		t := restock.Task{Plan: "payment:" + profile.ProAuto.PlanCode, ID: profile.ProAuto.ID, Email: profile.Email, Status: "external", Stage: profile.ProAuto.Stage, OrderID: profile.ProAuto.OrderID, CreatedAt: profile.ProAuto.StartedAt, GroupID: c.GroupID, Binding: snap.Binding, Message: "手动／原定时任务在途，占用共用工作并发"}
+		t := restock.Task{ManagedExternally: true, Plan: "payment:" + profile.ProAuto.PlanCode, ID: profile.ProAuto.ID, Email: profile.Email, Status: "external", Stage: profile.ProAuto.Stage, OrderID: profile.ProAuto.OrderID, CreatedAt: profile.ProAuto.StartedAt, GroupID: c.GroupID, Binding: snap.Binding, Message: "手动／原定时任务在途，占用共用工作并发"}
 		if !running {
 			t.Status = "attention"
 			t.Message = "旧任务已停止但付款或就绪结果仍待核验，保留在途"
@@ -437,6 +437,11 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Message = "旧任务缺少原推送绑定，保留在途但不承诺当前池供给"
 		} else if profile.ProAuto.RestockBinding != snap.Binding {
 			continue
+		}
+		if !running {
+			if err := s.isolateRestockFailure(&t); err != nil {
+				return nil, 0, err
+			}
 		}
 		tasks = append(tasks, t)
 	}
@@ -465,7 +470,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 				t.ETA = nil
 				t.Message = "已超过预计到货时间；仍占在途，不承诺未来容量"
 				if t.DecisionID != "" {
-					_ = s.store.SaveProRestockObservation(t)
+					_ = s.saveRestockObservation(t)
 				}
 				continue
 			}
@@ -478,7 +483,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			}
 			queued++
 			if t.DecisionID != "" {
-				if err := s.store.SaveProRestockObservation(t); err != nil {
+				if err := s.saveRestockObservation(t); err != nil {
 					return nil, 0, err
 				}
 			}
@@ -487,7 +492,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 		eta := now.Add(time.Duration(remaining * float64(time.Minute)))
 		t.ETA = &eta
 		if t.DecisionID != "" {
-			if err := s.store.SaveProRestockObservation(t); err != nil {
+			if err := s.saveRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 		}
@@ -859,6 +864,9 @@ func (s *Server) dispatchProRestock(ctx context.Context, c restock.Config, p mod
 		}
 		s.startClaimedProRestock(workCtx, t, taskPay, card)
 		finish()
+		if latest, err := s.store.ProRestockTask(t.ID); err == nil {
+			_ = s.isolateRestockFailure(&latest)
+		}
 	}
 }
 
