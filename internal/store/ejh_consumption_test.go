@@ -66,7 +66,9 @@ func TestEJHConsumptionNotPushedRequiresCompletedMatchingFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var base, saved string
-	if err := s.db.QueryRow(`SELECT profile FROM mail_accounts WHERE email=?`, email).Scan(&base); err != nil {
+	// Start each clock case explicitly: successful order creation can already
+	// populate an activation source, which must not leak into legacy scenarios.
+	if err := s.db.QueryRow(`SELECT json_remove(profile,'$.pro_push_started_at','$.pro_push_started_source','$.pro_push_ended_at') FROM mail_accounts WHERE email=?`, email).Scan(&base); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.db.QueryRow(`SELECT profile FROM ejh_cases WHERE id=?`, o.Order.ID).Scan(&saved); err != nil {
@@ -88,6 +90,13 @@ func TestEJHConsumptionNotPushedRequiresCompletedMatchingFlow(t *testing.T) {
 		{"siwc binding", `{"pro_siwc":{}}`, false},
 		{"push target", `{"pro_push_downstream":{}}`, false},
 		{"push start", `{"pro_push_started_at":"2026-11-09T00:00:00Z"}`, false},
+		{"activation clock still requires review", `{"pro_push_started_at":"2026-11-09T00:00:00Z","pro_push_started_source":"activation"}`, false},
+		{"finalized activation still requires review", `{"pro_push_started_at":"2026-11-09T00:00:00Z","pro_push_started_source":"activation","pro_push_ended_at":"2026-11-09T01:00:00Z"}`, false},
+		{"activation clock with real push", `{"pro_push_started_at":"2026-11-09T00:00:00Z","pro_push_started_source":"activation","push_status":"completed","sub2_account_id":42}`, false},
+		{"activation clock with interrupted push", `{"pro_push_started_at":"2026-11-09T00:00:00Z","pro_push_started_source":"activation","pro_auto":{"steps":{"push":"interrupted"}}}`, false},
+		{"activation clock with saved consumption", `{"pro_push_started_at":"2026-11-09T00:00:00Z","pro_push_started_source":"activation","user_cost_downstream_identity":"42","user_cost_downstream_snapshot":0}`, false},
+		{"activation clock with pending destination", `{"pro_push_started_at":"2026-11-09T00:00:00Z","pro_push_started_source":"activation","pro_pending_push_target_id":"pending"}`, false},
+		{"source without activation timestamp", `{"pro_push_started_source":"activation","pro_push_ended_at":"2026-11-09T01:00:00Z"}`, false},
 		{"push ended", `{"pro_push_ended_at":"2026-11-09T00:00:00Z"}`, false},
 		{"snapshot identity", `{"cost_downstream_identity":"42"}`, false},
 		{"connection retained", `{"cost_connection_identity":"source"}`, false},
@@ -137,7 +146,10 @@ func TestEJHConsumptionNotPushedRequiresCompletedMatchingFlow(t *testing.T) {
 func TestEJHConsumptionNotPushedRevisionUpgradesExistingTrigger(t *testing.T) {
 	s := transferStore(t)
 	transferSource(t, s, "revision-consumption@example.com")
-	if _, err := s.db.Exec(`DROP TRIGGER ejh_display_mail_consumption_update`); err != nil {
+	if _, err := s.db.Exec(`DROP TRIGGER ejh_display_mail_consumption_update;
+	DROP TRIGGER ejh_display_mail_consumption_review_update;
+	CREATE TRIGGER ejh_display_mail_consumption_update AFTER UPDATE ON mail_accounts WHEN 0 BEGIN UPDATE display_revisions SET revision=revision+1 WHERE scope='ejh'; END;
+	CREATE TRIGGER ejh_display_mail_consumption_review_update AFTER UPDATE ON mail_accounts WHEN 0 BEGIN UPDATE display_revisions SET revision=revision+1 WHERE scope='ejh'; END;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.initializeEJHDisplayRevision(); err != nil {
@@ -163,6 +175,9 @@ func TestEJHConsumptionNotPushedRevisionUpgradesExistingTrigger(t *testing.T) {
 	}
 	change(`{"pro_auto":{"status":"completed"}}`, true)
 	change(`{"quota_status":"checked"}`, false)
+	change(`{"pro_push_started_at":"2026-11-09T00:00:00Z"}`, true)
+	change(`{"pro_push_started_source":"activation"}`, true)
+	change(`{"pro_push_ended_at":"2026-11-09T01:00:00Z"}`, false)
 	change(`{"pro_auto":{"updated_at":"2026-11-11T01:00:00Z"}}`, false)
 	change(`{"sub2_account_id":42}`, true)
 	change(`{"sub2_account_id":43}`, false)

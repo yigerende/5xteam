@@ -26,6 +26,10 @@ func consumptionReviewFixture(t *testing.T) (*Store, ejh.Case, string) {
 	if _, err := s.db.Exec(`UPDATE mail_accounts SET profile=json_set(profile,'$.pro_auto',json('{"id":"flow","order_id":"interrupted-order","status":"completed","stage":"merchant","steps":{"push":"interrupted"},"stage_times":{"push:running":"2026-11-12T23:02:14+08:00"}}')) WHERE email=?`, email); err != nil {
 		t.Fatal(err)
 	}
+	// Activation and final-stage clocks exist even when no push ever succeeded.
+	if _, err := s.db.Exec(`UPDATE mail_accounts SET profile=json_set(profile,'$.pro_push_started_at','2026-11-12T23:00:00+08:00','$.pro_push_started_source','activation','$.pro_push_ended_at','2026-11-13T06:00:00+08:00') WHERE email=?`, email); err != nil {
+		t.Fatal(err)
+	}
 	rows, err := s.EJHCases()
 	if err != nil || len(rows) != 1 {
 		t.Fatal(rows, err)

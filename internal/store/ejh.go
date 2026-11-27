@@ -577,6 +577,9 @@ const ejhCaseOrderProjection = `json_object('updated_at',json_extract(o.profile,
 // Only a retained, completed flow with no evidence of downstream use qualifies.
 // Missing/deleted accounts, running flows and prior pushes remain unknown. This
 // scalar projection reads no credentials or event logs and adds no per-row query.
+// Activation starts the duration clock before a downstream account exists.
+// Finishing an unpushed flow also stops that clock; neither timestamp alone
+// proves a push. Legacy clocks without an explicit source stay conservative.
 const ejhConsumptionNoSourceProjection = `(
  COALESCE(json_extract(m.profile,'$.pro_auto.status'),'')='completed'
  AND COALESCE(json_extract(m.profile,'$.pro_workflow_running'),0)=0
@@ -588,8 +591,10 @@ const ejhConsumptionNoSourceProjection = `(
  AND json_extract(m.profile,'$.vm2api') IS NULL
  AND json_extract(m.profile,'$.pro_siwc') IS NULL
  AND json_extract(m.profile,'$.pro_push_downstream') IS NULL
- AND json_extract(m.profile,'$.pro_push_started_at') IS NULL
- AND json_extract(m.profile,'$.pro_push_ended_at') IS NULL
+ AND (
+  (json_extract(m.profile,'$.pro_push_started_at') IS NULL AND json_extract(m.profile,'$.pro_push_ended_at') IS NULL)
+  OR (COALESCE(json_extract(m.profile,'$.pro_push_started_source'),'')='activation' AND json_extract(m.profile,'$.pro_push_started_at') IS NOT NULL)
+ )
  AND COALESCE(json_extract(m.profile,'$.cost_provider'),'')=''
  AND COALESCE(json_extract(m.profile,'$.cost_connection_identity'),'')=''
  AND COALESCE(json_extract(m.profile,'$.cost_downstream_identity'),'')=''
@@ -603,6 +608,8 @@ const ejhConsumptionNoSourceProjection = `(
 // A started step alone cannot establish whether the downstream create succeeded.
 // Only an explicit audited review can classify interrupted steps without erasing them.
 const ejhConsumptionNotPushedProjection = `(` + ejhConsumptionNoSourceProjection + `
+ AND json_extract(m.profile,'$.pro_push_started_at') IS NULL
+ AND json_extract(m.profile,'$.pro_push_ended_at') IS NULL
  AND COALESCE(json_extract(m.profile,'$.pro_auto.stage'),'')<>'push'
  AND json_extract(m.profile,'$.pro_auto.steps.push') IS NULL
  AND json_extract(m.profile,'$.pro_auto.stage_times.push') IS NULL
