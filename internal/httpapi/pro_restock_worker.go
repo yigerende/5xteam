@@ -63,7 +63,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Status = "attention"
 			t.Message = "账号无法读取，保留在途与预算等待核验"
 			t.ETA = nil
-			if err = s.saveRestockObservation(t); err != nil {
+			if err = s.store.SaveProRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 			continue
@@ -91,7 +91,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 					} else {
 						t.Cost = 0
 					}
-					if err = s.saveRestockObservation(t); err != nil {
+					if err = s.store.SaveProRestockObservation(t); err != nil {
 						return nil, 0, err
 					}
 					continue
@@ -108,7 +108,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 				t.Status, t.Stage, t.ETA = "failed", "dead", nil
 				t.UpdatedAt = now
 				t.Message = "已确认死号，不再计入供给；关联卡片禁止再次开通"
-				if err = s.saveRestockObservation(t); err != nil {
+				if err = s.store.SaveProRestockObservation(t); err != nil {
 					return nil, 0, err
 				}
 				continue
@@ -123,7 +123,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 		if waiting, err := s.trackRestockCardImport(t, profile); err != nil {
 			return nil, 0, err
 		} else if waiting {
-			if err = s.saveRestockObservation(t); err != nil {
+			if err = s.store.SaveProRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 			continue
@@ -162,7 +162,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Message = "已完成推送并进入合并／移出阶段，不再占用补货在途；当前可用容量以监控组为准"
 			// No readiness observation was made: do not invent ReadyAt and count
 			// the account's entire consumption lifetime as provisioning latency.
-			if err = s.saveRestockObservation(t); err != nil {
+			if err = s.store.SaveProRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 			continue
@@ -171,7 +171,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Status, t.ETA = "unknown", nil
 			t.UpdatedAt = now
 			t.Message = "账号已进入合并／移出，但原付款记录尚未核清，保留订单与在途；不承诺新增容量"
-			if err = s.saveRestockObservation(t); err != nil {
+			if err = s.store.SaveProRestockObservation(t); err != nil {
 				return nil, 0, err
 			}
 			continue
@@ -310,7 +310,7 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 			t.Message = firstNonEmpty(t.Message, "启动结果待核验，保留预留，避免重复发卡")
 		}
 		t.UpdatedAt = now
-		if err = s.saveRestockObservation(t); err != nil {
+		if err = s.store.SaveProRestockObservation(t); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -318,6 +318,13 @@ func (s *Server) restockTasksContext(ctx context.Context, snap restock.Snapshot,
 	// even when the original payment still needs a separate financial review.
 	if err := s.store.ReconcileProRestockDeliveries(tasks); err != nil {
 		return nil, 0, err
+	}
+	// Reconcile the whole observed chain before isolating failures, so a
+	// completed replacement keeps its delivery link even if its parent was deleted.
+	for i := range tasks {
+		if err := s.isolateRestockFailure(&tasks[i]); err != nil {
+			return nil, 0, err
+		}
 	}
 	lead := float64(c.LeadMinutes)
 	if len(durations) >= c.LeadSamples {

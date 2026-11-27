@@ -18,6 +18,13 @@ func (s *Server) isolateRestockFailure(t *restock.Task) error {
 	if t.Status != "attention" && t.Status != "unknown" {
 		return nil
 	}
+	// A preparation that provably never issued a card or submitted payment
+	// keeps its existing safe-failure path and releases the unused budget.
+	if profile, _, err := s.store.MailAccountCredential(t.Email); err == nil {
+		if finished, err := s.finishUnsubmittedRestockPreparation(t, profile); err != nil || finished {
+			return err
+		}
+	}
 	s.proAutoMu.Lock()
 	defer s.proAutoMu.Unlock()
 	s.proMergeMu.Lock()

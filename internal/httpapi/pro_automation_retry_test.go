@@ -128,8 +128,8 @@ func TestProAutoSameAccountRetries(t *testing.T) {
 				}
 				cfg, _, _, _ := st.ProSettings()
 				tasks, _, err := s.restockTasks(restock.Snapshot{Binding: restockBinding(cfg), GroupID: 1}, cfg, restock.Config{GroupID: 1, LeadMinutes: 5, LeadSamples: 2})
-				if err != nil || len(tasks) != 1 || tasks[0].Status != "attention" || tasks[0].Predictable() {
-					t.Fatal("review was silently replaced or counted as capacity", tasks, err)
+				if err != nil || len(tasks) != 1 || !tasks[0].AutoIsolated || tasks[0].Active() || tasks[0].Predictable() {
+					t.Fatal("review still blocks restock or was counted as capacity", tasks, err)
 				}
 				run := model.ProScheduleRun{ID: "risk-run", Status: "running", StartedAt: time.Now(), Tasks: []model.ProScheduleTask{{Email: email, Status: "running"}}}
 				if !s.reconcileProSchedule(&run) || run.Tasks[0].Status != "failed" {
@@ -181,7 +181,7 @@ func TestProRestockRetryRecoversCurrentUnlinkedOrder(t *testing.T) {
 	}
 	settings, _, _, _ := st.ProSettings()
 	tracked, _, err := s.restockTasks(restock.Snapshot{}, settings, c)
-	if err != nil || len(tracked) != 1 || tracked[0].Status != "unknown" || tracked[0].OrderID != state.PaymentOrderID() {
+	if err != nil || len(tracked) != 1 || !tracked[0].AutoIsolated || tracked[0].Active() || tracked[0].OrderID != state.PaymentOrderID() {
 		t.Fatal("old failed order hid the retry's uncertain payment", tracked, err)
 	}
 	saved, _, _ := st.MailAccountCredential(email)

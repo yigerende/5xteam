@@ -146,7 +146,7 @@ func TestProNexovccRestockCanRecoverBeforeWorkflowCreated(t *testing.T) {
 			windowTick(t, s)
 			waitRestockPreparationIdle(t, s)
 			tasks, _ := s.store.ProRestockTasks()
-			wantStatus := "attention"
+			wantStatus := "failed"
 			if mode == "import_pending" {
 				wantStatus = "waiting_card"
 			}
@@ -182,9 +182,10 @@ func TestProNexovccRestockCanRecoverBeforeWorkflowCreated(t *testing.T) {
 					t.Fatal("safe preparation failure was not released with its original cause", tasks)
 				}
 				message = tasks[0].Message
-			} else if tasks[0].Message != message {
+			} else if !tasks[0].AutoIsolated || tasks[0].Active() || !strings.Contains(tasks[0].Message, message) {
 				t.Fatal("startup cause overwritten", tasks[0].Message, message)
 			}
+			message = tasks[0].Message
 			r := httptest.NewRequest("GET", "/", nil)
 			r.SetPathValue("email", email)
 			w := httptest.NewRecorder()

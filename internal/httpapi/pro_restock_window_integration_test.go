@@ -184,7 +184,7 @@ func TestProRestockWindowFullFlowAndPaidRecovery(t *testing.T) {
 	}
 }
 
-func TestProRestockWindowUnknownOpenAndPaymentHoldBatch(t *testing.T) {
+func TestProRestockWindowUnknownOpenAndPaymentIsolateWithoutRepeating(t *testing.T) {
 	for _, failure := range []string{"open", "payment"} {
 		t.Run(failure, func(t *testing.T) {
 			var purchases atomic.Int32
@@ -204,10 +204,10 @@ func TestProRestockWindowUnknownOpenAndPaymentHoldBatch(t *testing.T) {
 			}
 			tasks, _ := s.store.ProRestockTasks()
 			limits, _ := s.store.ProRestockLimits(time.Now())
-			if len(tasks) != 1 || !tasks[0].Active() || tasks[0].CardProvider != "nexovcc" || limits.DayCost != 25 || f.opens.Load() != 1 {
-				t.Fatal("unknown result released/repeated batch", tasks, limits, f.opens.Load())
+			if len(tasks) != 1 || tasks[0].Active() || !tasks[0].AutoIsolated || tasks[0].CardProvider != "nexovcc" || limits.DayCost != 25 || f.opens.Load() != 1 {
+				t.Fatal("unknown result blocked/repeated batch", tasks, limits, f.opens.Load())
 			}
-			if failure == "open" && purchases.Load() != 0 || failure == "payment" && (purchases.Load() != 1 || tasks[0].Status != "unknown") {
+			if failure == "open" && purchases.Load() != 0 || failure == "payment" && purchases.Load() != 1 {
 				t.Fatal("unsafe payment count", purchases.Load(), tasks)
 			}
 		})

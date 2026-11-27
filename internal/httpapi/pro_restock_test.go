@@ -113,6 +113,12 @@ func TestProRestockFullAutomationAndIndividualReady(t *testing.T) {
 	})
 	configureProAutoFixture(t, s)
 	s.proAutoCancel() // drive deterministic ticks; production uses the background monitor
+	s.proAutoWG.Wait()
+	settings, password, _, _ := st.ProSettings()
+	settings.RetryCount, settings.RetryIntervalSeconds = 1, 1
+	if _, err := st.SaveProSettings(settings, password, ""); err != nil {
+		t.Fatal(err)
+	}
 	c := restock.DefaultConfig()
 	c.Enabled = true
 	c.Mode = "auto"
@@ -140,7 +146,7 @@ func TestProRestockFullAutomationAndIndividualReady(t *testing.T) {
 		if _, e := rpc("pro_recharge", map[string]any{"exit_ip": "198.51.100.8", "session": map[string]any{"access_token": proAutoToken(email, "initial"), "user": map[string]any{"email": email}, "account": map[string]any{"id": "personal-id"}}}); e != nil {
 			return e
 		}
-		if failAuthorization.Load() {
+		if failAuthorization.CompareAndSwap(true, false) {
 			return errors.New("lost login after confirmed payment")
 		}
 		_, e := rpc("pro_tokens", map[string]any{"exit_ip": "198.51.100.8", "tokens": map[string]any{"access_token": proAutoToken(email, "new"), "refresh_token": "new-rt"}})
@@ -161,13 +167,7 @@ func TestProRestockFullAutomationAndIndividualReady(t *testing.T) {
 	failAuthorization.Store(true)
 	s.tickProRestock(context.Background(), true)
 	profile := waitProAutoFinished(t, s, email)
-	if profile.ProAuto.Status != "failed" || purchases.Load() != 1 || pushes.Load() != 0 {
-		t.Fatalf("expected paid authorization interruption: %+v", profile.ProAuto)
-	}
-	failAuthorization.Store(false)
-	// Reconcile the successful original order and only resume login/authorization.
-	s.tickProRestock(context.Background(), true)
-	profile = waitProAutoFinished(t, s, email)
+	// The configured recovery resumes authorization without another payment.
 	if profile.ProAuto.Status != "waiting_quota" || purchases.Load() != 1 || pushes.Load() != 1 {
 		t.Fatalf("full automation not used: %+v purchases=%d pushes=%d", profile.ProAuto, purchases.Load(), pushes.Load())
 	}
@@ -258,7 +258,7 @@ func TestProRestockUnknownPaymentRetainsOriginalOrder(t *testing.T) {
 	}
 	tasks, _ := st.ProRestockTasks()
 	limits, _ := st.ProRestockLimits(time.Now())
-	if len(tasks) != 1 || tasks[0].Status != "unknown" || tasks[0].OrderID != original || tasks[0].ETA != nil || limits.DayCost != 25 || purchases.Load() != 1 {
-		t.Fatalf("unknown order released or repaid: %+v %+v purchases=%d", tasks, limits, purchases.Load())
+	if len(tasks) != 1 || !tasks[0].AutoIsolated || tasks[0].Active() || tasks[0].OrderID != original || tasks[0].ETA != nil || limits.DayCost != 25 || purchases.Load() != 1 {
+		t.Fatalf("unknown order lost or repaid: %+v %+v purchases=%d", tasks, limits, purchases.Load())
 	}
 }

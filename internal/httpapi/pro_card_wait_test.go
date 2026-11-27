@@ -66,7 +66,7 @@ func TestCardPreparationLockBoundedAndCancelled(t *testing.T) {
 	}
 }
 
-func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterOpeningReview(t *testing.T) {
+func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterIssuerCooldown(t *testing.T) {
 	s, issued, paid, email := allocationFixture(t)
 	s.proAutoCancel()
 	s.proAutoWG.Wait()
@@ -77,7 +77,7 @@ func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterOpeningReview(t *testi
 	if _, err := s.store.SaveProSettings(p, "test-password", ""); err != nil {
 		t.Fatal(err)
 	}
-	op := ejh.Operation{ID: "unconfirmed-opening", Method: "open", Status: "unknown", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	op := ejh.Operation{ID: "failed-opening", Method: "open", Automatic: true, Status: "failed", Error: "issuer unavailable", CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	if err := s.store.EJHPut("operation", op.ID, op); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestEJHPreparationWaitKeepsSameRestockAndResumesAfterOpeningReview(t *testi
 	if again.Status != "reserved" {
 		t.Fatal("monitor terminalized hold", again)
 	}
-	// Test-only issuer evidence confirms the original opening was not executed.
+	// Test-only issuer evidence resolves the failed operation and its cooldown.
 	// The same queued task may now issue once; old payment occupancy stays held.
 	op.Status, op.Resolution = "failed", "not_executed"
 	if err = s.store.EJHPut("operation", op.ID, op); err != nil {

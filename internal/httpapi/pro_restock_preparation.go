@@ -15,7 +15,7 @@ func (s *Server) finishUnsubmittedRestockPreparation(t *restock.Task, p model.Ma
 	}
 	s.proAutoMu.Lock()
 	defer s.proAutoMu.Unlock()
-	running := s.proRestockStartJobs["restock-preparation-worker"] != nil || s.proRestockStartJobs[t.ID] != nil || s.proAutoJobs[p.Email] != nil
+	running := s.proRestockStartJobs[t.ID] != nil || s.proAutoJobs[p.Email] != nil
 	if running || s.proLoginAlreadyRunning(p.Email) {
 		return false, nil
 	}
