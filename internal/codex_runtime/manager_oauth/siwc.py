@@ -77,7 +77,7 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
         if (getattr(self, "oauth_authorize_source", "") == "siwc"
                 and (parsed.scheme, parsed.netloc) == ("https", "auth.openai.com")
                 and parsed.path in {"/api/accounts/session/select", "/api/accounts/password/verify",
-                                    "/api/accounts/mfa/verify"}):
+                                    "/api/accounts/mfa/verify", "/api/accounts/email-otp/validate"}):
             try:
                 data = response.json()
             except (ValueError, TypeError):
@@ -102,14 +102,20 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
         target = self.extract_continue_url(step)
         if not target and page == "sign_in_with_chatgpt_consent":
             target = ISSUER + "/sign-in-with-chatgpt/consent"
+        if not target and page == "email_otp_send":
+            target = ISSUER + "/api/accounts/email-otp/send"
         target = target or fallback
         path = urlsplit(urljoin(ISSUER, target)).path if target else ""
         self.raise_if_passkey_or_challenge(step, target)
+        if page == "email_otp_send" or path == "/api/accounts/email-otp/send":
+            self.siwc_prepare_email(before_send=True)
+            return target or ISSUER + "/api/accounts/email-otp/send"
         if page in {"login", "login_identifier"} or path in {"/log-in", "/log-in/", "/login"}:
             raise upstream.LoginFlowError("SIWC 原会话要求重新登录，需要恢复已付款授权",
                                          code="siwc_session_expired")
         kind = "password" if page == "login_password" or path == "/log-in/password" else (
-            "totp" if page == "mfa_challenge" or path.startswith("/mfa-challenge") else "")
+            "totp" if page == "mfa_challenge" or path.startswith("/mfa-challenge") else (
+            "email" if page == "email_otp_verification" or path == "/email-verification" else ""))
         if not kind:
             if target:
                 parsed = urlsplit(target)
@@ -126,8 +132,28 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
             raise upstream.LoginFlowError("SIWC 身份验证后仍重复要求验证，需要恢复已付款授权",
                                          code="siwc_session_expired")
         self._siwc_challenges.add(kind)
-        self.log("siwc_identity", "正在补充身份验证：" + ("提交密码" if kind == "password" else "提交 2FA"))
+        self.log("siwc_identity", "正在补充身份验证：" + {
+            "password": "提交密码", "totp": "提交 2FA", "email": "获取邮箱验证码"}[kind])
         self._siwc_next_step = None
+        if kind == "email":
+            self.siwc_prepare_email()
+            self.log("waiting_code", "SIWC 授权要求邮箱验证码，正在通过账号接码链接取码")
+            code = upstream.fetch_login_verification_code(
+                self.payload, since=self._siwc_email_issued_after, attempts=3, delay=30,
+                initial_wait=16, fallback_to_baseline=True)
+            if not code:
+                raise upstream.LoginFlowError("SIWC 邮箱验证码获取超时，请检查账号接码链接",
+                                             code="siwc_email_code_timeout", retryable=True)
+            bridge.protect_code(code)
+            self.sentinel_token = upstream.generate_openai_sentinel_token(self.device_id, "email_verification", self.proxy_url)
+            if not self.sentinel_token:
+                raise upstream.LoginFlowError("SIWC 邮箱验证校验令牌生成失败", code="siwc_sentinel_failed")
+            bridge.protect_code(self.sentinel_token)
+            # Keep the whole response: OTP may lead to consent, another factor,
+            # a callback or a successful response requiring authorize revisiting.
+            result = upstream.ChatGPTProtocolLogin.submit_modern_code(self, code)
+            self._siwc_verified = True
+            return self.siwc_identity_next(result)
         if kind == "password":
             password = str(self.payload.get("password") or self.payload.get("gpt_password") or "")
             if not password:
@@ -147,14 +173,34 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
             raise upstream.LoginFlowError("SIWC 要求 2FA，但账号未配置 2FA 密钥", code="totp_secret_missing")
         # Shared factor selection, TOTP generation and verification; the response
         # is retained by request() so a further page is never silently discarded.
-        next_url = self.complete_totp_challenge(step, secret)
+        # SIWC owns continuation dispatch. The login-only mixin would consume
+        # a following email page with the first login's timestamp and guards.
+        next_url = upstream.ChatGPTProtocolLogin.complete_totp_challenge(self, step, secret)
         self._siwc_verified = True
         return self.siwc_identity_next(self._siwc_next_step, next_url)
+
+    def siwc_prepare_email(self, before_send=False):
+        if not upstream.login_payload_has_pickup_link(self.payload):
+            raise upstream.LoginFlowError("SIWC 授权要求邮箱验证码，请在邮件管理为该账号补充接码链接",
+                                         code="siwc_email_pickup_missing")
+        self.payload["_email_code_required"] = True
+        if self._siwc_email_prepared:
+            return
+        self._siwc_email_prepared = True
+        # A direct verification page has already sent its code. Taking a new
+        # baseline there could incorrectly exclude the very code we need.
+        self._siwc_email_issued_after = self._siwc_started_at
+        if before_send:
+            self.payload["_directurl_baseline_codes"] = sorted(upstream.prime_directurl_baseline(self.payload))
+            self._siwc_email_issued_after = time.time()
 
     def submit_mfa_verify(self, factor_id, code):
         data = super().submit_mfa_verify(factor_id, code)
         if data.get("error"):
             raise upstream.LoginFlowError("SIWC 2FA 验证未通过", code="siwc_identity_failed")
+        if not self.extract_continue_url(data) and self.extract_page_type(data) == "email_otp_send":
+            data = {**data, "continue_url": ISSUER + "/api/accounts/email-otp/send"}
+            self._siwc_next_step = data
         if not self.extract_continue_url(data) and self.extract_page_type(data) == "sign_in_with_chatgpt_consent":
             data = {**data, "continue_url": ISSUER + "/sign-in-with-chatgpt/consent"}
             self._siwc_next_step = data
@@ -220,6 +266,9 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
         self._siwc_challenges = set()
         self._siwc_verified = False
         self._siwc_revisited = False
+        self._siwc_started_at = time.time()
+        self._siwc_email_prepared = False
+        self._siwc_email_send_visited = False
         current = self.normalize_auth_url(start_url)
         previous = self.auth_url
         chose_account = False
@@ -238,6 +287,12 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
                 raise RuntimeError("SIWC 授权跳转地址无效")
             if parsed.path == "/api/accounts/authorize" and current != self.auth_url:
                 raise RuntimeError("SIWC 续验证不能替换原授权参数")
+            if parsed.path == "/api/accounts/email-otp/send":
+                if self._siwc_email_send_visited:
+                    raise upstream.LoginFlowError("SIWC 邮箱发码后仍返回发码步骤，需要恢复已付款授权",
+                                                 code="siwc_session_expired")
+                self._siwc_email_send_visited = True
+                self.siwc_prepare_email(before_send=True)
             if manifest_sync:
                 if current in synced_urls or len(synced_urls) >= 3:
                     raise RuntimeError("SIWC 会话同步中转循环或次数超限")
@@ -268,6 +323,14 @@ class SIWCProtocolLogin(ProjectProtocolLogin):
                     except (ValueError, TypeError):
                         page_data = None
                     next_url = self.siwc_identity_next(page_data if isinstance(page_data, dict) and self.extract_page_type(page_data) else self._siwc_next_step, current)
+                elif parsed.path in {"/email-verification", "/api/accounts/email-otp/send"}:
+                    try:
+                        page_data = response.json()
+                    except (ValueError, TypeError):
+                        page_data = {}
+                    next_url = self.siwc_identity_next(page_data if isinstance(page_data, dict) and (
+                        self.extract_page_type(page_data) or self.extract_continue_url(page_data)) else {
+                            "page": {"type": "email_otp_verification"}})
                 elif parsed.path == "/sign-in-with-chatgpt/consent":
                     next_url = self.grant_siwc_consent(current)
                 elif self.is_workspace_or_consent_url(current):

@@ -57,6 +57,11 @@ export function parseMailAccountText(rawValue) {
     const domain = emailDomain(email)
     if (!domain) throw new Error(`第 ${index + 1} 行邮箱无效`)
 
+    // Four-field ChatGPT credentials with a pickup link, including Outlook.
+    // Keep separators inside the URL (e.g. a pickup token) intact.
+    if (parts.length >= 4 && isHTTPURL(parts[3]) && !isHTTPURL(parts[1]) && !isHTTPURL(parts[2])) {
+      return { email, gpt_password: parts[1], totp_secret: parts[2], pickup_url: rawParts.slice(3).join(separator).trim() }
+    }
     // Link-based mailboxes may optionally put a password/query code before the URL.
     const urlIndex = parts.findIndex((item, partIndex) => partIndex > 0 && isHTTPURL(item))
     if (urlIndex > 0) {

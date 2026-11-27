@@ -1888,7 +1888,7 @@ onBeforeUnmount(() => document.removeEventListener("click", closeActionMenu));
             rows="9"
             spellcheck="false"
             required
-            placeholder="iCloud：邮箱----接码链接&#10;iCloud：邮箱----密码或查询码----接码链接&#10;带临时 AT：邮箱----接码链接----Session JSON&#10;Outlook：邮箱----邮箱密码----client_id----邮箱RT&#10;TOTP：邮箱----ChatGPT密码----2FA密钥&#10;TOTP + AT：邮箱----ChatGPT密码----2FA密钥----AT"
+            placeholder="密码 + 2FA + 接码：邮箱----ChatGPT密码----2FA密钥----接码链接&#10;iCloud：邮箱----接码链接&#10;iCloud：邮箱----密码或查询码----接码链接&#10;带临时 AT：邮箱----接码链接----Session JSON&#10;Outlook：邮箱----邮箱密码----client_id----邮箱RT&#10;TOTP：邮箱----ChatGPT密码----2FA密钥&#10;TOTP + AT：邮箱----ChatGPT密码----2FA密钥----AT"
           ></textarea
           ><small
             >支持 msg.linlanyu.com 的 /messages/ 链接；如果末尾追加 ChatGPT

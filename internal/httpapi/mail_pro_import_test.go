@@ -23,7 +23,7 @@ func TestMailImportDirectProOwnershipAndReturn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	body := `{"enter_pro":true,"group":"chosen","accounts":[{"email":" NEW@example.com ","gpt_password":"password-fixture","totp_secret":"totp-fixture","access_token":"at-fixture"},{"email":"existing@example.com","access_token":"updated-at"},{"email":"invalid"}]}`
+	body := `{"enter_pro":true,"group":"chosen","accounts":[{"email":" NEW@example.com ","gpt_password":"password-fixture","totp_secret":"totp-fixture","pickup_url":"https://mail.example/private-pickup","access_token":"at-fixture"},{"email":"existing@example.com","access_token":"updated-at"},{"email":"invalid"}]}`
 	response := httptest.NewRecorder()
 	server.importMailAccounts(response, httptest.NewRequest(http.MethodPost, "/api/mail/accounts/import", strings.NewReader(body)))
 	if response.Code != http.StatusOK {
@@ -41,7 +41,7 @@ func TestMailImportDirectProOwnershipAndReturn(t *testing.T) {
 	if envelope.Data.Imported != 1 || envelope.Data.Updated != 1 || envelope.Data.Skipped != 1 || envelope.Data.EnteredPro != 2 {
 		t.Fatalf("unexpected counts: %+v", envelope.Data)
 	}
-	if strings.Contains(response.Body.String(), "at-fixture") || strings.Contains(response.Body.String(), "password-fixture") {
+	if strings.Contains(response.Body.String(), "at-fixture") || strings.Contains(response.Body.String(), "password-fixture") || strings.Contains(response.Body.String(), "private-pickup") {
 		t.Fatal("response leaked credentials")
 	}
 	mail := s.MailAccountsByManagementScope("mail")
@@ -58,7 +58,7 @@ func TestMailImportDirectProOwnershipAndReturn(t *testing.T) {
 	if p.ManagementScope != "pro" || p.ProManagedAt == nil || p.Group != "chosen" || p.ProAuto.ID != "" || p.ProWorkflowRunning {
 		t.Fatalf("unexpected profile: %+v", p)
 	}
-	if credentials.AccessToken != "at-fixture" || credentials.GptPassword != "password-fixture" || credentials.TotpSecret != "totp-fixture" {
+	if credentials.AccessToken != "at-fixture" || credentials.GptPassword != "password-fixture" || credentials.TotpSecret != "totp-fixture" || credentials.PickupURL != "https://mail.example/private-pickup" {
 		t.Fatal("import did not preserve supplied credentials")
 	}
 	if len(s.FreeAccounts()) != 0 {
